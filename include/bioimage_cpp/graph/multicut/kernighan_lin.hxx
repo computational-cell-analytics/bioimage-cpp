@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bioimage_cpp/detail/edge_hash.hxx"
+#include "bioimage_cpp/detail/indexed_heap.hxx"
 #include "bioimage_cpp/detail/union_find.hxx"
 #include "bioimage_cpp/graph/multicut/objective.hxx"
 
@@ -65,43 +66,21 @@ inline std::vector<std::vector<std::uint64_t>> build_cluster_to_nodes(
     return result;
 }
 
-// Scratch buffers reused across every chain in one outer iteration.
-// All vectors are sized to the number of graph nodes once. Each chain only
-// reads and writes entries for nodes it touches, so it must reset its touched
-// entries (via the queue node list) at the end of the chain.
+// Scratch flag used only during the initial gain scan, so the chain can tell
+// whether each neighbor belongs to the current bipartition. After init the
+// addressable heap is the source of truth (heap.contains(u) replaces the
+// stale-tracking arrays the old hand-rolled heap required).
 struct ChainBuffers {
-    std::vector<char> in_pair;            // 1 while the node belongs to the chain's queue
-    std::vector<double> gain;             // current gain of moving the node to the other side
-    std::vector<std::uint64_t> version;   // monotonic gain version; heap entries pin a version
-    std::vector<char> locked;             // 1 once the node has been popped during the chain
-    std::vector<std::uint64_t> tentative; // tentative cluster id as the chain progresses
+    std::vector<char> in_pair;
 
-    explicit ChainBuffers(const std::size_t n_nodes)
-        : in_pair(n_nodes, 0),
-          gain(n_nodes, 0.0),
-          version(n_nodes, 0),
-          locked(n_nodes, 0),
-          tentative(n_nodes, 0) {}
-};
-
-struct HeapEntry {
-    double gain;
-    std::uint64_t node;
-    std::uint64_t version;
-
-    bool operator<(const HeapEntry &other) const {
-        return gain < other.gain;
-    }
+    explicit ChainBuffers(const std::size_t n_nodes) : in_pair(n_nodes, 0) {}
 };
 
 struct ChainScratch {
     std::vector<std::uint64_t> queue_nodes;
-    std::vector<HeapEntry> heap;
+    bioimage_cpp::detail::DenseIndexedHeap<double> heap;
 
-    void clear() {
-        queue_nodes.clear();
-        heap.clear();
-    }
+    explicit ChainScratch(const std::size_t n_nodes) : heap(n_nodes) {}
 };
 
 // Run a Kernighan-Lin move-chain on the bipartition (cluster_a, cluster_b).
@@ -126,8 +105,11 @@ inline double run_chain(
         return 0.0;
     }
 
-    scratch.clear();
     auto &queue_nodes = scratch.queue_nodes;
+    auto &heap = scratch.heap;
+    queue_nodes.clear();
+    heap.clear();
+
     const auto &stale_a = cluster_to_nodes[static_cast<std::size_t>(cluster_a)];
     const auto &stale_b = cluster_to_nodes[static_cast<std::size_t>(cluster_b)];
     queue_nodes.reserve(stale_a.size() + stale_b.size());
@@ -159,11 +141,6 @@ inline double run_chain(
     }
 
     for (const auto v : queue_nodes) {
-        const auto v_label = labels[static_cast<std::size_t>(v)];
-        bufs.version[static_cast<std::size_t>(v)] = 0;
-        bufs.locked[static_cast<std::size_t>(v)] = 0;
-        bufs.tentative[static_cast<std::size_t>(v)] = v_label;
-
         double w_to_a = 0.0;
         double w_to_b = 0.0;
         for (const auto adj : graph.node_adjacency(v)) {
@@ -177,16 +154,10 @@ inline double run_chain(
                 w_to_b += c;
             }
         }
-        bufs.gain[static_cast<std::size_t>(v)] =
-            (v_label == cluster_a) ? (w_to_b - w_to_a) : (w_to_a - w_to_b);
+        const auto v_label = labels[static_cast<std::size_t>(v)];
+        const double gain_v = (v_label == cluster_a) ? (w_to_b - w_to_a) : (w_to_a - w_to_b);
+        heap.push(static_cast<std::size_t>(v), gain_v);
     }
-
-    auto &heap = scratch.heap;
-    heap.reserve(queue_nodes.size() * 4);
-    for (const auto v : queue_nodes) {
-        heap.push_back({bufs.gain[static_cast<std::size_t>(v)], v, 0});
-    }
-    std::make_heap(heap.begin(), heap.end());
 
     struct Move {
         std::uint64_t node;
@@ -201,30 +172,19 @@ inline double run_chain(
     // The chain keeps running through negative moves because a later prefix
     // can still recover. In practice deep negative runs almost never improve
     // best_cumulative, so cap the lookahead at a small constant after each new
-    // best — this matches the heuristic nifty uses and is the dominant runtime
-    // saving for large clusters.
+    // best.
     constexpr std::size_t max_steps_without_improvement = 32;
     std::size_t steps_since_best = 0;
 
     while (!heap.empty()) {
-        const auto top = heap.front();
-        std::pop_heap(heap.begin(), heap.end());
-        heap.pop_back();
-        if (bufs.locked[static_cast<std::size_t>(top.node)]) {
-            continue;
-        }
-        if (top.version != bufs.version[static_cast<std::size_t>(top.node)]) {
-            continue;
-        }
-
-        const auto v = top.node;
-        const auto old_label = bufs.tentative[static_cast<std::size_t>(v)];
+        const auto top = heap.pop();
+        const auto v = static_cast<std::uint64_t>(top.key);
+        const auto gain_v = top.priority;
+        const auto old_label = labels[static_cast<std::size_t>(v)];
         const auto new_label = (old_label == cluster_a) ? cluster_b : cluster_a;
 
-        bufs.tentative[static_cast<std::size_t>(v)] = new_label;
-        cumulative += bufs.gain[static_cast<std::size_t>(v)];
+        cumulative += gain_v;
         chain.push_back({v, new_label});
-        bufs.locked[static_cast<std::size_t>(v)] = 1;
 
         if (cumulative > best_cumulative + epsilon) {
             best_cumulative = cumulative;
@@ -238,28 +198,17 @@ inline double run_chain(
         }
 
         for (const auto adj : graph.node_adjacency(v)) {
-            const auto u = adj.node;
-            if (!bufs.in_pair[static_cast<std::size_t>(u)] || bufs.locked[static_cast<std::size_t>(u)]) {
+            const auto u_key = static_cast<std::size_t>(adj.node);
+            if (!heap.contains(u_key)) {
                 continue;
             }
+            // u is in the heap, so it's an unmoved member of the current
+            // bipartition. labels[u] is therefore u's actual side (chain
+            // moves are tentative — they only mutate `labels` on commit).
             const auto c = costs[static_cast<std::size_t>(adj.edge)];
-            const auto u_label = bufs.tentative[static_cast<std::size_t>(u)];
-            // v moved from old_label to new_label. From u's perspective the
-            // edge v-u flips between "same side" and "other side":
-            //   * u on v's old side  → gain(u) += 2c
-            //   * u on v's new side  → gain(u) -= 2c
-            if (u_label == old_label) {
-                bufs.gain[static_cast<std::size_t>(u)] += 2.0 * c;
-            } else if (u_label == new_label) {
-                bufs.gain[static_cast<std::size_t>(u)] -= 2.0 * c;
-            }
-            ++bufs.version[static_cast<std::size_t>(u)];
-            heap.push_back({
-                bufs.gain[static_cast<std::size_t>(u)],
-                u,
-                bufs.version[static_cast<std::size_t>(u)],
-            });
-            std::push_heap(heap.begin(), heap.end());
+            const auto u_label = labels[static_cast<std::size_t>(adj.node)];
+            const double delta = (u_label == old_label) ? 2.0 * c : -2.0 * c;
+            heap.change(u_key, heap.priority_of(u_key) + delta);
         }
     }
 
@@ -378,8 +327,9 @@ inline std::vector<std::uint64_t> kernighan_lin(
     validate_labels(graph, labels);
     labels = dense_relabel(labels);
 
-    detail_kl::ChainBuffers bufs(static_cast<std::size_t>(graph.number_of_nodes()));
-    detail_kl::ChainScratch scratch;
+    const auto n_nodes = static_cast<std::size_t>(graph.number_of_nodes());
+    detail_kl::ChainBuffers bufs(n_nodes);
+    detail_kl::ChainScratch scratch(n_nodes);
 
     for (std::uint64_t iteration = 0; iteration < number_of_outer_iterations; ++iteration) {
         bool improved = false;
