@@ -36,6 +36,13 @@ _AFFINITY_FEATURES_BY_DTYPE = {
     np.dtype("int64"): _core._accumulate_affinity_features_int64,
 }
 
+_PROJECT_NODE_LABELS_TO_PIXELS_BY_DTYPE = {
+    np.dtype("uint32"): _core._project_node_labels_to_pixels_uint32,
+    np.dtype("uint64"): _core._project_node_labels_to_pixels_uint64,
+    np.dtype("int32"): _core._project_node_labels_to_pixels_int32,
+    np.dtype("int64"): _core._project_node_labels_to_pixels_int64,
+}
+
 SIMPLE_EDGE_FEATURE_NAMES = ("mean", "size")
 COMPLEX_EDGE_FEATURE_NAMES = (
     "mean",
@@ -523,6 +530,42 @@ def affinity_features_complex(
     )
 
 
+def project_node_labels_to_pixels(
+    rag: RegionAdjacencyGraph,
+    labels: np.ndarray,
+    node_labels,
+    *,
+    number_of_threads: int = 0,
+) -> np.ndarray:
+    """Map RAG node labels back to a pixel-wise segmentation.
+
+    ``labels`` is the over-segmentation used to construct ``rag``. Each pixel
+    value is interpreted as a RAG node id and replaced by the corresponding
+    entry in the 1D ``node_labels`` array. The returned segmentation has the
+    same shape as ``labels`` and dtype ``uint64``.
+    """
+    label_array = _normalize_labels(labels)
+    if tuple(int(size) for size in rag.shape) != label_array.shape:
+        raise ValueError(
+            "rag shape must match labels shape, got "
+            f"rag shape={tuple(rag.shape)}, labels shape={label_array.shape}"
+        )
+
+    node_label_array = np.asarray(node_labels, dtype=np.uint64)
+    if node_label_array.ndim != 1:
+        raise ValueError("node_labels must be a 1D array")
+    if node_label_array.shape[0] != rag.number_of_nodes:
+        raise ValueError("node_labels length must match rag number_of_nodes")
+
+    run = _PROJECT_NODE_LABELS_TO_PIXELS_BY_DTYPE[label_array.dtype]
+    return run(
+        rag,
+        label_array,
+        np.ascontiguousarray(node_label_array),
+        _normalize_number_of_threads(number_of_threads),
+    )
+
+
 def _accumulate_edge_map_features(
     rag: RegionAdjacencyGraph,
     labels: np.ndarray,
@@ -632,6 +675,7 @@ __all__ = [
     "external_multicut_problem_path",
     "load_external_multicut_problem",
     "load_external_multicut_problem_data",
+    "project_node_labels_to_pixels",
     "region_adjacency_graph",
     "undirected_graph",
 ]

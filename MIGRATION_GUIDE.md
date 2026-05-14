@@ -221,6 +221,39 @@ Notes:
 - `number_of_threads=0` uses the library default; pass a positive integer for a
   fixed thread count.
 
+## Projecting RAG Node Labels to Pixels
+
+Nifty projects scalar node data back to pixels with
+`projectScalarNodeDataToPixels`.
+
+Nifty:
+
+```python
+import nifty.graph.rag as nrag
+
+rag = nrag.gridRag(labels)
+pixel_labels = nrag.projectScalarNodeDataToPixels(rag, node_labels)
+```
+
+bioimage-cpp:
+
+```python
+rag = bic.graph.region_adjacency_graph(labels)
+pixel_labels = bic.graph.project_node_labels_to_pixels(
+    rag,
+    labels,
+    node_labels,
+)
+```
+
+Notes:
+
+- `labels` must be the over-segmentation used to construct `rag`.
+- `node_labels` must be a 1D array with length `rag.number_of_nodes`.
+- The output has the same shape as `labels` and dtype `uint64`.
+- `number_of_threads=0` uses the library default; pass a positive integer for a
+  fixed thread count.
+
 ## Multicut
 
 Nifty exposes multicut through an objective + factory-style solver hierarchy.
