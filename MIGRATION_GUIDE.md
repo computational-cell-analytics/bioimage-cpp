@@ -221,6 +221,116 @@ Notes:
 - `number_of_threads=0` uses the library default; pass a positive integer for a
   fixed thread count.
 
+## Multicut
+
+Nifty exposes multicut through an objective + factory-style solver hierarchy.
+`bioimage-cpp` uses an explicit `MulticutObjective` and a `MulticutSolver` class
+hierarchy with a single `optimize(objective)` entry point.
+
+Nifty:
+
+```python
+import nifty.graph.opt.multicut as nmc
+
+objective = nmc.multicutObjective(graph, edge_costs)
+solver = objective.greedyAdditiveFactory().create(objective)
+labels = solver.optimize()
+energy = objective.evalNodeLabels(labels)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+objective = bic.graph.MulticutObjective(graph, edge_costs)
+labels = bic.graph.GreedyAdditiveMulticut().optimize(objective)
+energy = objective.energy(labels)
+```
+
+`MulticutObjective` accepts an `UndirectedGraph` or a `RegionAdjacencyGraph` and
+a 1D `edge_costs` array of length `graph.number_of_edges`. The objective owns
+the current best `labels`; `optimize` updates them in place and also returns
+the new array.
+
+Available solvers:
+
+| nifty factory | bioimage-cpp solver |
+| --- | --- |
+| `greedyAdditiveFactory()` | `GreedyAdditiveMulticut()` |
+| `greedyFixationFactory()` | `GreedyFixationMulticut()` |
+| `kernighanLinFactory(...)` | `KernighanLinMulticut(...)` |
+| `chainedSolversFactory([...])` | `ChainedMulticutSolvers([...])` |
+| `multicutDecomposer(submodelFactory=...)` | `MulticutDecomposer(sub_solver=...)` |
+
+Constructor argument mapping:
+
+| nifty argument | bioimage-cpp argument |
+| --- | --- |
+| `weightStop` | `weight_stop` |
+| `nodeNumStop` | `node_num_stop` |
+| `addNoise` | `add_noise` |
+| `numberOfOuterIterations` | `number_of_outer_iterations` |
+| `numberOfInnerIterations` | `number_of_inner_iterations` |
+| `epsilon` | `epsilon` |
+| `submodelFactory` | `sub_solver` |
+| `fallthroughFactory` | `fallthrough_solver` |
+| `numberOfThreads` | `number_of_threads` |
+
+Kernighan-Lin example:
+
+```python
+solver = bic.graph.KernighanLinMulticut(number_of_outer_iterations=5)
+labels = solver.optimize(objective)
+```
+
+If the objective's labels are left at the default (one cluster per node),
+`KernighanLinMulticut` warm-starts from a greedy-additive solution
+internally, matching `kernighanLinFactory(warmStartGreedy=True)`. To skip the
+warm-start, set `objective.set_labels(...)` to a non-trivial labeling first.
+
+Chaining solvers:
+
+```python
+solver = bic.graph.ChainedMulticutSolvers([
+    bic.graph.GreedyAdditiveMulticut(),
+    bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
+])
+labels = solver.optimize(objective)
+```
+
+Decomposing a problem into positive-cost connected components and solving each
+sub-problem with a cheaper solver:
+
+```python
+solver = bic.graph.MulticutDecomposer(
+    sub_solver=bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
+    fallthrough_solver=bic.graph.GreedyAdditiveMulticut(),
+    number_of_threads=0,
+)
+labels = solver.optimize(objective)
+```
+
+Notes:
+
+- `edge_costs` must be `float64` and 1D with length `graph.number_of_edges`.
+- Output labels are dense `uint64` ids in `0 .. number_of_clusters - 1`.
+- `MulticutObjective.energy(labels)` is the multicut energy used internally; it
+  matches `nmc.multicutObjective(...).evalNodeLabels(labels)`.
+- `objective.reset_labels()` restores the per-node initial labeling, useful when
+  re-running solvers from a clean state.
+
+Intentional differences vs. nifty:
+
+- Solvers are plain Python classes — no `factory().create(objective)` step.
+- Solver arguments use snake_case and are keyword-only where appropriate.
+- `KernighanLinMulticut` runs a border-restricted move chain plus an explicit
+  cluster-split phase, matching nifty's local optima on the standard multicut
+  benchmark while being noticeably faster.
+- `MulticutDecomposer` short-circuits the trivial case where the sub-solver is
+  `GreedyAdditiveMulticut` and no fallthrough is given — the greedy solver
+  already operates on each connected component internally.
+
 ## Segmentation Overlaps
 
 Nifty:
