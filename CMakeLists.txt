@@ -14,6 +14,7 @@ nanobind_add_module(_core
     src/bindings/blocking.cxx
     src/bindings/module.cxx
     src/bindings/graph.cxx
+    src/bindings/ground_truth.cxx
     src/bindings/segmentation.cxx
     src/bindings/utils.cxx
     src/cpp/segmentation/mutex_watershed.cxx
