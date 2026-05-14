@@ -1,4 +1,6 @@
 import numpy as np
+import pytest
+
 import bioimage_cpp as bic
 
 
@@ -11,6 +13,15 @@ def test_kernighan_lin_improves_or_preserves_energy(frustrated_triangle):
 
     assert objective.energy(labels) <= before
     assert labels.dtype == np.uint64
+
+
+def test_kernighan_lin_finds_frustrated_triangle_optimum(frustrated_triangle):
+    graph, costs = frustrated_triangle
+    objective = bic.graph.MulticutObjective(graph, costs)
+
+    labels = bic.graph.KernighanLinMulticut(number_of_outer_iterations=10).optimize(objective)
+
+    assert objective.energy(labels) == pytest.approx(-3.0)
 
 
 def test_kernighan_lin_accepts_initial_labels(chain_problem):
@@ -29,7 +40,8 @@ def test_kernighan_lin_on_external_toy_problem(external_toy_problem):
 
     labels = bic.graph.KernighanLinMulticut(number_of_outer_iterations=20).optimize(objective)
 
-    assert objective.energy(labels) <= -35.0
+    # The move-chain implementation reaches the optimum on this instance.
+    assert objective.energy(labels) == pytest.approx(-35.0)
 
 
 def test_kernighan_lin_energy_bound_on_grid_problem(grid_problem):
@@ -38,4 +50,5 @@ def test_kernighan_lin_energy_bound_on_grid_problem(grid_problem):
 
     labels = bic.graph.KernighanLinMulticut(number_of_outer_iterations=10).optimize(objective)
 
-    assert objective.energy(labels) <= -20.0
+    # Regression guard pinned to the move-chain implementation's converged energy.
+    assert objective.energy(labels) <= -34.0
