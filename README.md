@@ -30,6 +30,17 @@ out = bic.utils.take_dict(relabeling, labels)
 # array([10, 30, 20, 10], dtype=uint64)
 ```
 
+```python
+affinities = np.ones((2, 4, 4), dtype=np.float32)
+offsets = [[0, 1], [1, 0]]
+
+segmentation = bic.segmentation.mutex_watershed(
+    affinities,
+    offsets,
+    number_of_attractive_channels=2,
+)
+```
+
 ## Scope
 
 The project is not a compatibility layer for `nifty`, `vigra`, or other large libraries. It keeps I/O and heavy dependencies out of the C++ core; callers should use existing Python packages for file formats and pass NumPy arrays into `bioimage-cpp`.

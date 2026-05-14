@@ -24,3 +24,6 @@ htmlcov/
 # Local virtual environments
 .venv/
 venv/
+
+# Data
+*.h5

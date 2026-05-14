@@ -12,7 +12,9 @@ find_package(nanobind CONFIG REQUIRED)
 nanobind_add_module(_core
     NB_STATIC
     src/bindings/module.cxx
+    src/bindings/segmentation.cxx
     src/bindings/utils.cxx
+    src/cpp/segmentation/mutex_watershed.cxx
     src/cpp/take_dict.cxx
 )
 
