@@ -27,3 +27,5 @@ venv/
 
 # Data
 *.h5
+
+CLAUDE.md
