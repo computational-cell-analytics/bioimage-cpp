@@ -116,6 +116,7 @@ inline bool is_valid_grid_edge(
 template <class T>
 void mutex_watershed_grid(
     const ConstArrayView<T> &affinities,
+    const ConstArrayView<std::uint8_t> &valid_edges,
     const std::vector<std::vector<std::ptrdiff_t>> &offsets,
     const std::size_t number_of_attractive_channels,
     const ArrayView<std::uint64_t> &out
@@ -128,6 +129,9 @@ void mutex_watershed_grid(
     }
     if (offsets.empty()) {
         throw std::invalid_argument("offsets must not be empty");
+    }
+    if (valid_edges.shape != affinities.shape) {
+        throw std::invalid_argument("valid_edges shape must match affinities shape");
     }
 
     const auto number_of_channels = static_cast<std::size_t>(affinities.shape[0]);
@@ -189,6 +193,10 @@ void mutex_watershed_grid(
     MutexStorage mutexes(static_cast<std::size_t>(number_of_nodes));
 
     for (const auto edge_id : edge_order) {
+        if (valid_edges.data[edge_id] == 0) {
+            continue;
+        }
+
         const auto channel = static_cast<std::size_t>(edge_id / number_of_nodes);
         const auto u = edge_id % number_of_nodes;
         if (!is_valid_grid_edge(u, offsets[channel], spatial_shape, spatial_strides)) {

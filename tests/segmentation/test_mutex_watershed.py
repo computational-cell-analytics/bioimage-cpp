@@ -77,6 +77,61 @@ def test_mutex_watershed_3d_attractive_edges_merge_all_pixels():
     np.testing.assert_array_equal(labels, np.ones((2, 2, 2), dtype=np.uint64))
 
 
+def test_mutex_watershed_strides_subsample_mutex_edges():
+    affinities = np.zeros((2, 1, 5), dtype=np.float32)
+    affinities[0, 0, :] = 0.8
+    affinities[1, 0, :] = 0.9
+    offsets = [[0, 1], [0, 1]]
+
+    dense = bic.segmentation.mutex_watershed(
+        affinities, offsets, number_of_attractive_channels=1
+    )
+    strided = bic.segmentation.mutex_watershed(
+        affinities, offsets, number_of_attractive_channels=1, strides=[1, 2]
+    )
+
+    np.testing.assert_array_equal(dense, np.array([[1, 2, 3, 4, 5]], dtype=np.uint64))
+    np.testing.assert_array_equal(strided, np.array([[1, 2, 2, 3, 3]], dtype=np.uint64))
+
+
+def test_mutex_watershed_randomized_strides_use_numpy_random_state():
+    affinities = np.zeros((2, 1, 5), dtype=np.float32)
+    affinities[0, 0, :] = 0.8
+    affinities[1, 0, :] = 0.9
+    offsets = [[0, 1], [0, 1]]
+
+    np.random.seed(17)
+    first = bic.segmentation.mutex_watershed(
+        affinities,
+        offsets,
+        number_of_attractive_channels=1,
+        strides=[1, 2],
+        randomized_strides=True,
+    )
+    np.random.seed(17)
+    second = bic.segmentation.mutex_watershed(
+        affinities,
+        offsets,
+        number_of_attractive_channels=1,
+        strides=[1, 2],
+        randomized_strides=True,
+    )
+
+    np.testing.assert_array_equal(first, second)
+
+
+def test_mutex_watershed_mask_sets_background_zero_and_blocks_edges():
+    affinities = np.ones((1, 1, 5), dtype=np.float32)
+    offsets = [[0, 1]]
+    mask = np.array([[True, True, False, True, True]], dtype=bool)
+
+    labels = bic.segmentation.mutex_watershed(
+        affinities, offsets, number_of_attractive_channels=1, mask=mask
+    )
+
+    np.testing.assert_array_equal(labels, np.array([[1, 1, 0, 3, 3]], dtype=np.uint64))
+
+
 def test_mutex_watershed_rejects_wrong_affinity_dtype():
     with pytest.raises(TypeError, match="affinities must have one of dtypes"):
         bic.segmentation.mutex_watershed(
@@ -101,4 +156,24 @@ def test_mutex_watershed_rejects_wrong_number_of_offsets():
             np.ones((2, 2, 2), dtype=np.float32),
             [[0, 1]],
             number_of_attractive_channels=1,
+        )
+
+
+def test_mutex_watershed_rejects_invalid_strides():
+    with pytest.raises(ValueError, match="strides length must match"):
+        bic.segmentation.mutex_watershed(
+            np.ones((1, 2, 2), dtype=np.float32),
+            [[0, 1]],
+            number_of_attractive_channels=1,
+            strides=[1, 1, 1],
+        )
+
+
+def test_mutex_watershed_rejects_invalid_mask():
+    with pytest.raises(TypeError, match="mask must have dtype bool"):
+        bic.segmentation.mutex_watershed(
+            np.ones((1, 2, 2), dtype=np.float32),
+            [[0, 1]],
+            number_of_attractive_channels=1,
+            mask=np.ones((2, 2), dtype=np.uint8),
         )
