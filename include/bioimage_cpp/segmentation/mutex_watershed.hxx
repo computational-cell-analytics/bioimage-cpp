@@ -8,7 +8,6 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -44,6 +43,12 @@ private:
 };
 
 using MutexStorage = std::vector<std::unordered_set<std::uint64_t>>;
+
+template <class T>
+struct WeightedGridEdge {
+    T weight;
+    std::uint64_t id;
+};
 
 inline bool check_mutex(
     const std::uint64_t first,
@@ -95,22 +100,6 @@ inline std::vector<std::ptrdiff_t> c_order_strides(const std::vector<std::ptrdif
             strides[static_cast<std::size_t>(axis + 1)] * shape[static_cast<std::size_t>(axis + 1)];
     }
     return strides;
-}
-
-inline bool is_valid_grid_edge(
-    const std::uint64_t node,
-    const std::vector<std::ptrdiff_t> &offset,
-    const std::vector<std::ptrdiff_t> &shape,
-    const std::vector<std::ptrdiff_t> &strides
-) {
-    for (std::size_t axis = 0; axis < shape.size(); ++axis) {
-        const auto coord = static_cast<std::ptrdiff_t>(node / static_cast<std::uint64_t>(strides[axis])) % shape[axis];
-        const auto neighbor = coord + offset[axis];
-        if (neighbor < 0 || neighbor >= shape[axis]) {
-            return false;
-        }
-    }
-    return true;
 }
 
 template <class T>
@@ -178,36 +167,33 @@ void mutex_watershed_grid(
     }
 
     const auto number_of_edges = number_of_nodes * number_of_channels;
-    std::vector<std::uint64_t> edge_order(static_cast<std::size_t>(number_of_edges));
-    std::iota(edge_order.begin(), edge_order.end(), std::uint64_t{0});
-    std::sort(edge_order.begin(), edge_order.end(), [&](const std::uint64_t first, const std::uint64_t second) {
-        const T first_weight = affinities.data[first];
-        const T second_weight = affinities.data[second];
-        if (first_weight == second_weight) {
-            return first < second;
+    std::vector<WeightedGridEdge<T>> edge_order;
+    edge_order.reserve(static_cast<std::size_t>(number_of_edges));
+    for (std::uint64_t edge_id = 0; edge_id < number_of_edges; ++edge_id) {
+        if (valid_edges.data[edge_id] != 0) {
+            edge_order.push_back(WeightedGridEdge<T>{affinities.data[edge_id], edge_id});
         }
-        return first_weight > second_weight;
+    }
+    std::sort(edge_order.begin(), edge_order.end(), [](const auto &first, const auto &second) {
+        if (first.weight == second.weight) {
+            return first.id < second.id;
+        }
+        return first.weight > second.weight;
     });
 
     DisjointSets sets(static_cast<std::size_t>(number_of_nodes));
     MutexStorage mutexes(static_cast<std::size_t>(number_of_nodes));
 
-    for (const auto edge_id : edge_order) {
-        if (valid_edges.data[edge_id] == 0) {
-            continue;
-        }
-
+    for (const auto &edge : edge_order) {
+        const auto edge_id = edge.id;
         const auto channel = static_cast<std::size_t>(edge_id / number_of_nodes);
         const auto u = edge_id % number_of_nodes;
-        if (!is_valid_grid_edge(u, offsets[channel], spatial_shape, spatial_strides)) {
-            continue;
-        }
 
         const auto v_signed = static_cast<std::int64_t>(u) + static_cast<std::int64_t>(offset_strides[channel]);
         const auto v = static_cast<std::uint64_t>(v_signed);
         std::uint64_t root_u = sets.find(u);
         std::uint64_t root_v = sets.find(v);
-        if (root_u == root_v || check_mutex(root_u, root_v, mutexes)) {
+        if (root_u == root_v) {
             continue;
         }
 
@@ -215,21 +201,25 @@ void mutex_watershed_grid(
         if (is_mutex_edge) {
             insert_mutex(root_u, root_v, mutexes);
         } else {
+            if (check_mutex(root_u, root_v, mutexes)) {
+                continue;
+            }
             const auto new_root = sets.unite_roots(root_u, root_v);
             const auto old_root = (new_root == root_u) ? root_v : root_u;
             merge_mutexes(old_root, new_root, mutexes);
         }
     }
 
-    std::unordered_map<std::uint64_t, std::uint64_t> label_map;
+    std::vector<std::uint64_t> root_labels(static_cast<std::size_t>(number_of_nodes), 0);
+    std::uint64_t next_label = 1;
     for (std::uint64_t node = 0; node < number_of_nodes; ++node) {
         const auto root = sets.find(node);
-        auto found = label_map.find(root);
-        if (found == label_map.end()) {
-            const auto next_label = static_cast<std::uint64_t>(label_map.size() + 1);
-            found = label_map.emplace(root, next_label).first;
+        auto &label = root_labels[static_cast<std::size_t>(root)];
+        if (label == 0) {
+            label = next_label;
+            ++next_label;
         }
-        out.data[node] = found->second;
+        out.data[node] = label;
     }
 }
 
