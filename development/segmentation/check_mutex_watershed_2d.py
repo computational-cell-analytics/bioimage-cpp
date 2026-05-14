@@ -21,7 +21,7 @@ def main() -> None:
         type=int,
         nargs=2,
         metavar=("Y", "X"),
-        default=(128, 128),
+        default=(512, 512),
         help="Spatial crop shape for the 2D check.",
     )
     args = parser.parse_args()

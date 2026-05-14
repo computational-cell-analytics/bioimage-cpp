@@ -28,6 +28,7 @@ test = ["pytest"]
 
 [tool.scikit-build]
 cmake.version = ">=3.21"
+cmake.build-type = "Release"
 wheel.packages = ["src/bioimage_cpp"]
 
 [tool.pytest.ini_options]
