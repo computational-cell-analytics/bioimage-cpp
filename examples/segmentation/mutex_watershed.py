@@ -18,15 +18,6 @@ def mws_bic(affinities, offsets):
     return segmentation
 
 
-def mws_affogato(affinities, offsets):
-    from elf.segmentation.mutex_watershed import mutex_watershed as mws
-    print("Start MWS ...")
-    affs = affinities.copy()
-    segmentation = mws(affs, offsets, strides=[1, 1, 1])
-    print("done ...")
-    return segmentation
-
-
 def _filter_2d(affinities, offsets):
     chans_2d = [i for i, off in enumerate(offsets) if off[0] == 0]
     affinities = affinities[chans_2d][:, 0]
@@ -42,12 +33,7 @@ def main():
     check_2d = True
     if check_2d:
         affinities, offsets = _filter_2d(affinities, offsets)
-
-    use_reference_impl = False
-    if use_reference_impl:
-        segmentation = mws_affogato(affinities, offsets)
-    else:
-        segmentation = mws_bic(affinities, offsets)
+    segmentation = mws_bic(affinities, offsets)
 
     with open_file(data_path, "r") as f:
         raw = f["raw"][0] if check_2d else f["raw"][:]

@@ -435,6 +435,11 @@ Public functions should have concise docstrings documenting:
 - background-label behavior, if relevant
 - axis and coordinate conventions
 
+When adding or changing public functionality, update `MIGRATION_GUIDE.md` so
+users migrating from `nifty`, `affogato`, or related packages know the
+corresponding `bioimage-cpp` API, important behavioral differences, and any
+intentional improvements.
+
 ## What an agent should do when modifying this repository
 
 When adding or changing code:

@@ -65,7 +65,7 @@ def run_affogato_reference(
     offsets: list[tuple[int, ...]],
     number_of_attractive_channels: int,
 ) -> np.ndarray:
-    from elf.segmentation.mutex_watershed import mutex_watershed
+    from affogato.segmentation import compute_mws_segmentation
 
     spatial_ndim = len(offsets[0])
     if number_of_attractive_channels != spatial_ndim:
@@ -74,7 +74,12 @@ def run_affogato_reference(
             f"spatial axis, got ndim={spatial_ndim}, attractive channels="
             f"{number_of_attractive_channels}"
         )
-    return mutex_watershed(affinities.copy(), offsets, strides=[1] * spatial_ndim)
+    affs = affinities.copy()
+    affs[:spatial_ndim] *= -1
+    affs[:spatial_ndim] += 1
+    return compute_mws_segmentation(affs, offsets,
+                                    number_of_attractive_channels=number_of_attractive_channels,
+                                    strides=[1] * spatial_ndim)
 
 
 def _load_validation_metrics():
@@ -126,21 +131,41 @@ def compare_segmentations(
     return metrics
 
 
-def time_function(
-    run: Callable[[np.ndarray, list[tuple[int, ...]], int], np.ndarray],
+def time_functions_interleaved(
+    first: Callable[[np.ndarray, list[tuple[int, ...]], int], np.ndarray],
+    second: Callable[[np.ndarray, list[tuple[int, ...]], int], np.ndarray],
     affinities: np.ndarray,
     offsets: list[tuple[int, ...]],
     number_of_attractive_channels: int,
     repeats: int,
-) -> tuple[list[float], np.ndarray]:
-    timings = []
-    result = None
-    for _ in range(repeats):
+) -> tuple[list[float], np.ndarray, list[float], np.ndarray]:
+    def timed_call(run):
         start = perf_counter()
         result = run(affinities, offsets, number_of_attractive_channels)
-        timings.append(perf_counter() - start)
-    assert result is not None
-    return timings, result
+        return perf_counter() - start, result
+
+    # Warm up imports, extension initialization, and first allocation paths
+    # outside the timed section.
+    first(affinities, offsets, number_of_attractive_channels)
+    second(affinities, offsets, number_of_attractive_channels)
+
+    first_timings = []
+    second_timings = []
+    first_result = None
+    second_result = None
+    for repeat in range(repeats):
+        if repeat % 2 == 0:
+            first_time, first_result = timed_call(first)
+            second_time, second_result = timed_call(second)
+        else:
+            second_time, second_result = timed_call(second)
+            first_time, first_result = timed_call(first)
+        first_timings.append(first_time)
+        second_timings.append(second_time)
+
+    assert first_result is not None
+    assert second_result is not None
+    return first_timings, first_result, second_timings, second_result
 
 
 def print_report(
@@ -193,11 +218,13 @@ def run_check(
     else:
         raise ValueError(f"ndim must be 2 or 3, got {ndim}")
 
-    ref_timings, ref_seg = time_function(
-        run_affogato_reference, affs, used_offsets, attractive_channels, repeats
-    )
-    bic_timings, bic_seg = time_function(
-        run_bioimage_cpp, affs, used_offsets, attractive_channels, repeats
+    ref_timings, ref_seg, bic_timings, bic_seg = time_functions_interleaved(
+        run_affogato_reference,
+        run_bioimage_cpp,
+        affs,
+        used_offsets,
+        attractive_channels,
+        repeats,
     )
     metrics = compare_segmentations(bic_seg, ref_seg)
     print_report(

@@ -15,7 +15,7 @@ def main() -> None:
         type=int,
         nargs=3,
         metavar=("Z", "Y", "X"),
-        default=(6, 96, 96),
+        default=(6, 512, 512),
         help="Spatial crop shape for the 3D check.",
     )
     args = parser.parse_args()
