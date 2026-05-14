@@ -21,7 +21,7 @@ inline std::vector<std::uint64_t> greedy_fixation(
 ) {
     validate_costs(graph, costs);
     detail::DynamicGraph dynamic_graph(graph);
-    UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
+    bioimage_cpp::detail::UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
     std::priority_queue<detail::QueueEdge> queue;
     detail::initialize_dynamic_graph(graph, costs, dynamic_graph, queue, true);
 

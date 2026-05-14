@@ -1,5 +1,7 @@
 #pragma once
 
+#include "bioimage_cpp/detail/edge_hash.hxx"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -21,7 +23,7 @@ class UndirectedGraph {
 public:
     using NodeId = std::uint64_t;
     using EdgeId = std::uint64_t;
-    using Edge = std::pair<NodeId, NodeId>;
+    using Edge = detail::Edge;
     using AdjacencyList = std::vector<Adjacency>;
 
     explicit UndirectedGraph(
@@ -108,7 +110,7 @@ public:
             throw std::invalid_argument("self edges are not supported");
         }
 
-        const auto key = edge_key(u, v);
+        const auto key = detail::edge_key(u, v);
         const auto found = edge_lookup_.find(key);
         if (found != edge_lookup_.end()) {
             return found->second;
@@ -123,7 +125,7 @@ public:
             return -1;
         }
 
-        const auto key = edge_key(u, v);
+        const auto key = detail::edge_key(u, v);
         const auto found = edge_lookup_.find(key);
         if (found == edge_lookup_.end()) {
             return -1;
@@ -193,25 +195,10 @@ protected:
     }
 
 private:
-    struct EdgeHash {
-        std::size_t operator()(const Edge &edge) const {
-            const auto first = static_cast<std::size_t>(edge.first);
-            const auto second = static_cast<std::size_t>(edge.second);
-            return first ^ (second + 0x9e3779b97f4a7c15ULL + (first << 6U) + (first >> 2U));
-        }
-    };
-
-    static Edge edge_key(NodeId u, NodeId v) {
-        if (v < u) {
-            std::swap(u, v);
-        }
-        return {u, v};
-    }
-
     NodeId number_of_nodes_;
     std::vector<Edge> edges_;
     std::vector<AdjacencyList> adjacency_;
-    std::unordered_map<Edge, EdgeId, EdgeHash> edge_lookup_;
+    std::unordered_map<Edge, EdgeId, detail::EdgeHash> edge_lookup_;
 };
 
 } // namespace bioimage_cpp::graph

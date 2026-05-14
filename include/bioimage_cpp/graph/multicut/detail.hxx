@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bioimage_cpp/detail/union_find.hxx"
 #include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/multicut/objective.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
@@ -124,7 +125,10 @@ inline void initialize_dynamic_graph(
     }
 }
 
-inline std::vector<std::uint64_t> labels_from_sets(UnionFind &sets, const UndirectedGraph &graph) {
+inline std::vector<std::uint64_t> labels_from_sets(
+    bioimage_cpp::detail::UnionFind &sets,
+    const UndirectedGraph &graph
+) {
     return dense_labels_from_union_find(sets, graph.number_of_nodes());
 }
 
@@ -136,7 +140,7 @@ inline std::size_t stop_node_count(const UndirectedGraph &graph, const double no
 
 inline std::size_t merge_dynamic_nodes(
     DynamicGraph &dynamic_graph,
-    UnionFind &sets,
+    bioimage_cpp::detail::UnionFind &sets,
     std::priority_queue<QueueEdge> &queue,
     std::size_t u,
     std::size_t v,

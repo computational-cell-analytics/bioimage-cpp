@@ -1,12 +1,12 @@
 #pragma once
 
+#include "bioimage_cpp/detail/relabel.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
 #include <stdexcept>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -30,18 +30,7 @@ inline std::vector<std::uint64_t> singleton_labels(const UndirectedGraph &graph)
     return labels;
 }
 
-inline std::vector<std::uint64_t> dense_relabel(const std::vector<std::uint64_t> &labels) {
-    std::unordered_map<std::uint64_t, std::uint64_t> relabeling;
-    std::vector<std::uint64_t> result(labels.size());
-    for (std::size_t index = 0; index < labels.size(); ++index) {
-        auto found = relabeling.find(labels[index]);
-        if (found == relabeling.end()) {
-            found = relabeling.emplace(labels[index], static_cast<std::uint64_t>(relabeling.size())).first;
-        }
-        result[index] = found->second;
-    }
-    return result;
-}
+using bioimage_cpp::detail::dense_relabel;
 
 inline double energy(
     const UndirectedGraph &graph,

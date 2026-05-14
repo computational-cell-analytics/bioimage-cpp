@@ -1,6 +1,8 @@
 #pragma once
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/grid.hxx"
+#include "bioimage_cpp/detail/threading.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 
 #include <algorithm>
@@ -11,7 +13,6 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -123,15 +124,6 @@ inline std::int64_t edge_for_labels(
     return rag.find_edge(u, v);
 }
 
-inline std::vector<std::ptrdiff_t> c_order_strides(const std::vector<std::ptrdiff_t> &shape) {
-    std::vector<std::ptrdiff_t> strides(shape.size(), 1);
-    for (std::ptrdiff_t axis = static_cast<std::ptrdiff_t>(shape.size()) - 2; axis >= 0; --axis) {
-        strides[static_cast<std::size_t>(axis)] =
-            strides[static_cast<std::size_t>(axis + 1)] * shape[static_cast<std::size_t>(axis + 1)];
-    }
-    return strides;
-}
-
 template <class LabelT, class ValueT, class Stats>
 void scan_edge_map_2d_chunk(
     const RegionAdjacencyGraph &rag,
@@ -212,26 +204,6 @@ void scan_edge_map_3d_chunk(
     }
 }
 
-inline bool valid_offset_target(
-    const std::uint64_t node,
-    const std::vector<std::ptrdiff_t> &offset,
-    const std::vector<std::ptrdiff_t> &shape,
-    const std::vector<std::ptrdiff_t> &strides,
-    std::uint64_t &target
-) {
-    std::int64_t target_signed = static_cast<std::int64_t>(node);
-    for (std::size_t axis = 0; axis < shape.size(); ++axis) {
-        const auto coord = static_cast<std::ptrdiff_t>(node / static_cast<std::uint64_t>(strides[axis])) % shape[axis];
-        const auto neighbor = coord + offset[axis];
-        if (neighbor < 0 || neighbor >= shape[axis]) {
-            return false;
-        }
-        target_signed += static_cast<std::int64_t>(offset[axis] * strides[axis]);
-    }
-    target = static_cast<std::uint64_t>(target_signed);
-    return true;
-}
-
 template <class LabelT, class ValueT, class Stats>
 void scan_affinity_chunk(
     const RegionAdjacencyGraph &rag,
@@ -243,13 +215,13 @@ void scan_affinity_chunk(
     const std::size_t node_end,
     std::vector<Stats> &stats
 ) {
-    const auto spatial_strides = c_order_strides(shape);
+    const auto spatial_strides = bioimage_cpp::detail::c_order_strides(shape);
     const auto number_of_nodes = static_cast<std::uint64_t>(number_of_pixels(shape));
     for (std::size_t channel = 0; channel < offsets.size(); ++channel) {
         const auto channel_offset = static_cast<std::uint64_t>(channel) * number_of_nodes;
         for (std::uint64_t node = node_begin; node < node_end; ++node) {
             std::uint64_t target = 0;
-            if (!valid_offset_target(node, offsets[channel], shape, spatial_strides, target)) {
+            if (!bioimage_cpp::detail::valid_offset_target(node, offsets[channel], shape, spatial_strides, target)) {
                 continue;
             }
             const auto edge = edge_for_labels(rag, label_at(labels, node), label_at(labels, target));
@@ -355,76 +327,48 @@ void accumulate_edge_map_features(
 
     const auto work_items = static_cast<std::size_t>(labels.shape[0]);
     const auto n_threads = detail::normalize_thread_count(number_of_threads, work_items);
-    std::vector<std::thread> threads;
-    threads.reserve(n_threads > 0 ? n_threads - 1 : 0);
+    const auto number_of_edges = static_cast<std::size_t>(rag.number_of_edges());
+
+    const auto run_scan = [&](auto &per_thread_stats) {
+        bioimage_cpp::detail::parallel_for_chunks(
+            n_threads,
+            work_items,
+            [&](const std::size_t thread_id, const std::size_t begin, const std::size_t end) {
+                if (labels.ndim() == 2) {
+                    detail_features::scan_edge_map_2d_chunk(
+                        rag, labels.data, edge_map.data,
+                        static_cast<std::size_t>(labels.shape[0]),
+                        static_cast<std::size_t>(labels.shape[1]),
+                        begin, end, per_thread_stats[thread_id]
+                    );
+                } else {
+                    detail_features::scan_edge_map_3d_chunk(
+                        rag, labels.data, edge_map.data,
+                        static_cast<std::size_t>(labels.shape[0]),
+                        static_cast<std::size_t>(labels.shape[1]),
+                        static_cast<std::size_t>(labels.shape[2]),
+                        begin, end, per_thread_stats[thread_id]
+                    );
+                }
+            }
+        );
+    };
 
     if (compute_complex_features) {
         std::vector<std::vector<detail_features::ComplexStats>> per_thread_stats(
             n_threads,
-            std::vector<detail_features::ComplexStats>(static_cast<std::size_t>(rag.number_of_edges()))
+            std::vector<detail_features::ComplexStats>(number_of_edges)
         );
-        const auto run_chunk = [&](const std::size_t thread_id) {
-            const auto begin = thread_id * work_items / n_threads;
-            const auto end = (thread_id + 1) * work_items / n_threads;
-            if (labels.ndim() == 2) {
-                detail_features::scan_edge_map_2d_chunk(
-                    rag, labels.data, edge_map.data,
-                    static_cast<std::size_t>(labels.shape[0]),
-                    static_cast<std::size_t>(labels.shape[1]),
-                    begin, end, per_thread_stats[thread_id]
-                );
-            } else {
-                detail_features::scan_edge_map_3d_chunk(
-                    rag, labels.data, edge_map.data,
-                    static_cast<std::size_t>(labels.shape[0]),
-                    static_cast<std::size_t>(labels.shape[1]),
-                    static_cast<std::size_t>(labels.shape[2]),
-                    begin, end, per_thread_stats[thread_id]
-                );
-            }
-        };
-        for (std::size_t thread_id = 1; thread_id < n_threads; ++thread_id) {
-            threads.emplace_back(run_chunk, thread_id);
-        }
-        run_chunk(0);
-        for (auto &thread : threads) {
-            thread.join();
-        }
-        auto stats = detail_features::merge_stats(per_thread_stats, static_cast<std::size_t>(rag.number_of_edges()));
+        run_scan(per_thread_stats);
+        auto stats = detail_features::merge_stats(per_thread_stats, number_of_edges);
         detail_features::write_complex_features(stats, out);
     } else {
         std::vector<std::vector<detail_features::SimpleStats>> per_thread_stats(
             n_threads,
-            std::vector<detail_features::SimpleStats>(static_cast<std::size_t>(rag.number_of_edges()))
+            std::vector<detail_features::SimpleStats>(number_of_edges)
         );
-        const auto run_chunk = [&](const std::size_t thread_id) {
-            const auto begin = thread_id * work_items / n_threads;
-            const auto end = (thread_id + 1) * work_items / n_threads;
-            if (labels.ndim() == 2) {
-                detail_features::scan_edge_map_2d_chunk(
-                    rag, labels.data, edge_map.data,
-                    static_cast<std::size_t>(labels.shape[0]),
-                    static_cast<std::size_t>(labels.shape[1]),
-                    begin, end, per_thread_stats[thread_id]
-                );
-            } else {
-                detail_features::scan_edge_map_3d_chunk(
-                    rag, labels.data, edge_map.data,
-                    static_cast<std::size_t>(labels.shape[0]),
-                    static_cast<std::size_t>(labels.shape[1]),
-                    static_cast<std::size_t>(labels.shape[2]),
-                    begin, end, per_thread_stats[thread_id]
-                );
-            }
-        };
-        for (std::size_t thread_id = 1; thread_id < n_threads; ++thread_id) {
-            threads.emplace_back(run_chunk, thread_id);
-        }
-        run_chunk(0);
-        for (auto &thread : threads) {
-            thread.join();
-        }
-        auto stats = detail_features::merge_stats(per_thread_stats, static_cast<std::size_t>(rag.number_of_edges()));
+        run_scan(per_thread_stats);
+        auto stats = detail_features::merge_stats(per_thread_stats, number_of_edges);
         detail_features::write_simple_features(stats, out);
     }
 }
@@ -466,52 +410,36 @@ void accumulate_affinity_features(
 
     const auto number_of_nodes = detail_features::number_of_pixels(labels.shape);
     const auto n_threads = detail::normalize_thread_count(number_of_threads, number_of_nodes);
-    std::vector<std::thread> threads;
-    threads.reserve(n_threads > 0 ? n_threads - 1 : 0);
+    const auto number_of_edges = static_cast<std::size_t>(rag.number_of_edges());
+
+    const auto run_scan = [&](auto &per_thread_stats) {
+        bioimage_cpp::detail::parallel_for_chunks(
+            n_threads,
+            number_of_nodes,
+            [&](const std::size_t thread_id, const std::size_t begin, const std::size_t end) {
+                detail_features::scan_affinity_chunk(
+                    rag, labels.data, affinities.data, offsets, labels.shape,
+                    begin, end, per_thread_stats[thread_id]
+                );
+            }
+        );
+    };
 
     if (compute_complex_features) {
         std::vector<std::vector<detail_features::ComplexStats>> per_thread_stats(
             n_threads,
-            std::vector<detail_features::ComplexStats>(static_cast<std::size_t>(rag.number_of_edges()))
+            std::vector<detail_features::ComplexStats>(number_of_edges)
         );
-        const auto run_chunk = [&](const std::size_t thread_id) {
-            const auto begin = thread_id * number_of_nodes / n_threads;
-            const auto end = (thread_id + 1) * number_of_nodes / n_threads;
-            detail_features::scan_affinity_chunk(
-                rag, labels.data, affinities.data, offsets, labels.shape,
-                begin, end, per_thread_stats[thread_id]
-            );
-        };
-        for (std::size_t thread_id = 1; thread_id < n_threads; ++thread_id) {
-            threads.emplace_back(run_chunk, thread_id);
-        }
-        run_chunk(0);
-        for (auto &thread : threads) {
-            thread.join();
-        }
-        auto stats = detail_features::merge_stats(per_thread_stats, static_cast<std::size_t>(rag.number_of_edges()));
+        run_scan(per_thread_stats);
+        auto stats = detail_features::merge_stats(per_thread_stats, number_of_edges);
         detail_features::write_complex_features(stats, out);
     } else {
         std::vector<std::vector<detail_features::SimpleStats>> per_thread_stats(
             n_threads,
-            std::vector<detail_features::SimpleStats>(static_cast<std::size_t>(rag.number_of_edges()))
+            std::vector<detail_features::SimpleStats>(number_of_edges)
         );
-        const auto run_chunk = [&](const std::size_t thread_id) {
-            const auto begin = thread_id * number_of_nodes / n_threads;
-            const auto end = (thread_id + 1) * number_of_nodes / n_threads;
-            detail_features::scan_affinity_chunk(
-                rag, labels.data, affinities.data, offsets, labels.shape,
-                begin, end, per_thread_stats[thread_id]
-            );
-        };
-        for (std::size_t thread_id = 1; thread_id < n_threads; ++thread_id) {
-            threads.emplace_back(run_chunk, thread_id);
-        }
-        run_chunk(0);
-        for (auto &thread : threads) {
-            thread.join();
-        }
-        auto stats = detail_features::merge_stats(per_thread_stats, static_cast<std::size_t>(rag.number_of_edges()));
+        run_scan(per_thread_stats);
+        auto stats = detail_features::merge_stats(per_thread_stats, number_of_edges);
         detail_features::write_simple_features(stats, out);
     }
 }

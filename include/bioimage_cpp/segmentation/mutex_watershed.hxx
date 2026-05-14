@@ -1,6 +1,8 @@
 #pragma once
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/grid.hxx"
+#include "bioimage_cpp/detail/union_find.hxx"
 
 #include <algorithm>
 #include <cstddef>
@@ -13,35 +15,6 @@
 #include <vector>
 
 namespace bioimage_cpp {
-
-class DisjointSets {
-public:
-    explicit DisjointSets(const std::size_t size) : parents_(size), ranks_(size, 0) {
-        std::iota(parents_.begin(), parents_.end(), std::uint64_t{0});
-    }
-
-    std::uint64_t find(const std::uint64_t node) {
-        if (parents_[node] != node) {
-            parents_[node] = find(parents_[node]);
-        }
-        return parents_[node];
-    }
-
-    std::uint64_t unite_roots(std::uint64_t first, std::uint64_t second) {
-        if (ranks_[first] < ranks_[second]) {
-            std::swap(first, second);
-        }
-        parents_[second] = first;
-        if (ranks_[first] == ranks_[second]) {
-            ++ranks_[first];
-        }
-        return first;
-    }
-
-private:
-    std::vector<std::uint64_t> parents_;
-    std::vector<std::uint64_t> ranks_;
-};
 
 using MutexStorage = std::vector<std::unordered_set<std::uint64_t>>;
 
@@ -86,31 +59,6 @@ inline void merge_mutexes(
     mutexes_to.erase(root_from);
     mutexes_to.erase(root_to);
     mutexes_from.clear();
-}
-
-inline std::vector<std::ptrdiff_t> c_order_strides(const std::vector<std::ptrdiff_t> &shape) {
-    std::vector<std::ptrdiff_t> strides(shape.size(), 1);
-    for (std::ptrdiff_t axis = static_cast<std::ptrdiff_t>(shape.size()) - 2; axis >= 0; --axis) {
-        strides[static_cast<std::size_t>(axis)] =
-            strides[static_cast<std::size_t>(axis + 1)] * shape[static_cast<std::size_t>(axis + 1)];
-    }
-    return strides;
-}
-
-inline bool is_valid_grid_edge(
-    const std::uint64_t node,
-    const std::vector<std::ptrdiff_t> &offset,
-    const std::vector<std::ptrdiff_t> &shape,
-    const std::vector<std::ptrdiff_t> &strides
-) {
-    for (std::size_t axis = 0; axis < shape.size(); ++axis) {
-        const auto coord = static_cast<std::ptrdiff_t>(node / static_cast<std::uint64_t>(strides[axis])) % shape[axis];
-        const auto neighbor = coord + offset[axis];
-        if (neighbor < 0 || neighbor >= shape[axis]) {
-            return false;
-        }
-    }
-    return true;
 }
 
 template <class T>
@@ -168,7 +116,7 @@ void mutex_watershed_grid(
         std::ptrdiff_t{1},
         [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
     ));
-    const auto spatial_strides = c_order_strides(spatial_shape);
+    const auto spatial_strides = detail::c_order_strides(spatial_shape);
 
     std::vector<std::ptrdiff_t> offset_strides(number_of_channels, 0);
     for (std::size_t channel = 0; channel < number_of_channels; ++channel) {
@@ -189,7 +137,7 @@ void mutex_watershed_grid(
         return first_weight > second_weight;
     });
 
-    DisjointSets sets(static_cast<std::size_t>(number_of_nodes));
+    detail::UnionFind sets(static_cast<std::size_t>(number_of_nodes));
     MutexStorage mutexes(static_cast<std::size_t>(number_of_nodes));
 
     for (const auto edge_id : edge_order) {
@@ -199,7 +147,7 @@ void mutex_watershed_grid(
 
         const auto channel = static_cast<std::size_t>(edge_id / number_of_nodes);
         const auto u = edge_id % number_of_nodes;
-        if (!is_valid_grid_edge(u, offsets[channel], spatial_shape, spatial_strides)) {
+        if (!detail::is_valid_grid_edge(u, offsets[channel], spatial_shape, spatial_strides)) {
             continue;
         }
 
