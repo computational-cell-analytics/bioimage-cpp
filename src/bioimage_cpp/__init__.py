@@ -3,6 +3,7 @@
 from ._version import __version__
 from ._core import Block, Blocking, BlockWithHalo
 from . import graph
+from . import ground_truth
 from . import segmentation
 from . import utils
 
@@ -12,6 +13,7 @@ __all__ = [
     "Blocking",
     "BlockWithHalo",
     "graph",
+    "ground_truth",
     "segmentation",
     "utils",
 ]

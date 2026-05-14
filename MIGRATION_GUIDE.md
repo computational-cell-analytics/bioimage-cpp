@@ -16,7 +16,8 @@ import bioimage_cpp as bic
 ```
 
 Graph functionality is under `bic.graph`, segmentation functionality is under
-`bic.segmentation`, and small utility functions are under `bic.utils`.
+`bic.segmentation`, ground-truth comparison functionality is under
+`bic.ground_truth`, and small utility functions are under `bic.utils`.
 
 ## Blocking
 
@@ -219,6 +220,74 @@ Notes:
 - Feature arrays use `float64` output.
 - `number_of_threads=0` uses the library default; pass a positive integer for a
   fixed thread count.
+
+## Segmentation Overlaps
+
+Nifty:
+
+```python
+import nifty.ground_truth as ngt
+
+overlap = ngt.overlap(segmentation, ground_truth)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+overlap = bic.ground_truth.segmentation_overlap(segmentation, ground_truth)
+```
+
+The first input is called `labels_a` and the second input is called `labels_b`
+in the `bioimage-cpp` API. Use named structured tables instead of positional
+arrays:
+
+```python
+table = overlap.overlap_table()
+# fields: "label_a", "label_b", "count"
+
+table = overlap.overlap_table(normalize_by="a")
+# fields: "label_a", "label_b", "count", "fraction"
+
+overlaps = overlap.overlaps_for_label_a(12, normalize=True)
+# fields: "label", "count", "fraction"
+
+best = overlap.best_overlap_for_label_a(12, ignore_zero=True)
+# BestOverlap(label=..., count=..., fraction=..., found=...)
+```
+
+Other common queries:
+
+```python
+overlap.labels_a
+overlap.labels_b
+overlap.count_a(12)
+overlap.count_b(4)
+overlap.overlap_count(12, 4)
+overlap.counts_a_table()
+overlap.counts_b_table()
+overlap.best_overlap_for_label_b(4)
+overlap.is_label_a_overlapping_with_zero(12)
+overlap.different_overlap(12, 13)
+```
+
+Intentional improvements over nifty:
+
+- Labels are stored sparsely, so large sparse label ids do not require a dense
+  vector up to `max_label + 1`.
+- The Python API returns structured arrays with named fields and a
+  `BestOverlap` dataclass instead of ambiguous positional arrays.
+- Both overlap directions are supported explicitly:
+  `overlaps_for_label_a(...)` and `overlaps_for_label_b(...)`.
+- Normalization is explicit via `normalize_by="a"`, `"b"`, or `"total"`.
+- Missing labels return count `0`; best-overlap queries expose `found=False`.
+
+Notes:
+
+- Inputs must be integer arrays with identical shape.
+- Signed integer inputs must not contain negative labels.
+- Inputs are converted to contiguous `uint64` arrays before entering C++.
 
 ## Mutex Watershed
 
