@@ -41,6 +41,12 @@ segmentation = bic.segmentation.mutex_watershed(
 )
 ```
 
+```python
+graph = bic.graph.UndirectedGraph.from_edges(4, [[0, 1], [1, 2], [2, 3]])
+graph.find_edge(2, 1)
+# 1
+```
+
 ## Scope
 
 The project is not a compatibility layer for `nifty`, `vigra`, or other large libraries. It keeps I/O and heavy dependencies out of the C++ core; callers should use existing Python packages for file formats and pass NumPy arrays into `bioimage-cpp`.
