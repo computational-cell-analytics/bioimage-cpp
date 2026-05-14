@@ -1,6 +1,8 @@
 #pragma once
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/edge_hash.hxx"
+#include "bioimage_cpp/detail/threading.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <algorithm>
@@ -10,7 +12,6 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -40,22 +41,10 @@ private:
 
 namespace detail {
 
-using Edge = UndirectedGraph::Edge;
-
-struct EdgeHash {
-    std::size_t operator()(const Edge &edge) const {
-        const auto first = static_cast<std::size_t>(edge.first);
-        const auto second = static_cast<std::size_t>(edge.second);
-        return first ^ (second + 0x9e3779b97f4a7c15ULL + (first << 6U) + (first >> 2U));
-    }
-};
-
-inline Edge edge_key(std::uint64_t u, std::uint64_t v) {
-    if (v < u) {
-        std::swap(u, v);
-    }
-    return {u, v};
-}
+using bioimage_cpp::detail::Edge;
+using bioimage_cpp::detail::EdgeHash;
+using bioimage_cpp::detail::edge_key;
+using bioimage_cpp::detail::normalize_thread_count;
 
 template <class T>
 std::uint64_t checked_label_to_node(const T value) {
@@ -80,23 +69,6 @@ std::uint64_t max_label(const ConstArrayView<T> &labels) {
         max_value = std::max(max_value, checked_label_to_node(labels.data[index]));
     }
     return max_value;
-}
-
-inline std::size_t normalize_thread_count(
-    const std::size_t requested,
-    const std::size_t number_of_work_items
-) {
-    if (number_of_work_items == 0) {
-        return 1;
-    }
-    std::size_t n_threads = requested;
-    if (n_threads == 0) {
-        n_threads = std::thread::hardware_concurrency();
-        if (n_threads == 0) {
-            n_threads = 1;
-        }
-    }
-    return std::max<std::size_t>(1, std::min(n_threads, number_of_work_items));
 }
 
 template <class T>
@@ -213,41 +185,33 @@ RegionAdjacencyGraph region_adjacency_graph(
     const auto work_items = static_cast<std::size_t>(labels.shape[0]);
     const auto n_threads = detail::normalize_thread_count(number_of_threads, work_items);
     std::vector<std::unordered_set<detail::Edge, detail::EdgeHash>> per_thread_edges(n_threads);
-    std::vector<std::thread> threads;
-    threads.reserve(n_threads > 0 ? n_threads - 1 : 0);
 
-    const auto run_chunk = [&](const std::size_t thread_id) {
-        const auto begin = thread_id * work_items / n_threads;
-        const auto end = (thread_id + 1) * work_items / n_threads;
-        if (labels.ndim() == 2) {
-            detail::scan_2d_chunk(
-                labels.data,
-                static_cast<std::size_t>(labels.shape[0]),
-                static_cast<std::size_t>(labels.shape[1]),
-                begin,
-                end,
-                per_thread_edges[thread_id]
-            );
-        } else {
-            detail::scan_3d_chunk(
-                labels.data,
-                static_cast<std::size_t>(labels.shape[0]),
-                static_cast<std::size_t>(labels.shape[1]),
-                static_cast<std::size_t>(labels.shape[2]),
-                begin,
-                end,
-                per_thread_edges[thread_id]
-            );
+    bioimage_cpp::detail::parallel_for_chunks(
+        n_threads,
+        work_items,
+        [&](const std::size_t thread_id, const std::size_t begin, const std::size_t end) {
+            if (labels.ndim() == 2) {
+                detail::scan_2d_chunk(
+                    labels.data,
+                    static_cast<std::size_t>(labels.shape[0]),
+                    static_cast<std::size_t>(labels.shape[1]),
+                    begin,
+                    end,
+                    per_thread_edges[thread_id]
+                );
+            } else {
+                detail::scan_3d_chunk(
+                    labels.data,
+                    static_cast<std::size_t>(labels.shape[0]),
+                    static_cast<std::size_t>(labels.shape[1]),
+                    static_cast<std::size_t>(labels.shape[2]),
+                    begin,
+                    end,
+                    per_thread_edges[thread_id]
+                );
+            }
         }
-    };
-
-    for (std::size_t thread_id = 1; thread_id < n_threads; ++thread_id) {
-        threads.emplace_back(run_chunk, thread_id);
-    }
-    run_chunk(0);
-    for (auto &thread : threads) {
-        thread.join();
-    }
+    );
 
     auto graph = RegionAdjacencyGraph(max_node + 1, std::move(shape));
     for (const auto edge : detail::merge_edge_sets(per_thread_edges)) {

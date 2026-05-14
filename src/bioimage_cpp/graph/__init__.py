@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+
 import numpy as np
 
 from .. import _core
+from ._external import (
+    DEFAULT_EXTERNAL_MULTICUT_PROBLEM_PATH,
+    EXTERNAL_MULTICUT_PROBLEM_URL,
+    external_multicut_problem_path,
+    load_external_multicut_problem,
+    load_external_multicut_problem_data,
+)
 
 _REGION_ADJACENCY_GRAPH_BY_DTYPE = {
     np.dtype("uint32"): _core._region_adjacency_graph_uint32,
@@ -118,12 +127,287 @@ def _as_serialization_array(serialization) -> np.ndarray:
     return np.ascontiguousarray(array)
 
 
+def _copy_graph(graph: UndirectedGraph | RegionAdjacencyGraph) -> UndirectedGraph:
+    copied = UndirectedGraph(int(graph.number_of_nodes), int(graph.number_of_edges))
+    if graph.number_of_edges:
+        copied.insert_edges(graph.uv_ids())
+    return copied
+
+
+def _as_edge_costs(edge_costs, graph: UndirectedGraph | RegionAdjacencyGraph) -> np.ndarray:
+    array = np.asarray(edge_costs, dtype=np.float64)
+    if array.ndim != 1:
+        raise ValueError("edge_costs must be a 1D array")
+    if array.shape[0] != graph.number_of_edges:
+        raise ValueError("edge_costs length must match graph number_of_edges")
+    return np.ascontiguousarray(array)
+
+
+def _as_node_labels(labels, graph: UndirectedGraph | RegionAdjacencyGraph) -> np.ndarray:
+    array = np.asarray(labels, dtype=np.uint64)
+    if array.ndim != 1:
+        raise ValueError("labels must be a 1D array")
+    if array.shape[0] != graph.number_of_nodes:
+        raise ValueError("labels length must match graph number_of_nodes")
+    return np.ascontiguousarray(array)
+
+
+def _dense_labels(labels) -> np.ndarray:
+    labels = np.asarray(labels, dtype=np.uint64)
+    _, dense = np.unique(labels, return_inverse=True)
+    return np.ascontiguousarray(dense.astype(np.uint64, copy=False))
+
+
+def _subproblem_from_edges(number_of_nodes: int, nodes, uvs, edge_costs):
+    local_ids = np.full(int(number_of_nodes), -1, dtype=np.int64)
+    local_ids[nodes] = np.arange(nodes.size, dtype=np.int64)
+    local_uvs = local_ids[np.asarray(uvs, dtype=np.uint64)]
+    sub_graph = UndirectedGraph(int(nodes.size), int(len(edge_costs)))
+    if local_uvs.size:
+        sub_graph.insert_edges(np.ascontiguousarray(local_uvs.astype(np.uint64, copy=False)))
+    return sub_graph, np.ascontiguousarray(np.asarray(edge_costs, dtype=np.float64))
+
+
 def undirected_graph(number_of_nodes: int) -> UndirectedGraph:
     """Create an :class:`UndirectedGraph`."""
     return UndirectedGraph(number_of_nodes)
 
 
 RegionAdjacencyGraph = _core.RegionAdjacencyGraph
+
+
+def connected_components(
+    graph: UndirectedGraph | RegionAdjacencyGraph,
+    edge_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Compute dense connected-component labels for graph nodes.
+
+    If ``edge_mask`` is given, only edges with a true mask value contribute to
+    the connected components.
+    """
+    if edge_mask is None:
+        return _core._connected_components(graph)
+
+    mask = np.asarray(edge_mask)
+    if mask.dtype != np.dtype("bool"):
+        raise TypeError(f"edge_mask must have dtype bool, got dtype={mask.dtype}")
+    if mask.ndim != 1:
+        raise ValueError("edge_mask must be a 1D array")
+    if mask.shape[0] != graph.number_of_edges:
+        raise ValueError("edge_mask length must match graph number_of_edges")
+    return _core._connected_components_masked(
+        graph, np.ascontiguousarray(mask.astype(np.uint8, copy=False))
+    )
+
+
+class MulticutObjective:
+    """Multicut objective for an undirected graph and edge costs."""
+
+    def __init__(
+        self,
+        graph: UndirectedGraph | RegionAdjacencyGraph,
+        edge_costs,
+        initial_labels=None,
+    ):
+        self._graph = _copy_graph(graph)
+        self._edge_costs = _as_edge_costs(edge_costs, self._graph)
+        if initial_labels is None:
+            self._labels = np.arange(self._graph.number_of_nodes, dtype=np.uint64)
+        else:
+            self._labels = _as_node_labels(initial_labels, self._graph)
+
+    @property
+    def graph(self) -> UndirectedGraph:
+        return self._graph
+
+    @property
+    def edge_costs(self) -> np.ndarray:
+        return self._edge_costs
+
+    @property
+    def labels(self) -> np.ndarray:
+        return self._labels
+
+    @labels.setter
+    def labels(self, labels) -> None:
+        self._labels = _as_node_labels(labels, self._graph)
+
+    def set_labels(self, labels) -> None:
+        self.labels = labels
+
+    def reset_labels(self) -> None:
+        self._labels = np.arange(self._graph.number_of_nodes, dtype=np.uint64)
+
+    def energy(self, labels=None) -> float:
+        label_array = self._labels if labels is None else _as_node_labels(labels, self._graph)
+        return float(_core._multicut_energy(self._graph, self._edge_costs, label_array))
+
+
+class MulticutSolver(ABC):
+    """Base class for multicut solvers."""
+
+    @abstractmethod
+    def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        """Optimize ``objective`` and return the node labeling."""
+
+
+class GreedyAdditiveMulticut(MulticutSolver):
+    def __init__(
+        self,
+        *,
+        weight_stop: float = 0.0,
+        node_num_stop: float = -1.0,
+        add_noise: bool = False,
+        seed: int = 42,
+        sigma: float = 1.0,
+    ):
+        self.weight_stop = float(weight_stop)
+        self.node_num_stop = float(node_num_stop)
+        self.add_noise = bool(add_noise)
+        self.seed = int(seed)
+        self.sigma = float(sigma)
+
+    def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        labels = _core._multicut_greedy_additive(
+            objective.graph,
+            objective.edge_costs,
+            self.weight_stop,
+            self.node_num_stop,
+            self.add_noise,
+            self.seed,
+            self.sigma,
+        )
+        objective.labels = labels
+        return objective.labels
+
+
+class GreedyFixationMulticut(MulticutSolver):
+    def __init__(self, *, weight_stop: float = 0.0, node_num_stop: float = -1.0):
+        self.weight_stop = float(weight_stop)
+        self.node_num_stop = float(node_num_stop)
+
+    def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        labels = _core._multicut_greedy_fixation(
+            objective.graph,
+            objective.edge_costs,
+            self.weight_stop,
+            self.node_num_stop,
+        )
+        objective.labels = labels
+        return objective.labels
+
+
+class KernighanLinMulticut(MulticutSolver):
+    def __init__(
+        self,
+        *,
+        number_of_outer_iterations: int = 100,
+        number_of_inner_iterations: int | None = None,
+        epsilon: float = 1.0e-6,
+    ):
+        self.number_of_outer_iterations = int(number_of_outer_iterations)
+        if self.number_of_outer_iterations < 0:
+            raise ValueError("number_of_outer_iterations must be non-negative")
+        self.number_of_inner_iterations = (
+            None if number_of_inner_iterations is None else int(number_of_inner_iterations)
+        )
+        self.epsilon = float(epsilon)
+
+    def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        initial_labels = objective.labels
+        if np.array_equal(
+            initial_labels,
+            np.arange(objective.graph.number_of_nodes, dtype=np.uint64),
+        ):
+            initial_labels = _core._multicut_greedy_additive(
+                objective.graph,
+                objective.edge_costs,
+                0.0,
+                -1.0,
+                False,
+                42,
+                1.0,
+            )
+        labels = _core._multicut_kernighan_lin(
+            objective.graph,
+            objective.edge_costs,
+            initial_labels,
+            self.number_of_outer_iterations,
+            self.epsilon,
+        )
+        objective.labels = labels
+        return objective.labels
+
+
+class ChainedMulticutSolvers(MulticutSolver):
+    def __init__(self, solvers):
+        self.solvers = list(solvers)
+        if len(self.solvers) == 0:
+            raise ValueError("solvers must contain at least one solver")
+        if not all(isinstance(solver, MulticutSolver) for solver in self.solvers):
+            raise TypeError("all solvers must inherit from MulticutSolver")
+
+    def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        labels = objective.labels
+        for solver in self.solvers:
+            labels = solver.optimize(objective)
+        return labels
+
+
+class MulticutDecomposer(MulticutSolver):
+    def __init__(
+        self,
+        sub_solver: MulticutSolver,
+        *,
+        fallthrough_solver: MulticutSolver | None = None,
+        number_of_threads: int = 0,
+    ):
+        if not isinstance(sub_solver, MulticutSolver):
+            raise TypeError("sub_solver must inherit from MulticutSolver")
+        if fallthrough_solver is not None and not isinstance(fallthrough_solver, MulticutSolver):
+            raise TypeError("fallthrough_solver must inherit from MulticutSolver")
+        self.sub_solver = sub_solver
+        self.fallthrough_solver = fallthrough_solver
+        self.number_of_threads = _normalize_number_of_threads(number_of_threads)
+
+    def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        if self.fallthrough_solver is None and isinstance(self.sub_solver, GreedyAdditiveMulticut):
+            return self.sub_solver.optimize(objective)
+
+        component_labels = connected_components(
+            objective.graph,
+            edge_mask=objective.edge_costs > 0.0,
+        )
+        number_of_components = int(component_labels.max()) + 1 if component_labels.size else 0
+        if number_of_components <= 1:
+            solver = self.fallthrough_solver or self.sub_solver
+            return solver.optimize(objective)
+
+        global_labels = np.empty(objective.graph.number_of_nodes, dtype=np.uint64)
+        label_offset = 0
+        all_uvs = objective.graph.uv_ids()
+        for component in range(number_of_components):
+            nodes = np.flatnonzero(component_labels == component).astype(np.uint64)
+            if nodes.size == 1:
+                global_labels[int(nodes[0])] = label_offset
+                label_offset += 1
+                continue
+
+            edge_ids = objective.graph.edges_from_node_list(nodes)
+            sub_graph, sub_costs = _subproblem_from_edges(
+                objective.graph.number_of_nodes,
+                nodes,
+                all_uvs[edge_ids],
+                objective.edge_costs[edge_ids],
+            )
+            sub_objective = MulticutObjective(sub_graph, sub_costs)
+            sub_labels = self.sub_solver.optimize(sub_objective)
+            sub_labels = _dense_labels(sub_labels)
+            global_labels[nodes] = sub_labels + label_offset
+            label_offset += int(sub_labels.max()) + 1
+
+        objective.labels = _dense_labels(global_labels)
+        return objective.labels
 
 
 def region_adjacency_graph(
@@ -327,14 +611,27 @@ def _normalize_number_of_threads(number_of_threads: int) -> int:
 
 
 __all__ = [
+    "ChainedMulticutSolvers",
     "COMPLEX_EDGE_FEATURE_NAMES",
+    "DEFAULT_EXTERNAL_MULTICUT_PROBLEM_PATH",
+    "EXTERNAL_MULTICUT_PROBLEM_URL",
+    "GreedyAdditiveMulticut",
+    "GreedyFixationMulticut",
+    "KernighanLinMulticut",
+    "MulticutDecomposer",
+    "MulticutObjective",
+    "MulticutSolver",
     "RegionAdjacencyGraph",
     "SIMPLE_EDGE_FEATURE_NAMES",
     "UndirectedGraph",
     "affinity_features",
     "affinity_features_complex",
+    "connected_components",
     "edge_map_features",
     "edge_map_features_complex",
+    "external_multicut_problem_path",
+    "load_external_multicut_problem",
+    "load_external_multicut_problem_data",
     "region_adjacency_graph",
     "undirected_graph",
 ]

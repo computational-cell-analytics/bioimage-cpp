@@ -1,7 +1,9 @@
 #include "graph.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/feature_accumulation.hxx"
+#include "bioimage_cpp/graph/multicut.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
@@ -25,6 +27,7 @@ namespace {
 using Graph = graph::UndirectedGraph;
 using Rag = graph::RegionAdjacencyGraph;
 using UInt64Array = nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig>;
+using ConstUInt8Array = nb::ndarray<nb::numpy, const std::uint8_t, nb::c_contig>;
 using ConstUInt64Array = nb::ndarray<nb::numpy, const std::uint64_t, nb::c_contig>;
 using Int64Array = nb::ndarray<nb::numpy, std::int64_t, nb::c_contig>;
 using DoubleArray = nb::ndarray<nb::numpy, double, nb::c_contig>;
@@ -69,6 +72,46 @@ DoubleArray make_double_array(const std::vector<std::size_t> &shape) {
     auto *data = new double[size]();
     nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<double *>(p); });
     return DoubleArray(data, shape.size(), shape.data(), owner);
+}
+
+UInt64Array vector_to_uint64_array(const std::vector<std::uint64_t> &values) {
+    auto result = make_uint64_array({values.size()});
+    std::copy(values.begin(), values.end(), result.data());
+    return result;
+}
+
+std::vector<double> double_array_to_vector(
+    ConstDoubleArray array,
+    const char *argument_name,
+    const std::uint64_t expected_size
+) {
+    if (array.ndim() != 1) {
+        throw std::invalid_argument(std::string(argument_name) + " must be a 1D float64 array");
+    }
+    if (array.shape(0) != static_cast<std::size_t>(expected_size)) {
+        throw std::invalid_argument(
+            std::string(argument_name) + " length must match expected size"
+        );
+    }
+    const auto *data = array.data();
+    return std::vector<double>(data, data + array.shape(0));
+}
+
+std::vector<std::uint64_t> uint64_array_to_vector(
+    ConstUInt64Array array,
+    const char *argument_name,
+    const std::uint64_t expected_size
+) {
+    if (array.ndim() != 1) {
+        throw std::invalid_argument(std::string(argument_name) + " must be a 1D uint64 array");
+    }
+    if (array.shape(0) != static_cast<std::size_t>(expected_size)) {
+        throw std::invalid_argument(
+            std::string(argument_name) + " length must match expected size"
+        );
+    }
+    const auto *data = array.data();
+    return std::vector<std::uint64_t>(data, data + array.shape(0));
 }
 
 UInt64Array graph_nodes(const Graph &graph) {
@@ -215,6 +258,100 @@ std::pair<UInt64Array, UInt64Array> graph_extract_subgraph_from_nodes(
 UInt64Array graph_edges_from_node_list(const Graph &graph, ConstUInt64Array nodes) {
     const auto extracted = graph_extract_subgraph_from_nodes(graph, nodes);
     return extracted.first;
+}
+
+UInt64Array graph_connected_components(const Graph &graph) {
+    std::vector<std::uint64_t> labels;
+    {
+        nb::gil_scoped_release release;
+        labels = graph::connected_components(graph);
+    }
+    return vector_to_uint64_array(labels);
+}
+
+UInt64Array graph_connected_components_masked(const Graph &graph, ConstUInt8Array edge_mask) {
+    if (edge_mask.ndim() != 1) {
+        throw std::invalid_argument("edge_mask must be a 1D uint8 array");
+    }
+    if (edge_mask.shape(0) != static_cast<std::size_t>(graph.number_of_edges())) {
+        throw std::invalid_argument("edge_mask length must match graph number_of_edges");
+    }
+    std::vector<std::uint64_t> labels;
+    {
+        nb::gil_scoped_release release;
+        labels = graph::connected_components(graph, edge_mask.data());
+    }
+    return vector_to_uint64_array(labels);
+}
+
+double multicut_energy(const Graph &graph, ConstDoubleArray costs, ConstUInt64Array labels) {
+    const auto cost_vector = double_array_to_vector(costs, "edge_costs", graph.number_of_edges());
+    const auto label_vector = uint64_array_to_vector(labels, "labels", graph.number_of_nodes());
+    nb::gil_scoped_release release;
+    return graph::multicut::energy(graph, cost_vector, label_vector);
+}
+
+UInt64Array multicut_greedy_additive(
+    const Graph &graph,
+    ConstDoubleArray costs,
+    const double weight_stop,
+    const double node_num_stop,
+    const bool add_noise,
+    const int seed,
+    const double sigma
+) {
+    const auto cost_vector = double_array_to_vector(costs, "edge_costs", graph.number_of_edges());
+    std::vector<std::uint64_t> labels;
+    {
+        nb::gil_scoped_release release;
+        labels = graph::multicut::greedy_additive(
+            graph,
+            cost_vector,
+            weight_stop,
+            node_num_stop,
+            add_noise,
+            seed,
+            sigma
+        );
+    }
+    return vector_to_uint64_array(labels);
+}
+
+UInt64Array multicut_greedy_fixation(
+    const Graph &graph,
+    ConstDoubleArray costs,
+    const double weight_stop,
+    const double node_num_stop
+) {
+    const auto cost_vector = double_array_to_vector(costs, "edge_costs", graph.number_of_edges());
+    std::vector<std::uint64_t> labels;
+    {
+        nb::gil_scoped_release release;
+        labels = graph::multicut::greedy_fixation(graph, cost_vector, weight_stop, node_num_stop);
+    }
+    return vector_to_uint64_array(labels);
+}
+
+UInt64Array multicut_kernighan_lin(
+    const Graph &graph,
+    ConstDoubleArray costs,
+    ConstUInt64Array initial_labels,
+    const std::uint64_t number_of_outer_iterations,
+    const double epsilon
+) {
+    const auto cost_vector = double_array_to_vector(costs, "edge_costs", graph.number_of_edges());
+    auto label_vector = uint64_array_to_vector(initial_labels, "initial_labels", graph.number_of_nodes());
+    {
+        nb::gil_scoped_release release;
+        label_vector = graph::multicut::kernighan_lin(
+            graph,
+            cost_vector,
+            std::move(label_vector),
+            number_of_outer_iterations,
+            epsilon
+        );
+    }
+    return vector_to_uint64_array(label_vector);
 }
 
 template <class T>
@@ -415,6 +552,49 @@ void bind_graph(nb::module_ &m) {
 
     nb::class_<Rag, Graph>(m, "RegionAdjacencyGraph")
         .def_prop_ro("shape", &Rag::shape);
+
+    m.def("_connected_components", &graph_connected_components, nb::arg("graph"));
+    m.def(
+        "_connected_components_masked",
+        &graph_connected_components_masked,
+        nb::arg("graph"),
+        nb::arg("edge_mask")
+    );
+    m.def(
+        "_multicut_energy",
+        &multicut_energy,
+        nb::arg("graph"),
+        nb::arg("edge_costs"),
+        nb::arg("labels")
+    );
+    m.def(
+        "_multicut_greedy_additive",
+        &multicut_greedy_additive,
+        nb::arg("graph"),
+        nb::arg("edge_costs"),
+        nb::arg("weight_stop"),
+        nb::arg("node_num_stop"),
+        nb::arg("add_noise"),
+        nb::arg("seed"),
+        nb::arg("sigma")
+    );
+    m.def(
+        "_multicut_greedy_fixation",
+        &multicut_greedy_fixation,
+        nb::arg("graph"),
+        nb::arg("edge_costs"),
+        nb::arg("weight_stop"),
+        nb::arg("node_num_stop")
+    );
+    m.def(
+        "_multicut_kernighan_lin",
+        &multicut_kernighan_lin,
+        nb::arg("graph"),
+        nb::arg("edge_costs"),
+        nb::arg("initial_labels"),
+        nb::arg("number_of_outer_iterations"),
+        nb::arg("epsilon")
+    );
 
     m.def(
         "_region_adjacency_graph_uint32",
