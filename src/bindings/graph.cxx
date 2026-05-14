@@ -1,6 +1,7 @@
 #include "graph.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/graph/feature_accumulation.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
@@ -26,6 +27,8 @@ using Rag = graph::RegionAdjacencyGraph;
 using UInt64Array = nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig>;
 using ConstUInt64Array = nb::ndarray<nb::numpy, const std::uint64_t, nb::c_contig>;
 using Int64Array = nb::ndarray<nb::numpy, std::int64_t, nb::c_contig>;
+using DoubleArray = nb::ndarray<nb::numpy, double, nb::c_contig>;
+using ConstDoubleArray = nb::ndarray<nb::numpy, const double, nb::c_contig>;
 
 template <class T>
 using LabelArray = nb::ndarray<nb::numpy, const T, nb::c_contig>;
@@ -56,6 +59,16 @@ Int64Array make_int64_array(const std::vector<std::size_t> &shape) {
     auto *data = new std::int64_t[size]();
     nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<std::int64_t *>(p); });
     return Int64Array(data, shape.size(), shape.data(), owner);
+}
+
+DoubleArray make_double_array(const std::vector<std::size_t> &shape) {
+    std::size_t size = 1;
+    for (const auto axis_size : shape) {
+        size *= axis_size;
+    }
+    auto *data = new double[size]();
+    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<double *>(p); });
+    return DoubleArray(data, shape.size(), shape.data(), owner);
 }
 
 UInt64Array graph_nodes(const Graph &graph) {
@@ -205,7 +218,7 @@ UInt64Array graph_edges_from_node_list(const Graph &graph, ConstUInt64Array node
 }
 
 template <class T>
-Rag grid_region_adjacency_graph_t(
+Rag region_adjacency_graph_t(
     LabelArray<T> labels,
     const std::size_t number_of_threads
 ) {
@@ -221,7 +234,116 @@ Rag grid_region_adjacency_graph_t(
     };
 
     nb::gil_scoped_release release;
-    return graph::grid_region_adjacency_graph<T>(labels_view, number_of_threads);
+    return graph::region_adjacency_graph<T>(labels_view, number_of_threads);
+}
+
+template <class T>
+std::vector<std::ptrdiff_t> ndarray_shape(LabelArray<T> array) {
+    std::vector<std::ptrdiff_t> shape(array.ndim());
+    for (std::size_t axis = 0; axis < array.ndim(); ++axis) {
+        shape[axis] = static_cast<std::ptrdiff_t>(array.shape(axis));
+    }
+    return shape;
+}
+
+std::vector<std::ptrdiff_t> ndarray_shape(ConstDoubleArray array) {
+    std::vector<std::ptrdiff_t> shape(array.ndim());
+    for (std::size_t axis = 0; axis < array.ndim(); ++axis) {
+        shape[axis] = static_cast<std::ptrdiff_t>(array.shape(axis));
+    }
+    return shape;
+}
+
+template <class LabelT>
+DoubleArray accumulate_edge_map_features_t(
+    const Rag &rag,
+    LabelArray<LabelT> labels,
+    ConstDoubleArray edge_map,
+    const bool compute_complex_features,
+    const std::size_t number_of_threads
+) {
+    const auto number_of_features = compute_complex_features ? 12 : 2;
+    auto result = make_double_array({
+        static_cast<std::size_t>(rag.number_of_edges()),
+        number_of_features
+    });
+
+    ConstArrayView<LabelT> labels_view{
+        labels.data(),
+        ndarray_shape(labels),
+        {},
+    };
+    ConstArrayView<double> edge_map_view{
+        edge_map.data(),
+        ndarray_shape(edge_map),
+        {},
+    };
+    ArrayView<double> out_view{
+        result.data(),
+        {
+            static_cast<std::ptrdiff_t>(rag.number_of_edges()),
+            static_cast<std::ptrdiff_t>(number_of_features),
+        },
+        {},
+    };
+
+    nb::gil_scoped_release release;
+    graph::accumulate_edge_map_features<LabelT, double>(
+        rag,
+        labels_view,
+        edge_map_view,
+        compute_complex_features,
+        number_of_threads,
+        out_view
+    );
+    return result;
+}
+
+template <class LabelT>
+DoubleArray accumulate_affinity_features_t(
+    const Rag &rag,
+    LabelArray<LabelT> labels,
+    ConstDoubleArray affinities,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets,
+    const bool compute_complex_features,
+    const std::size_t number_of_threads
+) {
+    const auto number_of_features = compute_complex_features ? 12 : 2;
+    auto result = make_double_array({
+        static_cast<std::size_t>(rag.number_of_edges()),
+        number_of_features
+    });
+
+    ConstArrayView<LabelT> labels_view{
+        labels.data(),
+        ndarray_shape(labels),
+        {},
+    };
+    ConstArrayView<double> affinities_view{
+        affinities.data(),
+        ndarray_shape(affinities),
+        {},
+    };
+    ArrayView<double> out_view{
+        result.data(),
+        {
+            static_cast<std::ptrdiff_t>(rag.number_of_edges()),
+            static_cast<std::ptrdiff_t>(number_of_features),
+        },
+        {},
+    };
+
+    nb::gil_scoped_release release;
+    graph::accumulate_affinity_features<LabelT, double>(
+        rag,
+        labels_view,
+        affinities_view,
+        offsets,
+        compute_complex_features,
+        number_of_threads,
+        out_view
+    );
+    return result;
 }
 
 } // namespace
@@ -295,32 +417,109 @@ void bind_graph(nb::module_ &m) {
         .def_prop_ro("shape", &Rag::shape);
 
     m.def(
-        "_grid_region_adjacency_graph_uint32",
-        &grid_region_adjacency_graph_t<std::uint32_t>,
+        "_region_adjacency_graph_uint32",
+        &region_adjacency_graph_t<std::uint32_t>,
         nb::arg("labels"),
         nb::arg("number_of_threads"),
         "Build a region adjacency graph for uint32 labels."
     );
     m.def(
-        "_grid_region_adjacency_graph_uint64",
-        &grid_region_adjacency_graph_t<std::uint64_t>,
+        "_region_adjacency_graph_uint64",
+        &region_adjacency_graph_t<std::uint64_t>,
         nb::arg("labels"),
         nb::arg("number_of_threads"),
         "Build a region adjacency graph for uint64 labels."
     );
     m.def(
-        "_grid_region_adjacency_graph_int32",
-        &grid_region_adjacency_graph_t<std::int32_t>,
+        "_region_adjacency_graph_int32",
+        &region_adjacency_graph_t<std::int32_t>,
         nb::arg("labels"),
         nb::arg("number_of_threads"),
         "Build a region adjacency graph for int32 labels."
     );
     m.def(
-        "_grid_region_adjacency_graph_int64",
-        &grid_region_adjacency_graph_t<std::int64_t>,
+        "_region_adjacency_graph_int64",
+        &region_adjacency_graph_t<std::int64_t>,
         nb::arg("labels"),
         nb::arg("number_of_threads"),
         "Build a region adjacency graph for int64 labels."
+    );
+
+    m.def(
+        "_accumulate_edge_map_features_uint32",
+        &accumulate_edge_map_features_t<std::uint32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("edge_map"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_edge_map_features_uint64",
+        &accumulate_edge_map_features_t<std::uint64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("edge_map"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_edge_map_features_int32",
+        &accumulate_edge_map_features_t<std::int32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("edge_map"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_edge_map_features_int64",
+        &accumulate_edge_map_features_t<std::int64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("edge_map"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_affinity_features_uint32",
+        &accumulate_affinity_features_t<std::uint32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_affinity_features_uint64",
+        &accumulate_affinity_features_t<std::uint64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_affinity_features_int32",
+        &accumulate_affinity_features_t<std::int32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_affinity_features_int64",
+        &accumulate_affinity_features_t<std::int64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
     );
 }
 

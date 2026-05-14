@@ -183,7 +183,7 @@ inline std::vector<Edge> merge_edge_sets(
 } // namespace detail
 
 template <class T>
-RegionAdjacencyGraph grid_region_adjacency_graph(
+RegionAdjacencyGraph region_adjacency_graph(
     const ConstArrayView<T> &labels,
     const std::size_t number_of_threads
 ) {
