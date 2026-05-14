@@ -39,6 +39,18 @@ public:
         }
     }
 
+    void merge_to(std::uint64_t stable, std::uint64_t removed) {
+        stable = find(stable);
+        removed = find(removed);
+        if (stable == removed) {
+            return;
+        }
+        parents_[static_cast<std::size_t>(removed)] = stable;
+        if (ranks_[static_cast<std::size_t>(stable)] <= ranks_[static_cast<std::size_t>(removed)]) {
+            ranks_[static_cast<std::size_t>(stable)] = ranks_[static_cast<std::size_t>(removed)] + 1;
+        }
+    }
+
 private:
     std::vector<std::uint64_t> parents_;
     std::vector<std::uint64_t> ranks_;

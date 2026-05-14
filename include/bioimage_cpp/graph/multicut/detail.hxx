@@ -17,12 +17,36 @@
 
 namespace bioimage_cpp::graph::multicut::detail {
 
+struct DynamicEdge {
+    double weight = 0.0;
+    std::uint64_t edition = 0;
+};
+
 struct DynamicGraph {
     explicit DynamicGraph(const std::size_t size) : adjacency(size), constraints(size), alive(size, true), alive_count(size) {
     }
 
+    explicit DynamicGraph(const UndirectedGraph &graph)
+        : adjacency(static_cast<std::size_t>(graph.number_of_nodes())),
+          constraints(static_cast<std::size_t>(graph.number_of_nodes())),
+          alive(static_cast<std::size_t>(graph.number_of_nodes()), true),
+          alive_count(static_cast<std::size_t>(graph.number_of_nodes())) {
+        for (std::uint64_t node = 0; node < graph.number_of_nodes(); ++node) {
+            const auto degree = graph.node_adjacency(node).size();
+            adjacency[static_cast<std::size_t>(node)].reserve(degree);
+        }
+    }
+
     [[nodiscard]] bool edge_exists(const std::size_t u, const std::size_t v) const {
         return alive[u] && alive[v] && adjacency[u].find(v) != adjacency[u].end();
+    }
+
+    [[nodiscard]] const DynamicEdge *edge(const std::size_t u, const std::size_t v) const {
+        if (!alive[u] || !alive[v]) {
+            return nullptr;
+        }
+        const auto found = adjacency[u].find(v);
+        return found == adjacency[u].end() ? nullptr : &found->second;
     }
 
     [[nodiscard]] bool has_constraint(const std::size_t u, const std::size_t v) const {
@@ -34,9 +58,17 @@ struct DynamicGraph {
         constraints[v].insert(u);
     }
 
-    void set_edge(const std::size_t u, const std::size_t v, const double weight) {
-        adjacency[u][v] = weight;
-        adjacency[v][u] = weight;
+    void set_initial_edge(const std::size_t u, const std::size_t v, const double weight) {
+        adjacency[u][v] = DynamicEdge{weight, 0};
+        adjacency[v][u] = DynamicEdge{weight, 0};
+    }
+
+    std::uint64_t update_edge(const std::size_t u, const std::size_t v, const double weight) {
+        const auto current = adjacency[u].find(v);
+        const auto edition = current == adjacency[u].end() ? 0 : current->second.edition + 1;
+        adjacency[u][v] = DynamicEdge{weight, edition};
+        adjacency[v][u] = DynamicEdge{weight, edition};
+        return edition;
     }
 
     void remove_node(const std::size_t node) {
@@ -50,7 +82,7 @@ struct DynamicGraph {
         --alive_count;
     }
 
-    std::vector<std::unordered_map<std::size_t, double>> adjacency;
+    std::vector<std::unordered_map<std::size_t, DynamicEdge>> adjacency;
     std::vector<std::unordered_set<std::size_t>> constraints;
     std::vector<bool> alive;
     std::size_t alive_count;
@@ -71,7 +103,6 @@ inline void initialize_dynamic_graph(
     const UndirectedGraph &graph,
     const std::vector<double> &costs,
     DynamicGraph &dynamic_graph,
-    std::vector<std::unordered_map<std::size_t, std::uint64_t>> &editions,
     std::priority_queue<QueueEdge> &queue,
     const bool absolute_priority,
     const bool add_noise = false,
@@ -88,9 +119,7 @@ inline void initialize_dynamic_graph(
         if (add_noise) {
             weight += noise(generator);
         }
-        dynamic_graph.set_edge(u, v, weight);
-        editions[u][v] = 0;
-        editions[v][u] = 0;
+        dynamic_graph.set_initial_edge(u, v, weight);
         queue.push(QueueEdge{u, v, absolute_priority ? std::abs(weight) : weight, 0});
     }
 }
@@ -108,7 +137,6 @@ inline std::size_t stop_node_count(const UndirectedGraph &graph, const double no
 inline std::size_t merge_dynamic_nodes(
     DynamicGraph &dynamic_graph,
     UnionFind &sets,
-    std::vector<std::unordered_map<std::size_t, std::uint64_t>> &editions,
     std::priority_queue<QueueEdge> &queue,
     std::size_t u,
     std::size_t v,
@@ -119,28 +147,28 @@ inline std::size_t merge_dynamic_nodes(
     if (u == v) {
         return u;
     }
-    sets.merge(u, v);
-    const auto stable = static_cast<std::size_t>(sets.find(u));
-    const auto removed = (stable == u) ? v : u;
-    std::vector<std::pair<std::size_t, double>> neighbors(
+    auto stable = u;
+    auto removed = v;
+    if (dynamic_graph.adjacency[stable].size() < dynamic_graph.adjacency[removed].size()) {
+        std::swap(stable, removed);
+    }
+    sets.merge_to(stable, removed);
+    std::vector<std::pair<std::size_t, DynamicEdge>> neighbors(
         dynamic_graph.adjacency[removed].begin(),
         dynamic_graph.adjacency[removed].end()
     );
     dynamic_graph.adjacency[stable].erase(removed);
     dynamic_graph.constraints[stable].erase(removed);
-    for (const auto &[neighbor, removed_weight] : neighbors) {
+    for (const auto &[neighbor, removed_edge] : neighbors) {
         if (neighbor == stable) {
             continue;
         }
-        const auto current = dynamic_graph.edge_exists(stable, neighbor)
-            ? dynamic_graph.adjacency[stable][neighbor]
-            : 0.0;
-        const auto merged_weight = current + removed_weight;
+        const auto current = dynamic_graph.edge(stable, neighbor);
+        const auto merged_weight = (current == nullptr ? 0.0 : current->weight) + removed_edge.weight;
         if (dynamic_graph.has_constraint(removed, neighbor)) {
             dynamic_graph.add_constraint(stable, neighbor);
         }
-        dynamic_graph.set_edge(stable, neighbor, merged_weight);
-        const auto edition = ++editions[std::min(stable, neighbor)][std::max(stable, neighbor)];
+        const auto edition = dynamic_graph.update_edge(stable, neighbor, merged_weight);
         queue.push(QueueEdge{
             std::min(stable, neighbor),
             std::max(stable, neighbor),

@@ -21,5 +21,8 @@ nanobind_add_module(_core
 
 target_include_directories(_core PRIVATE include)
 target_compile_features(_core PRIVATE cxx_std_20)
+target_compile_options(_core PRIVATE
+    $<$<NOT:$<CONFIG:Debug>>:-O3>
+)
 
 install(TARGETS _core LIBRARY DESTINATION bioimage_cpp)

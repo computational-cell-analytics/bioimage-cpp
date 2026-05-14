@@ -371,6 +371,9 @@ class MulticutDecomposer(MulticutSolver):
         self.number_of_threads = _normalize_number_of_threads(number_of_threads)
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        if self.fallthrough_solver is None and isinstance(self.sub_solver, GreedyAdditiveMulticut):
+            return self.sub_solver.optimize(objective)
+
         component_labels = connected_components(
             objective.graph,
             edge_mask=objective.edge_costs > 0.0,

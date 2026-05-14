@@ -22,28 +22,28 @@ inline std::vector<std::uint64_t> greedy_additive(
     const double sigma
 ) {
     validate_costs(graph, costs);
-    detail::DynamicGraph dynamic_graph(static_cast<std::size_t>(graph.number_of_nodes()));
+    detail::DynamicGraph dynamic_graph(graph);
     UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
-    std::vector<std::unordered_map<std::size_t, std::uint64_t>> editions(static_cast<std::size_t>(graph.number_of_nodes()));
     std::priority_queue<detail::QueueEdge> queue;
-    detail::initialize_dynamic_graph(graph, costs, dynamic_graph, editions, queue, false, add_noise, seed, sigma);
+    detail::initialize_dynamic_graph(graph, costs, dynamic_graph, queue, false, add_noise, seed, sigma);
 
     while (!queue.empty() && dynamic_graph.alive_count > 1) {
         auto edge = queue.top();
         queue.pop();
         const auto u = std::min(edge.u, edge.v);
         const auto v = std::max(edge.u, edge.v);
-        if (!dynamic_graph.edge_exists(u, v) || edge.edition < editions[u][v]) {
+        const auto *dynamic_edge = dynamic_graph.edge(u, v);
+        if (dynamic_edge == nullptr || edge.edition < dynamic_edge->edition) {
             continue;
         }
-        const auto weight = dynamic_graph.adjacency[u][v];
+        const auto weight = dynamic_edge->weight;
         if (weight <= weight_stop) {
             break;
         }
         if (node_num_stop > 0.0 && dynamic_graph.alive_count <= detail::stop_node_count(graph, node_num_stop)) {
             break;
         }
-        detail::merge_dynamic_nodes(dynamic_graph, sets, editions, queue, u, v, false);
+        detail::merge_dynamic_nodes(dynamic_graph, sets, queue, u, v, false);
     }
     return detail::labels_from_sets(sets, graph);
 }

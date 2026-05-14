@@ -67,6 +67,11 @@ def time_call(function: Callable[[], np.ndarray], repeats: int):
     return timings, result
 
 
+def optimize_bic_solver(make_bic_solver, objective):
+    objective.reset_labels()
+    return make_bic_solver().optimize(objective)
+
+
 def bic_energy(graph, costs: np.ndarray, labels: np.ndarray) -> float:
     import bioimage_cpp as bic
 
@@ -89,10 +94,11 @@ def run_comparison(
     import nifty.graph.opt.multicut as nmc
 
     bic_graph, nifty_graph, costs = load_problem(args.path, timeout=args.timeout)
+    bic_objective = bic.graph.MulticutObjective(bic_graph, costs)
     nifty_objective = nmc.multicutObjective(nifty_graph, costs)
 
     bic_timings, bic_labels = time_call(
-        lambda: make_bic_solver().optimize(bic.graph.MulticutObjective(bic_graph, costs)),
+        lambda: optimize_bic_solver(make_bic_solver, bic_objective),
         args.repeats,
     )
     nifty_timings, nifty_labels = time_call(
