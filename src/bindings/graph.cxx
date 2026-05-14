@@ -1,5 +1,7 @@
 #include "graph.hxx"
 
+#include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <nanobind/ndarray.h>
@@ -20,9 +22,13 @@ namespace bioimage_cpp::bindings {
 namespace {
 
 using Graph = graph::UndirectedGraph;
+using Rag = graph::RegionAdjacencyGraph;
 using UInt64Array = nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig>;
 using ConstUInt64Array = nb::ndarray<nb::numpy, const std::uint64_t, nb::c_contig>;
 using Int64Array = nb::ndarray<nb::numpy, std::int64_t, nb::c_contig>;
+
+template <class T>
+using LabelArray = nb::ndarray<nb::numpy, const T, nb::c_contig>;
 
 void require_uv_array(const ConstUInt64Array &uvs, const char *argument_name) {
     if (uvs.ndim() != 2 || uvs.shape(1) != 2) {
@@ -198,6 +204,26 @@ UInt64Array graph_edges_from_node_list(const Graph &graph, ConstUInt64Array node
     return extracted.first;
 }
 
+template <class T>
+Rag grid_region_adjacency_graph_t(
+    LabelArray<T> labels,
+    const std::size_t number_of_threads
+) {
+    std::vector<std::ptrdiff_t> shape(labels.ndim());
+    for (std::size_t axis = 0; axis < labels.ndim(); ++axis) {
+        shape[axis] = static_cast<std::ptrdiff_t>(labels.shape(axis));
+    }
+
+    ConstArrayView<T> labels_view{
+        labels.data(),
+        shape,
+        {},
+    };
+
+    nb::gil_scoped_release release;
+    return graph::grid_region_adjacency_graph<T>(labels_view, number_of_threads);
+}
+
 } // namespace
 
 void bind_graph(nb::module_ &m) {
@@ -264,6 +290,38 @@ void bind_graph(nb::module_ &m) {
             nb::arg("nodes")
         )
         .def("edgesFromNodeList", &graph_edges_from_node_list, nb::arg("nodes"));
+
+    nb::class_<Rag, Graph>(m, "RegionAdjacencyGraph")
+        .def_prop_ro("shape", &Rag::shape);
+
+    m.def(
+        "_grid_region_adjacency_graph_uint32",
+        &grid_region_adjacency_graph_t<std::uint32_t>,
+        nb::arg("labels"),
+        nb::arg("number_of_threads"),
+        "Build a region adjacency graph for uint32 labels."
+    );
+    m.def(
+        "_grid_region_adjacency_graph_uint64",
+        &grid_region_adjacency_graph_t<std::uint64_t>,
+        nb::arg("labels"),
+        nb::arg("number_of_threads"),
+        "Build a region adjacency graph for uint64 labels."
+    );
+    m.def(
+        "_grid_region_adjacency_graph_int32",
+        &grid_region_adjacency_graph_t<std::int32_t>,
+        nb::arg("labels"),
+        nb::arg("number_of_threads"),
+        "Build a region adjacency graph for int32 labels."
+    );
+    m.def(
+        "_grid_region_adjacency_graph_int64",
+        &grid_region_adjacency_graph_t<std::int64_t>,
+        nb::arg("labels"),
+        nb::arg("number_of_threads"),
+        "Build a region adjacency graph for int64 labels."
+    );
 }
 
 } // namespace bioimage_cpp::bindings

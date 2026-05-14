@@ -6,6 +6,13 @@ import numpy as np
 
 from .. import _core
 
+_GRID_REGION_ADJACENCY_GRAPH_BY_DTYPE = {
+    np.dtype("uint32"): _core._grid_region_adjacency_graph_uint32,
+    np.dtype("uint64"): _core._grid_region_adjacency_graph_uint64,
+    np.dtype("int32"): _core._grid_region_adjacency_graph_int32,
+    np.dtype("int64"): _core._grid_region_adjacency_graph_int64,
+}
+
 
 class UndirectedGraph(_core.UndirectedGraph):
     """Undirected graph with consecutive node and edge ids.
@@ -86,4 +93,56 @@ def undirected_graph(number_of_nodes: int) -> UndirectedGraph:
     return UndirectedGraph(number_of_nodes)
 
 
-__all__ = ["UndirectedGraph", "undirected_graph"]
+RegionAdjacencyGraph = _core.RegionAdjacencyGraph
+
+
+def grid_region_adjacency_graph(
+    labels: np.ndarray,
+    *,
+    number_of_threads: int = 0,
+) -> RegionAdjacencyGraph:
+    """Build a region adjacency graph from a 2D or 3D label image.
+
+    Nodes correspond to label ids from ``0`` to ``labels.max()``. Undirected
+    edges connect different labels that touch along the pixel or voxel grid's
+    direct neighborhood. The edge ids are deterministic and sorted
+    lexicographically by their endpoint ids.
+    """
+    array = np.asarray(labels)
+    if array.ndim not in (2, 3):
+        raise ValueError(f"labels must be a 2D or 3D array, got ndim={array.ndim}")
+    if any(size == 0 for size in array.shape):
+        raise ValueError("labels must not have empty dimensions")
+
+    dtype = array.dtype
+    try:
+        run = _GRID_REGION_ADJACENCY_GRAPH_BY_DTYPE[dtype]
+    except KeyError as error:
+        supported = ", ".join(
+            str(dtype) for dtype in _GRID_REGION_ADJACENCY_GRAPH_BY_DTYPE
+        )
+        raise TypeError(
+            f"labels must have one of dtypes ({supported}), got dtype={dtype}"
+        ) from error
+
+    number_of_threads = int(number_of_threads)
+    if number_of_threads < 0:
+        raise ValueError("number_of_threads must be non-negative")
+    return run(np.ascontiguousarray(array), number_of_threads)
+
+
+def grid_rag(labels: np.ndarray, *, number_of_threads: int = 0) -> RegionAdjacencyGraph:
+    """Alias for :func:`grid_region_adjacency_graph`."""
+    return grid_region_adjacency_graph(
+        labels,
+        number_of_threads=number_of_threads,
+    )
+
+
+__all__ = [
+    "RegionAdjacencyGraph",
+    "UndirectedGraph",
+    "grid_rag",
+    "grid_region_adjacency_graph",
+    "undirected_graph",
+]
