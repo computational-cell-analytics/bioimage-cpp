@@ -66,14 +66,35 @@ inline std::vector<std::vector<std::uint64_t>> build_cluster_to_nodes(
     return result;
 }
 
-// Scratch flag used only during the initial gain scan, so the chain can tell
-// whether each neighbor belongs to the current bipartition. After init the
-// addressable heap is the source of truth (heap.contains(u) replaces the
-// stale-tracking arrays the old hand-rolled heap required).
+// Per-node scratch reused across chains.
+//
+// - `in_pair`     : 1 while the node sits in (A ∪ B) for the current chain.
+// - `moved`       : 1 once the node has been popped (tentatively moved this
+//                   chain). Pairs with `in_pair` to distinguish "moved" from
+//                   "non-bordered, never pushed".
+// - `cross_count` : number of cross-side bipartition neighbors. Matches
+//                   nifty's `referenced_by`: a node is only allowed in the
+//                   heap once this is positive, which restricts the chain to
+//                   border moves and avoids committing "orphan" single-node
+//                   migrations into an arbitrary neighbor cluster. Without
+//                   this restriction the chain commits negative-internal-weight
+//                   nodes into B even when their true best home is a new
+//                   cluster, locking them out of the later split phase.
+// - `stash_gain`  : the node's current gain estimate, kept in sync regardless
+//                   of whether the node is currently in the heap. Used to seed
+//                   `heap.push` when a non-bordered node first joins the
+//                   border.
 struct ChainBuffers {
     std::vector<char> in_pair;
+    std::vector<char> moved;
+    std::vector<std::uint32_t> cross_count;
+    std::vector<double> stash_gain;
 
-    explicit ChainBuffers(const std::size_t n_nodes) : in_pair(n_nodes, 0) {}
+    explicit ChainBuffers(const std::size_t n_nodes)
+        : in_pair(n_nodes, 0),
+          moved(n_nodes, 0),
+          cross_count(n_nodes, 0),
+          stash_gain(n_nodes, 0.0) {}
 };
 
 struct ChainScratch {
@@ -90,6 +111,10 @@ struct ChainScratch {
 // cluster c during this outer iteration"; the filter on `labels[v] == c`
 // removes stale entries on the fly. Returns the committed cumulative gain
 // (>= 0).
+//
+// Also handles single-cluster splits: pass `cluster_b` as a fresh label
+// (no live members) and the chain will try to peel off a subset of `cluster_a`
+// into the new label.
 inline double run_chain(
     const UndirectedGraph &graph,
     const std::vector<double> &costs,
@@ -130,33 +155,48 @@ inline double run_chain(
             ++live_b;
         }
     }
-    // No two-side swap is possible if either side is empty or both sides have
-    // a single node (the only non-trivial outcome is a join, handled by
-    // apply_joins).
-    if (live_a == 0 || live_b == 0 || (live_a == 1 && live_b == 1)) {
+    // Skip if no non-trivial move exists: the cluster_b == fresh-label split
+    // case is allowed when cluster_a has at least two live nodes.
+    if (live_a + live_b < 2 || (live_a == 1 && live_b == 1)) {
         for (const auto v : queue_nodes) {
             bufs.in_pair[static_cast<std::size_t>(v)] = 0;
         }
         return 0.0;
     }
 
+    // For pair-chains (both sides non-empty) the chain is restricted to nodes
+    // with at least one cross-side neighbor. For splits (B empty) every live
+    // A node is eligible because there is no border yet — the first move has
+    // to peel off the weakest-attached interior node.
+    const bool is_split = (live_b == 0);
     for (const auto v : queue_nodes) {
         double w_to_a = 0.0;
         double w_to_b = 0.0;
+        std::uint32_t cross = 0;
+        const auto v_label = labels[static_cast<std::size_t>(v)];
         for (const auto adj : graph.node_adjacency(v)) {
-            if (!bufs.in_pair[static_cast<std::size_t>(adj.node)]) {
+            const auto u_key = static_cast<std::size_t>(adj.node);
+            if (!bufs.in_pair[u_key]) {
                 continue;
             }
             const auto c = costs[static_cast<std::size_t>(adj.edge)];
-            if (labels[static_cast<std::size_t>(adj.node)] == cluster_a) {
+            const auto u_label = labels[u_key];
+            if (u_label == cluster_a) {
                 w_to_a += c;
             } else {
                 w_to_b += c;
             }
+            if (u_label != v_label) {
+                ++cross;
+            }
         }
-        const auto v_label = labels[static_cast<std::size_t>(v)];
         const double gain_v = (v_label == cluster_a) ? (w_to_b - w_to_a) : (w_to_a - w_to_b);
-        heap.push(static_cast<std::size_t>(v), gain_v);
+        const auto v_key = static_cast<std::size_t>(v);
+        bufs.stash_gain[v_key] = gain_v;
+        bufs.cross_count[v_key] = cross;
+        if (is_split || cross > 0) {
+            heap.push(v_key, gain_v);
+        }
     }
 
     struct Move {
@@ -169,51 +209,62 @@ inline double run_chain(
     double cumulative = 0.0;
     double best_cumulative = 0.0;
     std::size_t best_prefix = 0;
-    // The chain keeps running through negative moves because a later prefix
-    // can still recover. In practice deep negative runs almost never improve
-    // best_cumulative, so cap the lookahead at a small constant after each new
-    // best.
-    constexpr std::size_t max_steps_without_improvement = 32;
-    std::size_t steps_since_best = 0;
 
     while (!heap.empty()) {
         const auto top = heap.pop();
         const auto v = static_cast<std::uint64_t>(top.key);
         const auto gain_v = top.priority;
-        const auto old_label = labels[static_cast<std::size_t>(v)];
+        const auto v_key = static_cast<std::size_t>(v);
+        const auto old_label = labels[v_key];
         const auto new_label = (old_label == cluster_a) ? cluster_b : cluster_a;
 
+        bufs.moved[v_key] = 1;
         cumulative += gain_v;
         chain.push_back({v, new_label});
 
         if (cumulative > best_cumulative + epsilon) {
             best_cumulative = cumulative;
             best_prefix = chain.size();
-            steps_since_best = 0;
-        } else {
-            ++steps_since_best;
-            if (steps_since_best > max_steps_without_improvement) {
-                break;
-            }
         }
 
         for (const auto adj : graph.node_adjacency(v)) {
             const auto u_key = static_cast<std::size_t>(adj.node);
-            if (!heap.contains(u_key)) {
+            if (!bufs.in_pair[u_key] || bufs.moved[u_key]) {
                 continue;
             }
-            // u is in the heap, so it's an unmoved member of the current
-            // bipartition. labels[u] is therefore u's actual side (chain
-            // moves are tentative — they only mutate `labels` on commit).
             const auto c = costs[static_cast<std::size_t>(adj.edge)];
-            const auto u_label = labels[static_cast<std::size_t>(adj.node)];
+            const auto u_label = labels[u_key];
             const double delta = (u_label == old_label) ? 2.0 * c : -2.0 * c;
-            heap.change(u_key, heap.priority_of(u_key) + delta);
+            bufs.stash_gain[u_key] += delta;
+            if (heap.contains(u_key)) {
+                heap.change(u_key, bufs.stash_gain[u_key]);
+            }
+            // Border maintenance. For pair-chains, only nodes that are
+            // currently bordered may be popped. A node becomes bordered when
+            // it gains its first cross-side neighbor (cross_count 0 -> 1) and
+            // un-borders when it loses its last (cross_count -> 0).
+            if (u_label == old_label) {
+                ++bufs.cross_count[u_key];
+                if (!is_split && !heap.contains(u_key)) {
+                    heap.push(u_key, bufs.stash_gain[u_key]);
+                }
+            } else {
+                if (bufs.cross_count[u_key] > 0) {
+                    --bufs.cross_count[u_key];
+                }
+                if (!is_split && bufs.cross_count[u_key] == 0
+                    && heap.contains(u_key)) {
+                    heap.erase(u_key);
+                }
+            }
         }
     }
 
     for (const auto v : queue_nodes) {
-        bufs.in_pair[static_cast<std::size_t>(v)] = 0;
+        const auto v_key = static_cast<std::size_t>(v);
+        bufs.in_pair[v_key] = 0;
+        bufs.moved[v_key] = 0;
+        bufs.cross_count[v_key] = 0;
     }
 
     if (best_cumulative > epsilon) {
@@ -346,6 +397,30 @@ inline std::vector<std::uint64_t> kernighan_lin(
             );
             if (delta > epsilon) {
                 improved = true;
+            }
+        }
+
+        // Try splitting each existing cluster off a fresh label. Pair-chains
+        // can only swap members between existing clusters, so without this
+        // pass the algorithm can never *increase* the partition count — any
+        // local minimum that requires breaking up a cluster is unreachable.
+        // Whether a given problem actually benefits depends on whether the
+        // pair-chain phase leaves any cluster with internally-negative-weight
+        // nodes.
+        std::uint64_t next_label = number_of_clusters;
+        for (std::uint64_t cluster = 0; cluster < number_of_clusters; ++cluster) {
+            while (true) {
+                if (next_label >= cluster_to_nodes.size()) {
+                    cluster_to_nodes.resize(static_cast<std::size_t>(next_label) + 1);
+                }
+                const auto delta = detail_kl::run_chain(
+                    graph, costs, labels, cluster_to_nodes, bufs, scratch, cluster, next_label, epsilon
+                );
+                if (delta <= epsilon) {
+                    break;
+                }
+                improved = true;
+                ++next_label;
             }
         }
 
