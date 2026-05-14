@@ -4,6 +4,7 @@
 #include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/feature_accumulation.hxx"
 #include "bioimage_cpp/graph/multicut.hxx"
+#include "bioimage_cpp/graph/node_label_projection.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
@@ -483,6 +484,50 @@ DoubleArray accumulate_affinity_features_t(
     return result;
 }
 
+template <class LabelT>
+UInt64Array project_node_labels_to_pixels_t(
+    const Rag &rag,
+    LabelArray<LabelT> labels,
+    ConstUInt64Array node_labels,
+    const std::size_t number_of_threads
+) {
+    if (node_labels.ndim() != 1) {
+        throw std::invalid_argument("node_labels must be a 1D uint64 array");
+    }
+
+    std::vector<std::size_t> output_shape(labels.ndim());
+    for (std::size_t axis = 0; axis < labels.ndim(); ++axis) {
+        output_shape[axis] = labels.shape(axis);
+    }
+    auto result = make_uint64_array(output_shape);
+
+    ConstArrayView<LabelT> labels_view{
+        labels.data(),
+        ndarray_shape(labels),
+        {},
+    };
+    ConstArrayView<std::uint64_t> node_labels_view{
+        node_labels.data(),
+        {static_cast<std::ptrdiff_t>(node_labels.shape(0))},
+        {},
+    };
+    ArrayView<std::uint64_t> out_view{
+        result.data(),
+        ndarray_shape(labels),
+        {},
+    };
+
+    nb::gil_scoped_release release;
+    graph::project_node_labels_to_pixels<LabelT>(
+        rag,
+        labels_view,
+        node_labels_view,
+        number_of_threads,
+        out_view
+    );
+    return result;
+}
+
 } // namespace
 
 void bind_graph(nb::module_ &m) {
@@ -699,6 +744,38 @@ void bind_graph(nb::module_ &m) {
         nb::arg("affinities"),
         nb::arg("offsets"),
         nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_project_node_labels_to_pixels_uint32",
+        &project_node_labels_to_pixels_t<std::uint32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("node_labels"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_project_node_labels_to_pixels_uint64",
+        &project_node_labels_to_pixels_t<std::uint64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("node_labels"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_project_node_labels_to_pixels_int32",
+        &project_node_labels_to_pixels_t<std::int32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("node_labels"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_project_node_labels_to_pixels_int64",
+        &project_node_labels_to_pixels_t<std::int64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("node_labels"),
         nb::arg("number_of_threads")
     );
 }
