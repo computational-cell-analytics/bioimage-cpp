@@ -408,6 +408,77 @@ Intentional differences vs. nifty:
   `GreedyAdditiveMulticut` and no fallthrough is given — the greedy solver
   already operates on each connected component internally.
 
+## Fusion Moves (Multicut)
+
+Nifty exposes the fusion-move multicut solver via the factory hierarchy with a
+chosen proposal generator and sub-solver factory.
+
+Nifty:
+
+```python
+import nifty.graph.opt.multicut as nmc
+
+objective = nmc.multicutObjective(graph, edge_costs)
+pgen = nmc.watershedProposals(sigma=1.0, numberOfSeeds=0.1)
+factory = nmc.fusionMoveBasedFactory(
+    proposalGenerator=pgen,
+    fusionMove=nmc.fusionMoveSettings(
+        mcFactory=nmc.greedyAdditiveFactory(),
+    ),
+    numberOfIterations=10,
+    stopIfNoImprovement=4,
+)
+labels = factory.create(objective).optimize()
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+objective = bic.graph.MulticutObjective(graph, edge_costs)
+solver = bic.graph.FusionMoveMulticut(
+    proposal_generator=bic.graph.WatershedProposalGenerator(
+        sigma=1.0, n_seeds_fraction=0.1, seed=0,
+    ),
+    sub_solver=bic.graph.GreedyAdditiveMulticut(),
+    number_of_iterations=10,
+    stop_if_no_improvement=4,
+)
+labels = solver.optimize(objective)
+```
+
+Proposal generators:
+
+| nifty proposal generator | bioimage-cpp proposal generator |
+| --- | --- |
+| `watershedProposals(sigma=..., numberOfSeeds=...)` | `WatershedProposalGenerator(sigma=..., n_seeds_fraction=..., seed=...)` |
+| `greedyAdditiveProposals(sigma=..., weightStopCond=..., nodeNumStopCond=...)` | `GreedyAdditiveProposalGenerator(sigma=..., weight_stop=..., node_num_stop=..., seed=...)` |
+
+Sub-solvers: any built-in multicut solver (`GreedyAdditiveMulticut`,
+`GreedyFixationMulticut`, `KernighanLinMulticut`). If `sub_solver` is omitted,
+the default is `GreedyAdditiveMulticut` constructed with no-noise defaults.
+
+Intentional differences vs. nifty:
+
+- Single object construction: no separate factory / solver step.
+- Proposal generators are Python classes carrying their settings; the C++
+  proposal-generator object is built lazily when `optimize` is called.
+- The driver warm-starts from the trivial singleton labeling by running the
+  default greedy-additive sub-solver once before the proposal loop.
+- A best-of-three safety net (current, proposal, fused) keeps the running
+  energy monotonically non-increasing across iterations.
+- The current implementation is single-threaded and uses pairwise
+  (proposal, current) fuses. `number_of_threads` and
+  `number_of_parallel_proposals` are kept on the API for forward compatibility
+  but must be left at their defaults (`1` and `2` respectively).
+
+Notes:
+
+- Custom Python proposal generators are not yet supported; subclass
+  `ProposalGenerator` and provide your own `_build` returning a C++
+  proposal-generator object if you need to extend the set.
+
 ## Segmentation Overlaps
 
 Nifty:

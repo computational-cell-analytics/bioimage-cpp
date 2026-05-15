@@ -376,6 +376,15 @@ class GreedyAdditiveMulticut(MulticutSolver):
         objective.labels = labels
         return objective.labels
 
+    def _build_cpp_sub_solver(self):
+        return _core._GreedyAdditiveMulticutSubSolver(
+            weight_stop=self.weight_stop,
+            node_num_stop=self.node_num_stop,
+            add_noise=self.add_noise,
+            seed=self.seed,
+            sigma=self.sigma,
+        )
+
 
 class GreedyFixationMulticut(MulticutSolver):
     def __init__(self, *, weight_stop: float = 0.0, node_num_stop: float = -1.0):
@@ -391,6 +400,12 @@ class GreedyFixationMulticut(MulticutSolver):
         )
         objective.labels = labels
         return objective.labels
+
+    def _build_cpp_sub_solver(self):
+        return _core._GreedyFixationMulticutSubSolver(
+            weight_stop=self.weight_stop,
+            node_num_stop=self.node_num_stop,
+        )
 
 
 class KernighanLinMulticut(MulticutSolver):
@@ -430,6 +445,154 @@ class KernighanLinMulticut(MulticutSolver):
             initial_labels,
             self.number_of_outer_iterations,
             self.epsilon,
+        )
+        objective.labels = labels
+        return objective.labels
+
+    def _build_cpp_sub_solver(self):
+        return _core._KernighanLinMulticutSubSolver(
+            number_of_outer_iterations=self.number_of_outer_iterations,
+            epsilon=self.epsilon,
+        )
+
+
+class ProposalGenerator(ABC):
+    """Base class for fusion-move proposal generators.
+
+    Concrete generators carry settings on the Python side and build a C++
+    proposal-generator object bound to a specific problem (graph + edge costs)
+    when ``_build`` is called by the fusion-move driver.
+    """
+
+    @abstractmethod
+    def _build(self, graph: UndirectedGraph | RegionAdjacencyGraph, edge_costs: np.ndarray):
+        """Construct the underlying C++ proposal generator."""
+
+
+class WatershedProposalGenerator(ProposalGenerator):
+    """Watershed proposal generator (nifty's fusion-move workhorse).
+
+    Per call: add Gaussian noise to edge costs, drop random seeds at the
+    endpoints of negative-cost edges, run the edge-weighted watershed.
+    """
+
+    def __init__(
+        self,
+        *,
+        sigma: float = 1.0,
+        n_seeds_fraction: float = 0.1,
+        seed: int = 0,
+    ):
+        self.sigma = float(sigma)
+        self.n_seeds_fraction = float(n_seeds_fraction)
+        self.seed = int(seed)
+
+    def _build(self, graph, edge_costs):
+        return _core._WatershedProposalGenerator(
+            graph,
+            edge_costs,
+            sigma=self.sigma,
+            n_seeds_fraction=self.n_seeds_fraction,
+            seed=self.seed,
+        )
+
+
+class GreedyAdditiveProposalGenerator(ProposalGenerator):
+    """Greedy-additive multicut proposal generator.
+
+    Per call: run the greedy-additive multicut solver with noisy edge weights;
+    the seed advances every call so successive proposals differ.
+    """
+
+    def __init__(
+        self,
+        *,
+        sigma: float = 1.0,
+        weight_stop: float = 0.0,
+        node_num_stop: float = -1.0,
+        seed: int = 0,
+    ):
+        self.sigma = float(sigma)
+        self.weight_stop = float(weight_stop)
+        self.node_num_stop = float(node_num_stop)
+        self.seed = int(seed)
+
+    def _build(self, graph, edge_costs):
+        return _core._GreedyAdditiveMulticutProposalGenerator(
+            graph,
+            edge_costs,
+            sigma=self.sigma,
+            weight_stop=self.weight_stop,
+            node_num_stop=self.node_num_stop,
+            seed=self.seed,
+        )
+
+
+class FusionMoveMulticut(MulticutSolver):
+    """Fusion-move multicut solver.
+
+    Iteratively generates proposals via ``proposal_generator``, fuses them
+    pairwise with the current best labeling, and accepts improvements. The
+    fuse step solves a contracted multicut subproblem with ``sub_solver``;
+    if omitted, the default sub-solver is :class:`GreedyAdditiveMulticut`.
+
+    If the objective's current labels are the trivial singleton labeling, the
+    driver warm-starts with one greedy-additive pass before the proposal loop.
+    The best-of safety net guarantees energy never increases across iterations.
+
+    ``number_of_threads`` and ``number_of_parallel_proposals`` are reserved for
+    future use; the current implementation only supports the defaults.
+    """
+
+    def __init__(
+        self,
+        *,
+        proposal_generator: ProposalGenerator,
+        sub_solver: MulticutSolver | None = None,
+        number_of_iterations: int = 10,
+        stop_if_no_improvement: int = 4,
+        number_of_threads: int = 1,
+        number_of_parallel_proposals: int = 2,
+    ):
+        if not isinstance(proposal_generator, ProposalGenerator):
+            raise TypeError("proposal_generator must inherit from ProposalGenerator")
+        if sub_solver is not None and not isinstance(sub_solver, MulticutSolver):
+            raise TypeError("sub_solver must inherit from MulticutSolver")
+        if sub_solver is not None and not hasattr(sub_solver, "_build_cpp_sub_solver"):
+            raise TypeError(
+                "sub_solver must be a built-in multicut solver "
+                "(custom Python solvers are not supported as fusion-move sub-solvers)"
+            )
+        if int(number_of_threads) != 1:
+            raise ValueError("number_of_threads must be 1 (parallel path not yet implemented)")
+        if int(number_of_parallel_proposals) != 2:
+            raise ValueError(
+                "number_of_parallel_proposals must be 2 (multi-proposal fuse not yet implemented)"
+            )
+        self.proposal_generator = proposal_generator
+        self.sub_solver = sub_solver
+        self.number_of_iterations = int(number_of_iterations)
+        self.stop_if_no_improvement = int(stop_if_no_improvement)
+        self.number_of_threads = int(number_of_threads)
+        self.number_of_parallel_proposals = int(number_of_parallel_proposals)
+        if self.number_of_iterations < 0:
+            raise ValueError("number_of_iterations must be non-negative")
+        if self.stop_if_no_improvement < 1:
+            raise ValueError("stop_if_no_improvement must be >= 1")
+
+    def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        cpp_pgen = self.proposal_generator._build(objective.graph, objective.edge_costs)
+        cpp_sub_solver = (
+            None if self.sub_solver is None else self.sub_solver._build_cpp_sub_solver()
+        )
+        labels = _core._multicut_fusion_move(
+            objective.graph,
+            objective.edge_costs,
+            objective.labels,
+            cpp_pgen,
+            cpp_sub_solver,
+            self.number_of_iterations,
+            self.stop_if_no_improvement,
         )
         objective.labels = labels
         return objective.labels
@@ -747,15 +910,19 @@ __all__ = [
     "COMPLEX_EDGE_FEATURE_NAMES",
     "DEFAULT_EXTERNAL_MULTICUT_PROBLEM_PATH",
     "EXTERNAL_MULTICUT_PROBLEM_URL",
+    "FusionMoveMulticut",
     "GreedyAdditiveMulticut",
+    "GreedyAdditiveProposalGenerator",
     "GreedyFixationMulticut",
     "KernighanLinMulticut",
     "MulticutDecomposer",
     "MulticutObjective",
     "MulticutSolver",
+    "ProposalGenerator",
     "RegionAdjacencyGraph",
     "SIMPLE_EDGE_FEATURE_NAMES",
     "UndirectedGraph",
+    "WatershedProposalGenerator",
     "affinity_features",
     "affinity_features_complex",
     "connected_components",

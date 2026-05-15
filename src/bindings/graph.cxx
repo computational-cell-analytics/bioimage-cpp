@@ -5,12 +5,20 @@
 #include "bioimage_cpp/graph/edge_weighted_watershed.hxx"
 #include "bioimage_cpp/graph/feature_accumulation.hxx"
 #include "bioimage_cpp/graph/multicut.hxx"
+#include "bioimage_cpp/graph/multicut/fusion_move.hxx"
+#include "bioimage_cpp/graph/multicut/greedy_additive.hxx"
+#include "bioimage_cpp/graph/multicut/greedy_fixation.hxx"
+#include "bioimage_cpp/graph/multicut/kernighan_lin.hxx"
 #include "bioimage_cpp/graph/node_label_projection.hxx"
+#include "bioimage_cpp/graph/proposal_generator.hxx"
+#include "bioimage_cpp/graph/proposal_generators/greedy_additive_multicut.hxx"
+#include "bioimage_cpp/graph/proposal_generators/watershed.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/pair.h>
+#include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
 
 #include <array>
@@ -406,6 +414,38 @@ UInt64Array multicut_kernighan_lin(
     return vector_to_uint64_array(label_vector);
 }
 
+UInt64Array multicut_fusion_move(
+    const Graph &graph,
+    ConstDoubleArray costs,
+    ConstUInt64Array initial_labels,
+    graph::ProposalGeneratorBase *proposal_generator,
+    const graph::multicut::SolverBase *sub_solver,
+    const std::size_t number_of_iterations,
+    const std::size_t stop_if_no_improvement
+) {
+    if (proposal_generator == nullptr) {
+        throw std::invalid_argument("proposal_generator must not be None");
+    }
+    auto cost_vector = double_array_to_vector(costs, "edge_costs", graph.number_of_edges());
+    auto label_vector =
+        uint64_array_to_vector(initial_labels, "initial_labels", graph.number_of_nodes());
+
+    graph::multicut::FusionMoveSolver solver(
+        *proposal_generator,
+        sub_solver,
+        number_of_iterations,
+        stop_if_no_improvement
+    );
+
+    std::vector<std::uint64_t> result;
+    {
+        nb::gil_scoped_release release;
+        graph::multicut::Objective objective(graph, std::move(cost_vector), std::move(label_vector));
+        result = solver.optimize(objective);
+    }
+    return vector_to_uint64_array(result);
+}
+
 template <class T>
 Rag region_adjacency_graph_t(
     LabelArray<T> labels,
@@ -709,6 +749,103 @@ void bind_graph(nb::module_ &m) {
         nb::arg("initial_labels"),
         nb::arg("number_of_outer_iterations"),
         nb::arg("epsilon")
+    );
+
+    // Multicut sub-solver hierarchy used by fusion moves. The classes are
+    // opaque to Python; constructors carry per-solver settings.
+    nb::class_<graph::multicut::SolverBase>(m, "_MulticutSolverBase");
+    nb::class_<graph::multicut::GreedyAdditiveSolver, graph::multicut::SolverBase>(
+        m, "_GreedyAdditiveMulticutSubSolver"
+    )
+        .def(
+            nb::init<double, double, bool, int, double>(),
+            nb::arg("weight_stop") = 0.0,
+            nb::arg("node_num_stop") = -1.0,
+            nb::arg("add_noise") = false,
+            nb::arg("seed") = 42,
+            nb::arg("sigma") = 1.0
+        );
+    nb::class_<graph::multicut::GreedyFixationSolver, graph::multicut::SolverBase>(
+        m, "_GreedyFixationMulticutSubSolver"
+    )
+        .def(
+            nb::init<double, double>(),
+            nb::arg("weight_stop") = 0.0,
+            nb::arg("node_num_stop") = -1.0
+        );
+    nb::class_<graph::multicut::KernighanLinSolver, graph::multicut::SolverBase>(
+        m, "_KernighanLinMulticutSubSolver"
+    )
+        .def(
+            nb::init<std::uint64_t, double>(),
+            nb::arg("number_of_outer_iterations") = 100,
+            nb::arg("epsilon") = 1.0e-6
+        );
+
+    // Proposal generators used by fusion moves.
+    nb::class_<graph::ProposalGeneratorBase>(m, "_ProposalGeneratorBase");
+    nb::class_<graph::WatershedProposalGenerator, graph::ProposalGeneratorBase>(
+        m, "_WatershedProposalGenerator"
+    )
+        .def(
+            "__init__",
+            [](graph::WatershedProposalGenerator *self,
+               const Graph &graph,
+               ConstDoubleArray edge_costs,
+               double sigma,
+               double n_seeds_fraction,
+               int seed) {
+                auto costs = double_array_to_vector(
+                    edge_costs, "edge_costs", graph.number_of_edges()
+                );
+                new (self) graph::WatershedProposalGenerator(
+                    graph, std::move(costs), sigma, n_seeds_fraction, seed
+                );
+            },
+            nb::arg("graph"),
+            nb::arg("edge_costs"),
+            nb::arg("sigma") = 1.0,
+            nb::arg("n_seeds_fraction") = 0.1,
+            nb::arg("seed") = 0
+        );
+    nb::class_<
+        graph::GreedyAdditiveMulticutProposalGenerator,
+        graph::ProposalGeneratorBase
+    >(m, "_GreedyAdditiveMulticutProposalGenerator")
+        .def(
+            "__init__",
+            [](graph::GreedyAdditiveMulticutProposalGenerator *self,
+               const Graph &graph,
+               ConstDoubleArray edge_costs,
+               double sigma,
+               double weight_stop,
+               double node_num_stop,
+               int seed) {
+                auto costs = double_array_to_vector(
+                    edge_costs, "edge_costs", graph.number_of_edges()
+                );
+                new (self) graph::GreedyAdditiveMulticutProposalGenerator(
+                    graph, std::move(costs), sigma, weight_stop, node_num_stop, seed
+                );
+            },
+            nb::arg("graph"),
+            nb::arg("edge_costs"),
+            nb::arg("sigma") = 1.0,
+            nb::arg("weight_stop") = 0.0,
+            nb::arg("node_num_stop") = -1.0,
+            nb::arg("seed") = 0
+        );
+
+    m.def(
+        "_multicut_fusion_move",
+        &multicut_fusion_move,
+        nb::arg("graph"),
+        nb::arg("edge_costs"),
+        nb::arg("initial_labels"),
+        nb::arg("proposal_generator"),
+        nb::arg("sub_solver").none(),
+        nb::arg("number_of_iterations"),
+        nb::arg("stop_if_no_improvement")
     );
 
     m.def(
