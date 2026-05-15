@@ -27,5 +27,6 @@ venv/
 
 # Data
 *.h5
+*.npz
 
 CLAUDE.md

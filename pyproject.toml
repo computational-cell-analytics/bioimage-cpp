@@ -24,7 +24,8 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest", "pooch"]
+data = ["pooch"]
 
 [tool.scikit-build]
 cmake.version = ">=3.21"
