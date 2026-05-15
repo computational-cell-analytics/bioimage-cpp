@@ -1,9 +1,12 @@
 #include "graph.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/graph/breadth_first_search.hxx"
 #include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/edge_weighted_watershed.hxx"
 #include "bioimage_cpp/graph/feature_accumulation.hxx"
+#include "bioimage_cpp/graph/lifted_from_affinities.hxx"
+#include "bioimage_cpp/graph/lifted_multicut.hxx"
 #include "bioimage_cpp/graph/multicut.hxx"
 #include "bioimage_cpp/graph/multicut/fusion_move.hxx"
 #include "bioimage_cpp/graph/multicut/greedy_additive.hxx"
@@ -414,6 +417,108 @@ UInt64Array multicut_kernighan_lin(
     return vector_to_uint64_array(label_vector);
 }
 
+std::pair<UInt64Array, UInt64Array> graph_breadth_first_search(
+    const Graph &graph,
+    const std::uint64_t source,
+    const std::uint64_t max_distance,
+    const bool include_source
+) {
+    std::vector<graph::BfsEntry> entries;
+    {
+        nb::gil_scoped_release release;
+        entries = graph::breadth_first_search(graph, source, max_distance, include_source);
+    }
+    auto nodes = make_uint64_array({entries.size()});
+    auto distances = make_uint64_array({entries.size()});
+    auto *node_data = nodes.data();
+    auto *distance_data = distances.data();
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        node_data[index] = entries[index].node;
+        distance_data[index] = entries[index].distance;
+    }
+    return {nodes, distances};
+}
+
+double lifted_multicut_energy(
+    const Graph &lifted_graph,
+    ConstDoubleArray weights,
+    ConstUInt64Array labels
+) {
+    const auto weight_vector =
+        double_array_to_vector(weights, "edge_weights", lifted_graph.number_of_edges());
+    const auto label_vector =
+        uint64_array_to_vector(labels, "labels", lifted_graph.number_of_nodes());
+    nb::gil_scoped_release release;
+    return graph::lifted_multicut::energy(lifted_graph, weight_vector, label_vector);
+}
+
+UInt64Array lifted_multicut_greedy_additive(
+    const Graph &lifted_graph,
+    ConstDoubleArray weights,
+    const std::uint64_t n_base_edges,
+    const double weight_stop,
+    const double node_num_stop,
+    const bool add_noise,
+    const int seed,
+    const double sigma
+) {
+    const auto weight_vector =
+        double_array_to_vector(weights, "edge_weights", lifted_graph.number_of_edges());
+    if (n_base_edges > lifted_graph.number_of_edges()) {
+        throw std::invalid_argument(
+            "n_base_edges must be <= lifted graph number_of_edges"
+        );
+    }
+    std::vector<std::uint64_t> labels;
+    {
+        nb::gil_scoped_release release;
+        labels = graph::lifted_multicut::greedy_additive(
+            lifted_graph,
+            weight_vector,
+            n_base_edges,
+            weight_stop,
+            node_num_stop,
+            add_noise,
+            seed,
+            sigma
+        );
+    }
+    return vector_to_uint64_array(labels);
+}
+
+UInt64Array lifted_multicut_kernighan_lin(
+    const Graph &base_graph,
+    const Graph &lifted_graph,
+    ConstDoubleArray weights,
+    const std::uint64_t n_base_edges,
+    ConstUInt64Array initial_labels,
+    const std::uint64_t number_of_outer_iterations,
+    const double epsilon
+) {
+    const auto weight_vector =
+        double_array_to_vector(weights, "edge_weights", lifted_graph.number_of_edges());
+    auto label_vector =
+        uint64_array_to_vector(initial_labels, "initial_labels", base_graph.number_of_nodes());
+    if (n_base_edges > lifted_graph.number_of_edges()) {
+        throw std::invalid_argument(
+            "n_base_edges must be <= lifted graph number_of_edges"
+        );
+    }
+    {
+        nb::gil_scoped_release release;
+        label_vector = graph::lifted_multicut::kernighan_lin(
+            base_graph,
+            lifted_graph,
+            weight_vector,
+            n_base_edges,
+            std::move(label_vector),
+            number_of_outer_iterations,
+            epsilon
+        );
+    }
+    return vector_to_uint64_array(label_vector);
+}
+
 UInt64Array multicut_fusion_move(
     const Graph &graph,
     ConstDoubleArray costs,
@@ -580,6 +685,89 @@ DoubleArray accumulate_affinity_features_t(
 }
 
 template <class LabelT>
+UInt64Array lifted_edges_from_affinities_t(
+    const Rag &rag,
+    LabelArray<LabelT> labels,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets,
+    const std::size_t number_of_threads
+) {
+    ConstArrayView<LabelT> labels_view{
+        labels.data(),
+        ndarray_shape(labels),
+        {},
+    };
+
+    std::vector<bioimage_cpp::detail::Edge> lifted_edges;
+    {
+        nb::gil_scoped_release release;
+        lifted_edges = graph::lifted_edges_from_offsets<LabelT>(
+            rag, labels_view, offsets, number_of_threads
+        );
+    }
+    auto result = make_uint64_array({lifted_edges.size(), 2});
+    auto *data = result.data();
+    for (std::size_t index = 0; index < lifted_edges.size(); ++index) {
+        data[2 * index] = lifted_edges[index].first;
+        data[2 * index + 1] = lifted_edges[index].second;
+    }
+    return result;
+}
+
+template <class LabelT>
+DoubleArray accumulate_lifted_affinity_features_t(
+    LabelArray<LabelT> labels,
+    ConstDoubleArray affinities,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets,
+    ConstUInt64Array lifted_uvs,
+    const bool compute_complex_features,
+    const std::size_t number_of_threads
+) {
+    if (lifted_uvs.ndim() != 2 || lifted_uvs.shape(1) != 2) {
+        throw std::invalid_argument("lifted_uvs must have shape (n_lifted, 2)");
+    }
+    const auto n_lifted = lifted_uvs.shape(0);
+    const auto number_of_features = compute_complex_features ? 12 : 2;
+    auto result = make_double_array({n_lifted, number_of_features});
+
+    std::vector<bioimage_cpp::detail::Edge> lifted_edges(n_lifted);
+    const auto *uv_data = lifted_uvs.data();
+    for (std::size_t index = 0; index < n_lifted; ++index) {
+        lifted_edges[index] = {uv_data[2 * index], uv_data[2 * index + 1]};
+    }
+
+    ConstArrayView<LabelT> labels_view{
+        labels.data(),
+        ndarray_shape(labels),
+        {},
+    };
+    ConstArrayView<double> affinities_view{
+        affinities.data(),
+        ndarray_shape(affinities),
+        {},
+    };
+    ArrayView<double> out_view{
+        result.data(),
+        {
+            static_cast<std::ptrdiff_t>(n_lifted),
+            static_cast<std::ptrdiff_t>(number_of_features),
+        },
+        {},
+    };
+
+    nb::gil_scoped_release release;
+    graph::accumulate_lifted_affinity_features<LabelT, double>(
+        labels_view,
+        affinities_view,
+        offsets,
+        lifted_edges,
+        compute_complex_features,
+        number_of_threads,
+        out_view
+    );
+    return result;
+}
+
+template <class LabelT>
 UInt64Array project_node_labels_to_pixels_t(
     const Rag &rag,
     LabelArray<LabelT> labels,
@@ -693,6 +881,14 @@ void bind_graph(nb::module_ &m) {
     nb::class_<Rag, Graph>(m, "RegionAdjacencyGraph")
         .def_prop_ro("shape", &Rag::shape);
 
+    m.def(
+        "_breadth_first_search",
+        &graph_breadth_first_search,
+        nb::arg("graph"),
+        nb::arg("source"),
+        nb::arg("max_distance"),
+        nb::arg("include_source")
+    );
     m.def("_connected_components", &graph_connected_components, nb::arg("graph"));
     m.def(
         "_connected_components_masked",
@@ -841,6 +1037,62 @@ void bind_graph(nb::module_ &m) {
         );
 
     m.def(
+        "_lifted_multicut_energy",
+        &lifted_multicut_energy,
+        nb::arg("lifted_graph"),
+        nb::arg("edge_weights"),
+        nb::arg("labels")
+    );
+    m.def(
+        "_lifted_multicut_greedy_additive",
+        &lifted_multicut_greedy_additive,
+        nb::arg("lifted_graph"),
+        nb::arg("edge_weights"),
+        nb::arg("n_base_edges"),
+        nb::arg("weight_stop"),
+        nb::arg("node_num_stop"),
+        nb::arg("add_noise"),
+        nb::arg("seed"),
+        nb::arg("sigma")
+    );
+    m.def(
+        "_lifted_multicut_kernighan_lin",
+        &lifted_multicut_kernighan_lin,
+        nb::arg("base_graph"),
+        nb::arg("lifted_graph"),
+        nb::arg("edge_weights"),
+        nb::arg("n_base_edges"),
+        nb::arg("initial_labels"),
+        nb::arg("number_of_outer_iterations"),
+        nb::arg("epsilon")
+    );
+
+    // Lifted multicut sub-solver hierarchy. Same shape as the multicut sub-
+    // solver bindings — opaque to Python, used by future fusion-move drivers.
+    nb::class_<graph::lifted_multicut::SolverBase>(m, "_LiftedMulticutSolverBase");
+    nb::class_<
+        graph::lifted_multicut::GreedyAdditiveSolver,
+        graph::lifted_multicut::SolverBase
+    >(m, "_GreedyAdditiveLiftedMulticutSubSolver")
+        .def(
+            nb::init<double, double, bool, int, double>(),
+            nb::arg("weight_stop") = 0.0,
+            nb::arg("node_num_stop") = -1.0,
+            nb::arg("add_noise") = false,
+            nb::arg("seed") = 42,
+            nb::arg("sigma") = 1.0
+        );
+    nb::class_<
+        graph::lifted_multicut::KernighanLinSolver,
+        graph::lifted_multicut::SolverBase
+    >(m, "_KernighanLinLiftedMulticutSubSolver")
+        .def(
+            nb::init<std::uint64_t, double>(),
+            nb::arg("number_of_outer_iterations") = 100,
+            nb::arg("epsilon") = 1.0e-6
+        );
+
+    m.def(
         "_multicut_fusion_move",
         &multicut_fusion_move,
         nb::arg("graph"),
@@ -959,6 +1211,80 @@ void bind_graph(nb::module_ &m) {
         nb::arg("compute_complex_features"),
         nb::arg("number_of_threads")
     );
+    m.def(
+        "_lifted_edges_from_affinities_uint32",
+        &lifted_edges_from_affinities_t<std::uint32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("offsets"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_lifted_edges_from_affinities_uint64",
+        &lifted_edges_from_affinities_t<std::uint64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("offsets"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_lifted_edges_from_affinities_int32",
+        &lifted_edges_from_affinities_t<std::int32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("offsets"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_lifted_edges_from_affinities_int64",
+        &lifted_edges_from_affinities_t<std::int64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("offsets"),
+        nb::arg("number_of_threads")
+    );
+
+    m.def(
+        "_accumulate_lifted_affinity_features_uint32",
+        &accumulate_lifted_affinity_features_t<std::uint32_t>,
+        nb::arg("labels"),
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("lifted_uvs"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_lifted_affinity_features_uint64",
+        &accumulate_lifted_affinity_features_t<std::uint64_t>,
+        nb::arg("labels"),
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("lifted_uvs"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_lifted_affinity_features_int32",
+        &accumulate_lifted_affinity_features_t<std::int32_t>,
+        nb::arg("labels"),
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("lifted_uvs"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_accumulate_lifted_affinity_features_int64",
+        &accumulate_lifted_affinity_features_t<std::int64_t>,
+        nb::arg("labels"),
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("lifted_uvs"),
+        nb::arg("compute_complex_features"),
+        nb::arg("number_of_threads")
+    );
+
     m.def(
         "_project_node_labels_to_pixels_uint32",
         &project_node_labels_to_pixels_t<std::uint32_t>,

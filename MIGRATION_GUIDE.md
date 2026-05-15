@@ -486,6 +486,209 @@ Notes:
   `ProposalGenerator` and provide your own `_build` returning a C++
   proposal-generator object if you need to extend the set.
 
+## Lifted Multicut
+
+Nifty exposes lifted multicut through a separate objective + solver hierarchy.
+`bioimage-cpp` mirrors the structure with `LiftedMulticutObjective` and a
+`LiftedMulticutSolver` class hierarchy.
+
+Nifty:
+
+```python
+import nifty.graph.opt.lifted_multicut as nlmc
+
+objective = nlmc.liftedMulticutObjective(graph)
+objective.insertLiftedEdgesBfs(max_distance=3)
+for u, v, w in lifted_weights:
+    objective.setCost(u, v, w)
+solver = objective.liftedMulticutGreedyAdditiveFactory().create(objective)
+labels = solver.optimize()
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+objective = bic.graph.LiftedMulticutObjective(
+    graph,
+    edge_costs,
+    lifted_uvs=lifted_uvs,
+    lifted_costs=lifted_costs,
+    bfs_distance=3,  # optional: also insert zero-weight lifted edges within k hops
+)
+labels = bic.graph.LiftedGreedyAdditiveMulticut().optimize(objective)
+energy = objective.energy(labels)
+```
+
+`LiftedMulticutObjective` accepts:
+
+- `graph` — an `UndirectedGraph` or `RegionAdjacencyGraph`. The constructor
+  copies the topology, so further mutations on the input graph do not affect
+  the objective.
+- `edge_costs` — 1D `float64` array of length `graph.number_of_edges`.
+- `lifted_uvs` / `lifted_costs` — optional `(n_lifted, 2)` uint64 array and 1D
+  float64 array of equal length, listing the additional lifted edges and
+  their weights.
+- `bfs_distance` — optional positive integer. Adds a zero-weight lifted edge
+  for every pair of nodes within this many base-graph hops of each other
+  (excluding nodes already connected by a base edge). Pairs with both
+  `lifted_uvs` and `bfs_distance` to seed the topology and then update
+  specific weights.
+- `overwrite_existing` — when `True`, lifted entries that coincide with an
+  existing edge replace its weight; the default accumulates.
+
+Available solvers (no fusion-move / ILP solvers yet):
+
+| nifty factory | bioimage-cpp solver |
+| --- | --- |
+| `liftedMulticutGreedyAdditiveFactory()` | `LiftedGreedyAdditiveMulticut()` |
+| `liftedMulticutKernighanLinFactory(...)` | `LiftedKernighanLinMulticut(...)` |
+| `chainedSolversFactory([...])` | `LiftedChainedSolvers([...])` |
+
+A typical warm-started solve combines greedy and KL:
+
+```python
+solver = bic.graph.LiftedChainedSolvers([
+    bic.graph.LiftedGreedyAdditiveMulticut(),
+    bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=10),
+])
+labels = solver.optimize(objective)
+```
+
+Notes:
+
+- Output labels are dense `uint64` ids in `0 .. number_of_clusters - 1`.
+- Every output cluster is *base-graph connected* — both solvers enforce this
+  invariant. A strongly attractive lifted edge between two nodes that have no
+  base-graph path between them will not merge their clusters.
+- `LiftedKernighanLinMulticut` warm-starts from the lifted greedy-additive
+  solution when the objective's current labels are the trivial singleton
+  labeling.
+- `objective.set_cost(u, v, weight, overwrite=False)` updates or inserts a
+  single lifted edge.
+- The lifted graph is exposed via `objective.lifted_graph`; the first
+  `objective.number_of_base_edges` edges are exactly the base edges in the
+  same order as in `graph`.
+
+### Building a lifted multicut problem from affinities
+
+For the common case of lifted multicut on a watershed over-segmentation,
+nifty offers `nifty.graph.rag.computeLiftedEdgesFromRagAndOffsets` (lifted
+edge discovery) and per-channel affinity accumulators. bioimage-cpp exposes
+two focused helpers that cover the same workflow:
+
+```python
+# Discover lifted edges implied by long-range affinity offsets. 1-hop offsets
+# are skipped automatically, so the full offset list can be passed in.
+lifted_uvs = bic.graph.lifted_edges_from_affinities(
+    rag, oversegmentation, offsets, number_of_threads=0,
+)
+
+# Accumulate (mean, size) statistics per lifted edge. Pixel pairs whose
+# (u, v) does not appear in `lifted_uvs` are skipped, so local edges are
+# never contaminated with long-range affinities.
+lifted_features = bic.graph.lifted_affinity_features(
+    oversegmentation, affinities, offsets, lifted_uvs,
+    number_of_threads=0,
+)
+# For the 12-column feature set (mean, median, std, min, max, percentiles, size):
+lifted_features = bic.graph.lifted_affinity_features_complex(...)
+```
+
+The output column conventions match the local-edge variants
+(`SIMPLE_EDGE_FEATURE_NAMES`, `COMPLEX_EDGE_FEATURE_NAMES`).
+
+End-to-end pipeline (also in `examples/segmentation/lifted_multicut_from_affinities.py`):
+
+```python
+rag = bic.graph.region_adjacency_graph(oversegmentation)
+local_costs = local_threshold - bic.graph.affinity_features(
+    rag, oversegmentation, direct_affinities, direct_offsets,
+)[:, 0]
+lifted_uvs = bic.graph.lifted_edges_from_affinities(
+    rag, oversegmentation, long_range_offsets,
+)
+lifted_costs = lifted_threshold - bic.graph.lifted_affinity_features(
+    oversegmentation, long_range_affinities, long_range_offsets, lifted_uvs,
+)[:, 0]
+objective = bic.graph.LiftedMulticutObjective(
+    rag, local_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs,
+)
+```
+
+## External Problem Instances
+
+bioimage-cpp ships pooch-backed downloaders for the multicut and lifted
+multicut benchmark problems used by the development comparison scripts and
+the regression tests. Files are cached under `~/.cache/bioimage-cpp/`,
+overridable via the `BIOIMAGE_CPP_CACHE` environment variable.
+
+`pooch` is an optional runtime dependency — install via the `test` or `data`
+extras, e.g. `pip install bioimage-cpp[data]`.
+
+Multicut problems (3 samples × 2 sizes, originally from
+`elf.segmentation.utils.load_multicut_problem`):
+
+```python
+# Returns (UndirectedGraph, edge_costs)
+graph, costs = bic.graph.load_multicut_problem(sample="A", size="small")
+# Or just the underlying arrays
+uv_ids, costs = bic.graph.load_multicut_problem_data(sample="B", size="medium")
+# Or the cached file path
+path = bic.graph.multicut_problem_path(sample="C", size="medium")
+```
+
+Valid samples are `"A"`, `"B"`, `"C"`; valid sizes are `"small"` and
+`"medium"`. The legacy `load_external_multicut_problem` /
+`load_external_multicut_problem_data` / `external_multicut_problem_path`
+shims default to sample A, size small and continue to honor the
+`BIOIMAGE_CPP_EXTERNAL_MULTICUT_PATH` and
+`BIOIMAGE_CPP_EXTERNAL_MULTICUT_CACHE` environment variables.
+
+Lifted multicut problems (2D ISBI slice and full 3D volume, built by
+`examples/segmentation/serialize_lifted_problem.py`):
+
+```python
+problem = bic.graph.load_lifted_multicut_problem(size="2d")
+# Fields: n_nodes (int), local_uvs, local_costs, lifted_uvs, lifted_costs.
+graph = bic.graph.UndirectedGraph.from_edges(problem.n_nodes, problem.local_uvs)
+objective = bic.graph.LiftedMulticutObjective(
+    graph,
+    problem.local_costs,
+    lifted_uvs=problem.lifted_uvs,
+    lifted_costs=problem.lifted_costs,
+)
+```
+
+Notes:
+
+- Every download is integrity-checked against a SHA256 in the registry; a
+  corrupted cache file is detected on the next `load_*` call.
+- Downloads are lazy: nothing happens until you call a loader. Re-runs are
+  free (the cached file is reused).
+- For air-gapped use, fetch the file once on a machine with network access
+  and copy `~/.cache/bioimage-cpp/<filename>` to the same path on the target
+  machine.
+
+## Breadth-First Search
+
+Nifty has an internal `BreadthFirstSearch` template used during lifted-edge
+insertion. `bioimage-cpp` exposes a Python-friendly free function:
+
+```python
+nodes, distances = bic.graph.breadth_first_search(
+    graph,
+    source,
+    max_distance=3,           # optional, default: full component
+    include_source=True,      # set to False for k-hop neighborhoods excluding self
+)
+```
+
+Both output arrays are 1D `uint64`, listing reached nodes in BFS order with
+their hop distance from the source. Useful for building lifted-edge sets
+manually, sampling local neighborhoods, or computing graph distances.
+
 ## Segmentation Overlaps
 
 Nifty:
