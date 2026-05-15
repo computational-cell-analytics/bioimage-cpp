@@ -41,16 +41,33 @@ struct DynamicEdge {
 using EdgeHeap = bioimage_cpp::detail::DenseIndexedHeap<double>;
 
 struct DynamicGraph {
-    explicit DynamicGraph(const UndirectedGraph &graph)
-        : adjacency(static_cast<std::size_t>(graph.number_of_nodes())),
-          alive(static_cast<std::size_t>(graph.number_of_nodes()), true),
-          alive_count(static_cast<std::size_t>(graph.number_of_nodes())),
-          scratch_edge_id(static_cast<std::size_t>(graph.number_of_nodes()), no_edge) {
+    DynamicGraph() = default;
+
+    explicit DynamicGraph(const UndirectedGraph &graph) {
+        reset(graph);
+    }
+
+    // Reuse the buffers of an existing DynamicGraph for a new input graph.
+    // Inner adjacency vectors are `clear()`-ed (keeping capacity) and the
+    // outer container is resized; degree-based reserves prevent any per-edge
+    // adjacency growth during initialise.
+    void reset(const UndirectedGraph &graph) {
+        const auto n_nodes = static_cast<std::size_t>(graph.number_of_nodes());
+        const auto n_edges = static_cast<std::size_t>(graph.number_of_edges());
+
+        for (auto &adj : adjacency) {
+            adj.clear();
+        }
+        adjacency.resize(n_nodes);
         for (std::uint64_t node = 0; node < graph.number_of_nodes(); ++node) {
             const auto degree = graph.node_adjacency(node).size();
             adjacency[static_cast<std::size_t>(node)].reserve(degree);
         }
-        edges.resize(static_cast<std::size_t>(graph.number_of_edges()));
+
+        alive.assign(n_nodes, true);
+        alive_count = n_nodes;
+        scratch_edge_id.assign(n_nodes, no_edge);
+        edges.resize(n_edges);
     }
 
     // O(degree(u)). Returns no_edge when (u, v) is not an edge.
@@ -102,6 +119,9 @@ inline void initialize_dynamic_graph(
     const auto n_edges = static_cast<std::size_t>(graph.number_of_edges());
     heap.reset_capacity(n_edges);
 
+    std::vector<EdgeHeap::Entry> heap_entries;
+    heap_entries.reserve(n_edges);
+
     std::mt19937 generator(seed);
     std::normal_distribution<double> noise(0.0, sigma);
     for (std::uint64_t edge = 0; edge < graph.number_of_edges(); ++edge) {
@@ -120,8 +140,13 @@ inline void initialize_dynamic_graph(
         e.is_constraint = 0;
         dynamic_graph.adjacency[u].push_back({v, edge_id});
         dynamic_graph.adjacency[v].push_back({u, edge_id});
-        heap.push(edge_id, priority_for(weight, absolute_priority));
+        heap_entries.push_back({edge_id, priority_for(weight, absolute_priority)});
     }
+
+    // Floyd's heapify is O(n_edges) — meaningfully faster than n_edges
+    // successive `push` calls when n_edges is in the hundreds of thousands
+    // (the common case for graphs we run the multicut on).
+    heap.build_heap(std::move(heap_entries));
 }
 
 inline std::vector<std::uint64_t> labels_from_sets(

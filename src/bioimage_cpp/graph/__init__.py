@@ -36,6 +36,17 @@ _AFFINITY_FEATURES_BY_DTYPE = {
     np.dtype("int64"): _core._accumulate_affinity_features_int64,
 }
 
+_EDGE_WEIGHTED_WATERSHED_BY_DTYPE = {
+    (np.dtype("float32"), np.dtype("uint32")): _core._edge_weighted_watershed_float32_uint32,
+    (np.dtype("float32"), np.dtype("uint64")): _core._edge_weighted_watershed_float32_uint64,
+    (np.dtype("float32"), np.dtype("int32")): _core._edge_weighted_watershed_float32_int32,
+    (np.dtype("float32"), np.dtype("int64")): _core._edge_weighted_watershed_float32_int64,
+    (np.dtype("float64"), np.dtype("uint32")): _core._edge_weighted_watershed_float64_uint32,
+    (np.dtype("float64"), np.dtype("uint64")): _core._edge_weighted_watershed_float64_uint64,
+    (np.dtype("float64"), np.dtype("int32")): _core._edge_weighted_watershed_float64_int32,
+    (np.dtype("float64"), np.dtype("int64")): _core._edge_weighted_watershed_float64_int64,
+}
+
 _PROJECT_NODE_LABELS_TO_PIXELS_BY_DTYPE = {
     np.dtype("uint32"): _core._project_node_labels_to_pixels_uint32,
     np.dtype("uint64"): _core._project_node_labels_to_pixels_uint64,
@@ -159,6 +170,17 @@ def _as_node_labels(labels, graph: UndirectedGraph | RegionAdjacencyGraph) -> np
     return np.ascontiguousarray(array)
 
 
+def _as_1d_array(values, dtype, name: str, expected_size: int) -> np.ndarray:
+    array = np.asarray(values, dtype=dtype)
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be a 1D array")
+    if array.shape[0] != expected_size:
+        raise ValueError(
+            f"{name} length must be {expected_size}, got {array.shape[0]}"
+        )
+    return np.ascontiguousarray(array)
+
+
 def _dense_labels(labels) -> np.ndarray:
     labels = np.asarray(labels, dtype=np.uint64)
     _, dense = np.unique(labels, return_inverse=True)
@@ -205,6 +227,73 @@ def connected_components(
     return _core._connected_components_masked(
         graph, np.ascontiguousarray(mask.astype(np.uint8, copy=False))
     )
+
+
+def edge_weighted_watershed(
+    graph: UndirectedGraph | RegionAdjacencyGraph,
+    edge_weights,
+    seeds,
+) -> np.ndarray:
+    """Kruskal-style edge-weighted seeded watershed on an undirected graph.
+
+    Edges are visited in ascending weight order. Two distinct components are
+    merged iff at least one of them is unlabeled (seed label ``0``); the
+    non-zero seed label then propagates. Two distinct already-labeled
+    components are never merged, so seed boundaries are preserved.
+
+    Parameters
+    ----------
+    graph:
+        :class:`UndirectedGraph` or :class:`RegionAdjacencyGraph`.
+    edge_weights:
+        1D array of length ``graph.number_of_edges``. Supported dtypes are
+        ``float32`` and ``float64``. Other floating dtypes are cast to
+        ``float32`` (matches nifty); other dtypes raise ``TypeError``.
+    seeds:
+        1D array of length ``graph.number_of_nodes``. Supported dtypes are
+        ``uint32``, ``uint64``, ``int32``, ``int64``. ``0`` marks unlabeled
+        nodes; positive ids are seed labels and propagate along low-weight
+        paths. Signed seed arrays must not contain negative values.
+
+    Returns
+    -------
+    np.ndarray
+        1D array of length ``graph.number_of_nodes`` with the same dtype as
+        ``seeds``. Nodes reachable from a seed receive that seed's label;
+        unreachable nodes remain ``0``. Seed label values are preserved (no
+        dense relabeling).
+    """
+    weight_array = np.asarray(edge_weights)
+    if weight_array.dtype not in (np.dtype("float32"), np.dtype("float64")):
+        if np.issubdtype(weight_array.dtype, np.floating):
+            weight_array = weight_array.astype(np.float32, copy=False)
+        else:
+            raise TypeError(
+                "edge_weights must have dtype float32 or float64, got "
+                f"dtype={weight_array.dtype}"
+            )
+
+    seed_array = np.asarray(seeds)
+    if seed_array.dtype not in (
+        np.dtype("uint32"),
+        np.dtype("uint64"),
+        np.dtype("int32"),
+        np.dtype("int64"),
+    ):
+        raise TypeError(
+            "seeds must have dtype uint32, uint64, int32, or int64, got "
+            f"dtype={seed_array.dtype}"
+        )
+
+    weight_array = _as_1d_array(
+        weight_array, weight_array.dtype, "edge_weights", int(graph.number_of_edges)
+    )
+    seed_array = _as_1d_array(
+        seed_array, seed_array.dtype, "seeds", int(graph.number_of_nodes)
+    )
+
+    run = _EDGE_WEIGHTED_WATERSHED_BY_DTYPE[(weight_array.dtype, seed_array.dtype)]
+    return run(graph, weight_array, seed_array)
 
 
 class MulticutObjective:
@@ -287,6 +376,15 @@ class GreedyAdditiveMulticut(MulticutSolver):
         objective.labels = labels
         return objective.labels
 
+    def _build_cpp_sub_solver(self):
+        return _core._GreedyAdditiveMulticutSubSolver(
+            weight_stop=self.weight_stop,
+            node_num_stop=self.node_num_stop,
+            add_noise=self.add_noise,
+            seed=self.seed,
+            sigma=self.sigma,
+        )
+
 
 class GreedyFixationMulticut(MulticutSolver):
     def __init__(self, *, weight_stop: float = 0.0, node_num_stop: float = -1.0):
@@ -302,6 +400,12 @@ class GreedyFixationMulticut(MulticutSolver):
         )
         objective.labels = labels
         return objective.labels
+
+    def _build_cpp_sub_solver(self):
+        return _core._GreedyFixationMulticutSubSolver(
+            weight_stop=self.weight_stop,
+            node_num_stop=self.node_num_stop,
+        )
 
 
 class KernighanLinMulticut(MulticutSolver):
@@ -341,6 +445,184 @@ class KernighanLinMulticut(MulticutSolver):
             initial_labels,
             self.number_of_outer_iterations,
             self.epsilon,
+        )
+        objective.labels = labels
+        return objective.labels
+
+    def _build_cpp_sub_solver(self):
+        return _core._KernighanLinMulticutSubSolver(
+            number_of_outer_iterations=self.number_of_outer_iterations,
+            epsilon=self.epsilon,
+        )
+
+
+class ProposalGenerator(ABC):
+    """Base class for fusion-move proposal generators.
+
+    Concrete generators carry settings on the Python side. ``_build_for_thread``
+    constructs an independent underlying C++ proposal-generator object whose
+    seed is offset by ``seed_offset`` so that parallel proposal slots produce
+    distinct, reproducible streams.
+    """
+
+    @abstractmethod
+    def _build_for_thread(
+        self,
+        graph: UndirectedGraph | RegionAdjacencyGraph,
+        edge_costs: np.ndarray,
+        seed_offset: int,
+    ):
+        """Construct the underlying C++ proposal generator with a seed offset."""
+
+
+class WatershedProposalGenerator(ProposalGenerator):
+    """Watershed proposal generator (nifty's fusion-move workhorse).
+
+    Per call: add Gaussian noise to edge costs, drop random seeds at the
+    endpoints of negative-cost edges, run the edge-weighted watershed.
+    """
+
+    def __init__(
+        self,
+        *,
+        sigma: float = 1.0,
+        n_seeds_fraction: float = 0.1,
+        seed: int = 0,
+    ):
+        self.sigma = float(sigma)
+        self.n_seeds_fraction = float(n_seeds_fraction)
+        self.seed = int(seed)
+
+    def _build_for_thread(self, graph, edge_costs, seed_offset):
+        return _core._WatershedProposalGenerator(
+            graph,
+            edge_costs,
+            sigma=self.sigma,
+            n_seeds_fraction=self.n_seeds_fraction,
+            seed=self.seed + int(seed_offset),
+        )
+
+
+class GreedyAdditiveProposalGenerator(ProposalGenerator):
+    """Greedy-additive multicut proposal generator.
+
+    Per call: run the greedy-additive multicut solver with noisy edge weights;
+    the seed advances every call so successive proposals differ.
+    """
+
+    def __init__(
+        self,
+        *,
+        sigma: float = 1.0,
+        weight_stop: float = 0.0,
+        node_num_stop: float = -1.0,
+        seed: int = 0,
+    ):
+        self.sigma = float(sigma)
+        self.weight_stop = float(weight_stop)
+        self.node_num_stop = float(node_num_stop)
+        self.seed = int(seed)
+
+    def _build_for_thread(self, graph, edge_costs, seed_offset):
+        return _core._GreedyAdditiveMulticutProposalGenerator(
+            graph,
+            edge_costs,
+            sigma=self.sigma,
+            weight_stop=self.weight_stop,
+            node_num_stop=self.node_num_stop,
+            seed=self.seed + int(seed_offset),
+        )
+
+
+class FusionMoveMulticut(MulticutSolver):
+    """Fusion-move multicut solver.
+
+    Iteratively generates proposals via ``proposal_generator``, fuses them
+    with the current best labeling, and accepts improvements. The fuse step
+    solves a contracted multicut subproblem with ``sub_solver``; if omitted,
+    the default sub-solver is :class:`GreedyAdditiveMulticut`.
+
+    If the objective's current labels are the trivial singleton labeling, the
+    driver warm-starts with one greedy-additive pass before the proposal loop.
+    The best-of safety net guarantees energy never increases across iterations.
+
+    Threading: ``number_of_threads > 1`` runs ``number_of_parallel_proposals``
+    proposal generators in parallel within each iteration. Each parallel slot
+    uses an independent proposal generator with seed ``proposal_generator.seed
+    + slot_index``. By default ``number_of_parallel_proposals`` is ``2`` when
+    ``number_of_threads == 1`` and ``number_of_threads`` otherwise; pass it
+    explicitly to override.
+
+    Multi-proposal fuse: when at least two parallel pairwise fuses fail to
+    improve on the current best, a joint multi-proposal fuse is run over the
+    surviving fused candidates (matches nifty's ``ccFusionMoveBased`` stage-2
+    behaviour). With ``number_of_parallel_proposals == 2`` this stage rarely
+    triggers; it becomes useful as ``number_of_parallel_proposals`` grows.
+    """
+
+    def __init__(
+        self,
+        *,
+        proposal_generator: ProposalGenerator,
+        sub_solver: MulticutSolver | None = None,
+        number_of_iterations: int = 10,
+        stop_if_no_improvement: int = 4,
+        number_of_threads: int = 1,
+        number_of_parallel_proposals: int | None = None,
+    ):
+        if not isinstance(proposal_generator, ProposalGenerator):
+            raise TypeError("proposal_generator must inherit from ProposalGenerator")
+        if sub_solver is not None and not isinstance(sub_solver, MulticutSolver):
+            raise TypeError("sub_solver must inherit from MulticutSolver")
+        if sub_solver is not None and not hasattr(sub_solver, "_build_cpp_sub_solver"):
+            raise TypeError(
+                "sub_solver must be a built-in multicut solver "
+                "(custom Python solvers are not supported as fusion-move sub-solvers)"
+            )
+        n_threads = int(number_of_threads)
+        if n_threads < 1:
+            raise ValueError("number_of_threads must be >= 1")
+        if number_of_parallel_proposals is None:
+            n_parallel = 2 if n_threads == 1 else n_threads
+        else:
+            n_parallel = int(number_of_parallel_proposals)
+        if n_parallel < 1:
+            raise ValueError("number_of_parallel_proposals must be >= 1")
+
+        self.proposal_generator = proposal_generator
+        self.sub_solver = sub_solver
+        self.number_of_iterations = int(number_of_iterations)
+        self.stop_if_no_improvement = int(stop_if_no_improvement)
+        self.number_of_threads = n_threads
+        self.number_of_parallel_proposals = n_parallel
+        if self.number_of_iterations < 0:
+            raise ValueError("number_of_iterations must be non-negative")
+        if self.stop_if_no_improvement < 1:
+            raise ValueError("stop_if_no_improvement must be >= 1")
+
+    def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        # Build one C++ proposal generator per parallel slot, each with a
+        # distinct seed offset, so parallel streams are independent and
+        # reproducible.
+        cpp_pgens = [
+            self.proposal_generator._build_for_thread(
+                objective.graph, objective.edge_costs, slot
+            )
+            for slot in range(self.number_of_parallel_proposals)
+        ]
+        cpp_sub_solver = (
+            None if self.sub_solver is None else self.sub_solver._build_cpp_sub_solver()
+        )
+        labels = _core._multicut_fusion_move(
+            objective.graph,
+            objective.edge_costs,
+            objective.labels,
+            cpp_pgens,
+            cpp_sub_solver,
+            self.number_of_iterations,
+            self.stop_if_no_improvement,
+            self.number_of_threads,
+            self.number_of_parallel_proposals,
         )
         objective.labels = labels
         return objective.labels
@@ -658,20 +940,25 @@ __all__ = [
     "COMPLEX_EDGE_FEATURE_NAMES",
     "DEFAULT_EXTERNAL_MULTICUT_PROBLEM_PATH",
     "EXTERNAL_MULTICUT_PROBLEM_URL",
+    "FusionMoveMulticut",
     "GreedyAdditiveMulticut",
+    "GreedyAdditiveProposalGenerator",
     "GreedyFixationMulticut",
     "KernighanLinMulticut",
     "MulticutDecomposer",
     "MulticutObjective",
     "MulticutSolver",
+    "ProposalGenerator",
     "RegionAdjacencyGraph",
     "SIMPLE_EDGE_FEATURE_NAMES",
     "UndirectedGraph",
+    "WatershedProposalGenerator",
     "affinity_features",
     "affinity_features_complex",
     "connected_components",
     "edge_map_features",
     "edge_map_features_complex",
+    "edge_weighted_watershed",
     "external_multicut_problem_path",
     "load_external_multicut_problem",
     "load_external_multicut_problem_data",

@@ -133,6 +133,28 @@ public:
         sift_up(pos);
     }
 
+    // Bulk-load the heap from a list of entries in O(n) via Floyd's heapify.
+    // Replaces any current heap contents. Preconditions:
+    //   - the heap is empty before this call (call `clear()`/`reset_capacity`
+    //     first if needed);
+    //   - every key in `entries` is unique.
+    // Compared to N successive `push` calls (O(n log n)) this matters when
+    // initializing a heap from a large edge set in one shot.
+    void build_heap(std::vector<Entry> entries) {
+        heap_ = std::move(entries);
+        for (std::size_t pos = 0; pos < heap_.size(); ++pos) {
+            locator_.set(heap_[pos].key, pos);
+        }
+        if (heap_.size() < 2) {
+            return;
+        }
+        // Sift down from the last internal node back to the root. After each
+        // sift_down, the subtree rooted at `pos` is heap-ordered.
+        for (std::size_t pos = heap_.size() / 2; pos-- > 0;) {
+            sift_down(pos);
+        }
+    }
+
     // Precondition: `key` is currently in the heap.
     void change(const KeyT &key, PriorityT priority) {
         const auto pos = locator_.at(key);

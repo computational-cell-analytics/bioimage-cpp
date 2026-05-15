@@ -254,6 +254,50 @@ Notes:
 - `number_of_threads=0` uses the library default; pass a positive integer for a
   fixed thread count.
 
+## Edge-Weighted Watershed
+
+Nifty:
+
+```python
+import nifty.graph as ng
+
+labels = ng.edgeWeightedWatershedsSegmentation(graph, edge_weights, seeds)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+labels = bic.graph.edge_weighted_watershed(graph, edge_weights, seeds)
+```
+
+Notes:
+
+- Only the Kruskal variant of nifty's algorithm is provided. Edges are visited
+  in ascending weight order; two distinct components merge iff at least one is
+  unlabeled (seed label `0`), so seed boundaries are preserved.
+- `graph` may be an `UndirectedGraph` or a `RegionAdjacencyGraph`.
+- `edge_weights` must be 1D with length `graph.number_of_edges`. Supported
+  dtypes are `float32` and `float64`; other floating dtypes are promoted to
+  `float32` (matching nifty, whose Python binding is `float32`-only). Non-float
+  dtypes raise `TypeError`.
+- `seeds` must be 1D with length `graph.number_of_nodes`. Supported dtypes are
+  `uint32`, `uint64`, `int32`, `int64`. The value `0` marks unlabeled nodes;
+  non-zero ids are propagated along low-weight paths. Signed seed arrays must
+  not contain negative values.
+- The output is 1D with length `graph.number_of_nodes` and the same dtype as
+  `seeds`. Seed label values are preserved (no dense relabeling). Nodes that
+  no seed can reach remain `0`.
+
+Intentional differences vs. nifty:
+
+- No priority-queue variant — only the simpler sort + union-find Kruskal flow.
+  For the same input it matches nifty's default behavior (which also dispatches
+  to the Kruskal implementation).
+- No carving / background-bias variant. Build a carving prior into the edge
+  weights before calling the function if needed.
+
 ## Multicut
 
 Nifty exposes multicut through an objective + factory-style solver hierarchy.
@@ -363,6 +407,84 @@ Intentional differences vs. nifty:
 - `MulticutDecomposer` short-circuits the trivial case where the sub-solver is
   `GreedyAdditiveMulticut` and no fallthrough is given — the greedy solver
   already operates on each connected component internally.
+
+## Fusion Moves (Multicut)
+
+Nifty exposes the fusion-move multicut solver via the factory hierarchy with a
+chosen proposal generator and sub-solver factory.
+
+Nifty:
+
+```python
+import nifty.graph.opt.multicut as nmc
+
+objective = nmc.multicutObjective(graph, edge_costs)
+pgen = nmc.watershedProposals(sigma=1.0, numberOfSeeds=0.1)
+factory = nmc.fusionMoveBasedFactory(
+    proposalGenerator=pgen,
+    fusionMove=nmc.fusionMoveSettings(
+        mcFactory=nmc.greedyAdditiveFactory(),
+    ),
+    numberOfIterations=10,
+    stopIfNoImprovement=4,
+)
+labels = factory.create(objective).optimize()
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+objective = bic.graph.MulticutObjective(graph, edge_costs)
+solver = bic.graph.FusionMoveMulticut(
+    proposal_generator=bic.graph.WatershedProposalGenerator(
+        sigma=1.0, n_seeds_fraction=0.1, seed=0,
+    ),
+    sub_solver=bic.graph.GreedyAdditiveMulticut(),
+    number_of_iterations=10,
+    stop_if_no_improvement=4,
+)
+labels = solver.optimize(objective)
+```
+
+Proposal generators:
+
+| nifty proposal generator | bioimage-cpp proposal generator |
+| --- | --- |
+| `watershedProposals(sigma=..., numberOfSeeds=...)` | `WatershedProposalGenerator(sigma=..., n_seeds_fraction=..., seed=...)` |
+| `greedyAdditiveProposals(sigma=..., weightStopCond=..., nodeNumStopCond=...)` | `GreedyAdditiveProposalGenerator(sigma=..., weight_stop=..., node_num_stop=..., seed=...)` |
+
+Sub-solvers: any built-in multicut solver (`GreedyAdditiveMulticut`,
+`GreedyFixationMulticut`, `KernighanLinMulticut`). If `sub_solver` is omitted,
+the default is `GreedyAdditiveMulticut` constructed with no-noise defaults.
+
+Intentional differences vs. nifty:
+
+- Single object construction: no separate factory / solver step.
+- Proposal generators are Python classes carrying their settings; the C++
+  proposal-generator object is built lazily when `optimize` is called.
+- The driver warm-starts from the trivial singleton labeling by running the
+  default greedy-additive sub-solver once before the proposal loop.
+- A best-of safety net keeps the running energy monotonically non-increasing
+  across iterations (compared against current, proposals, fused, and the
+  stage-2 joint fuse).
+- Parallel proposal generation and a multi-proposal joint fuse are supported:
+  `number_of_threads=T` runs `number_of_parallel_proposals=P` proposal
+  generators in parallel within each iteration. By default `P=2` when `T=1`
+  and `P=T` when `T>1`; pass an explicit `number_of_parallel_proposals` to
+  override. Each parallel slot uses an independent proposal generator with
+  seed `proposal_generator.seed + slot_index` so the result is deterministic
+  for a given `(seed, T, P)`. When at least two parallel pairwise fuses fail
+  to improve on the current best, a joint multi-proposal fuse runs over the
+  surviving fused candidates (matches nifty's `ccFusionMoveBased` stage-2
+  behaviour).
+
+Notes:
+
+- Custom Python proposal generators are not yet supported; subclass
+  `ProposalGenerator` and provide your own `_build` returning a C++
+  proposal-generator object if you need to extend the set.
 
 ## Segmentation Overlaps
 

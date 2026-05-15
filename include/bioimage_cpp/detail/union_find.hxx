@@ -70,6 +70,16 @@ public:
         return parents_.size();
     }
 
+    // Re-initialise the union-find to `n` singletons. Reuses the existing
+    // vectors' capacity when possible, so the workspace pattern (reusing a
+    // single `UnionFind` across many solver invocations on graphs of varying
+    // size) avoids reallocations.
+    void reset(const std::size_t n) {
+        parents_.resize(n);
+        ranks_.assign(n, 0);
+        std::iota(parents_.begin(), parents_.end(), std::uint64_t{0});
+    }
+
 private:
     std::vector<std::uint64_t> parents_;
     std::vector<std::uint64_t> ranks_;
