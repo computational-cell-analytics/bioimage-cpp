@@ -219,6 +219,30 @@ Graph graph_from_edges(const std::uint64_t number_of_nodes, ConstUInt64Array uvs
     return graph;
 }
 
+// Bulk-construct a graph from a pre-deduplicated (u, v) array, bypassing the
+// per-edge hash dedup that ``insert_edge`` performs. The caller asserts that
+// no (u, v) pair appears twice in ``uvs`` and that ``u != v`` in every row.
+// Edges receive ids matching their position in ``uvs``. This is the fast path
+// for copying an existing graph (its ``uv_ids()`` are unique by construction).
+Graph graph_from_unique_edges(const std::uint64_t number_of_nodes, ConstUInt64Array uvs) {
+    require_uv_array(uvs, "uvs");
+    std::vector<Graph::Edge> edges;
+    edges.reserve(static_cast<std::size_t>(uvs.shape(0)));
+    const auto *in = uvs.data();
+    for (std::size_t index = 0; index < uvs.shape(0); ++index) {
+        const auto u = in[2 * index];
+        const auto v = in[2 * index + 1];
+        if (u == v) {
+            throw std::invalid_argument("self edges are not supported");
+        }
+        if (u >= number_of_nodes || v >= number_of_nodes) {
+            throw std::out_of_range("edge endpoint exceeds number_of_nodes");
+        }
+        edges.emplace_back(u, v);
+    }
+    return Graph::from_sorted_unique_edges(number_of_nodes, std::move(edges));
+}
+
 Graph graph_deserialize(ConstUInt64Array serialization) {
     if (serialization.ndim() != 1) {
         throw std::invalid_argument("serialization must be a 1D uint64 array");
@@ -852,6 +876,12 @@ void bind_graph(nb::module_ &m) {
         .def_static(
             "from_edges",
             &graph_from_edges,
+            nb::arg("number_of_nodes"),
+            nb::arg("uvs")
+        )
+        .def_static(
+            "from_unique_edges",
+            &graph_from_unique_edges,
             nb::arg("number_of_nodes"),
             nb::arg("uvs")
         )

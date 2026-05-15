@@ -165,11 +165,17 @@ def _as_serialization_array(serialization) -> np.ndarray:
     return np.ascontiguousarray(array)
 
 
-def _copy_graph(graph: UndirectedGraph | RegionAdjacencyGraph) -> UndirectedGraph:
-    copied = UndirectedGraph(int(graph.number_of_nodes), int(graph.number_of_edges))
-    if graph.number_of_edges:
-        copied.insert_edges(graph.uv_ids())
-    return copied
+def _copy_graph(graph: UndirectedGraph | RegionAdjacencyGraph) -> _core.UndirectedGraph:
+    # `uv_ids()` always returns a unique list (graphs deduplicate on insert),
+    # so we can use the bulk constructor that skips per-edge hash dedup —
+    # significantly faster than `insert_edges` for large graphs. The result
+    # is a ``_core.UndirectedGraph``; downstream code (objectives, solvers,
+    # validators) uses base-class methods that work identically.
+    if graph.number_of_edges == 0:
+        return _core.UndirectedGraph(int(graph.number_of_nodes))
+    return _core.UndirectedGraph.from_unique_edges(
+        int(graph.number_of_nodes), graph.uv_ids()
+    )
 
 
 def _as_edge_costs(edge_costs, graph: UndirectedGraph | RegionAdjacencyGraph) -> np.ndarray:
@@ -787,14 +793,22 @@ class LiftedMulticutObjective:
         overwrite_existing: bool = False,
         initial_labels=None,
     ):
-        base_graph = _copy_graph(graph)
+        # The objective holds a reference to the user's base graph (no
+        # defensive copy — the C++ ``Objective`` already keeps a const
+        # reference). The user is expected to treat the input graph as
+        # immutable while the objective is alive; mutations are visible to
+        # the objective and may produce undefined behaviour.
+        base_graph = graph
         base_costs = _as_edge_costs(edge_costs, base_graph)
 
-        lifted_graph = UndirectedGraph(
-            int(base_graph.number_of_nodes), int(base_graph.number_of_edges)
-        )
+        # Use the bulk constructor for the lifted graph's base portion to
+        # bypass the per-edge hash dedup that ``insert_edges`` performs.
         if int(base_graph.number_of_edges) > 0:
-            lifted_graph.insert_edges(base_graph.uv_ids())
+            lifted_graph = _core.UndirectedGraph.from_unique_edges(
+                int(base_graph.number_of_nodes), base_graph.uv_ids()
+            )
+        else:
+            lifted_graph = _core.UndirectedGraph(int(base_graph.number_of_nodes))
 
         weights_list = [base_costs.copy()]
 
@@ -953,6 +967,55 @@ def _add_lifted_edges(
     # In-place updates require a single flat working buffer; coalesce first.
     if len(weights_list) > 1:
         weights_list[:] = [np.ascontiguousarray(np.concatenate(weights_list))]
+
+    # Fast path: bulk-insert and detect uniqueness from the row count delta.
+    # For the typical case — ``lifted_uvs`` produced by
+    # ``lifted_edges_from_affinities`` or by the BFS constructor — every row
+    # is a brand-new edge, so the delta equals the input length and we can
+    # append the weights array directly. No ``find_edges`` calls are needed.
+    if not overwrite_existing:
+        pre_count = int(lifted_graph.number_of_edges)
+        lifted_graph.insert_edges(lifted_uvs)
+        post_count = int(lifted_graph.number_of_edges)
+        n_new = post_count - pre_count
+
+        if n_new == lifted_uvs.shape[0]:
+            weights_list.append(
+                np.ascontiguousarray(lifted_costs.astype(np.float64, copy=False))
+            )
+            return
+
+        # Some rows collided with existing edges or with each other. Use
+        # find_edges to recover the per-row edge id (insertion is already
+        # done; this is just a lookup).
+        edge_ids = np.asarray(lifted_graph.find_edges(lifted_uvs))
+        lifted_costs_f64 = lifted_costs.astype(np.float64, copy=False)
+        working = weights_list[0]
+
+        collision_mask = edge_ids < pre_count
+        if collision_mask.any():
+            np.add.at(
+                working,
+                edge_ids[collision_mask].astype(np.intp, copy=False),
+                lifted_costs_f64[collision_mask],
+            )
+
+        new_mask = ~collision_mask
+        if new_mask.any():
+            slot = (edge_ids[new_mask] - pre_count).astype(np.int64, copy=False)
+            new_weights = np.bincount(
+                slot, weights=lifted_costs_f64[new_mask], minlength=n_new
+            ).astype(np.float64, copy=False)
+        else:
+            new_weights = np.zeros(n_new, dtype=np.float64)
+
+        weights_list[0] = working
+        if n_new > 0:
+            weights_list.append(new_weights)
+        return
+
+    # Slow path: per-row Python loop for ``overwrite_existing=True`` (rare).
+    # Order-sensitive last-write-wins semantics on collisions.
     working = weights_list[0]
     new_costs: list[float] = []
     for index in range(lifted_uvs.shape[0]):
@@ -964,10 +1027,7 @@ def _add_lifted_edges(
         if int(lifted_graph.number_of_edges) > pre:
             new_costs.append(weight)
         else:
-            if overwrite_existing:
-                working[edge] = weight
-            else:
-                working[edge] = working[edge] + weight
+            working[edge] = weight
     if new_costs:
         weights_list[0] = working
         weights_list.append(np.asarray(new_costs, dtype=np.float64))

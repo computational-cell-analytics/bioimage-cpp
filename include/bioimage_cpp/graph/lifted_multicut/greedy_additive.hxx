@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/graph/lifted_multicut/detail.hxx"
 #include "bioimage_cpp/graph/lifted_multicut/objective.hxx"
 
@@ -40,28 +41,44 @@ inline std::vector<std::uint64_t> greedy_additive(
     const double sigma,
     GreedyAdditiveWorkspace &workspace
 ) {
+    BIOIMAGE_PROFILE_INIT(profile);
     validate_weights(lifted_graph, weights);
-    workspace.reset(lifted_graph);
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "workspace_reset");
+        workspace.reset(lifted_graph);
+    }
     auto &dynamic_graph = workspace.dynamic_graph;
     auto &sets = workspace.union_find;
     auto &heap = workspace.heap;
-    detail::initialize_dynamic_graph(
-        lifted_graph, weights, n_base_edges, dynamic_graph, heap, add_noise, seed, sigma
-    );
-
-    while (!heap.empty() && dynamic_graph.alive_count > 1) {
-        const auto top = heap.top();
-        if (top.priority <= weight_stop) {
-            break;
-        }
-        if (node_num_stop > 0.0
-            && dynamic_graph.alive_count <= detail::stop_node_count(lifted_graph, node_num_stop)) {
-            break;
-        }
-        const auto &edge = dynamic_graph.edges[top.key];
-        detail::merge_dynamic_nodes(dynamic_graph, sets, heap, edge.u, edge.v);
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "initialize");
+        detail::initialize_dynamic_graph(
+            lifted_graph, weights, n_base_edges, dynamic_graph, heap, add_noise, seed, sigma
+        );
     }
-    return detail::labels_from_sets(sets, lifted_graph);
+
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "contraction_loop");
+        while (!heap.empty() && dynamic_graph.alive_count > 1) {
+            const auto top = heap.top();
+            if (top.priority <= weight_stop) {
+                break;
+            }
+            if (node_num_stop > 0.0
+                && dynamic_graph.alive_count <= detail::stop_node_count(lifted_graph, node_num_stop)) {
+                break;
+            }
+            const auto &edge = dynamic_graph.edges[top.key];
+            detail::merge_dynamic_nodes(dynamic_graph, sets, heap, edge.u, edge.v);
+        }
+    }
+    std::vector<std::uint64_t> labels;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "labels_from_sets");
+        labels = detail::labels_from_sets(sets, lifted_graph);
+    }
+    BIOIMAGE_PROFILE_REPORT(profile);
+    return labels;
 }
 
 inline std::vector<std::uint64_t> greedy_additive(
