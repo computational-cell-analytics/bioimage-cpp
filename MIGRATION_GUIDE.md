@@ -254,6 +254,50 @@ Notes:
 - `number_of_threads=0` uses the library default; pass a positive integer for a
   fixed thread count.
 
+## Edge-Weighted Watershed
+
+Nifty:
+
+```python
+import nifty.graph as ng
+
+labels = ng.edgeWeightedWatershedsSegmentation(graph, edge_weights, seeds)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+labels = bic.graph.edge_weighted_watershed(graph, edge_weights, seeds)
+```
+
+Notes:
+
+- Only the Kruskal variant of nifty's algorithm is provided. Edges are visited
+  in ascending weight order; two distinct components merge iff at least one is
+  unlabeled (seed label `0`), so seed boundaries are preserved.
+- `graph` may be an `UndirectedGraph` or a `RegionAdjacencyGraph`.
+- `edge_weights` must be 1D with length `graph.number_of_edges`. Supported
+  dtypes are `float32` and `float64`; other floating dtypes are promoted to
+  `float32` (matching nifty, whose Python binding is `float32`-only). Non-float
+  dtypes raise `TypeError`.
+- `seeds` must be 1D with length `graph.number_of_nodes`. Supported dtypes are
+  `uint32`, `uint64`, `int32`, `int64`. The value `0` marks unlabeled nodes;
+  non-zero ids are propagated along low-weight paths. Signed seed arrays must
+  not contain negative values.
+- The output is 1D with length `graph.number_of_nodes` and the same dtype as
+  `seeds`. Seed label values are preserved (no dense relabeling). Nodes that
+  no seed can reach remain `0`.
+
+Intentional differences vs. nifty:
+
+- No priority-queue variant — only the simpler sort + union-find Kruskal flow.
+  For the same input it matches nifty's default behavior (which also dispatches
+  to the Kruskal implementation).
+- No carving / background-bias variant. Build a carving prior into the edge
+  weights before calling the function if needed.
+
 ## Multicut
 
 Nifty exposes multicut through an objective + factory-style solver hierarchy.

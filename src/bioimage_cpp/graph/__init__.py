@@ -36,6 +36,17 @@ _AFFINITY_FEATURES_BY_DTYPE = {
     np.dtype("int64"): _core._accumulate_affinity_features_int64,
 }
 
+_EDGE_WEIGHTED_WATERSHED_BY_DTYPE = {
+    (np.dtype("float32"), np.dtype("uint32")): _core._edge_weighted_watershed_float32_uint32,
+    (np.dtype("float32"), np.dtype("uint64")): _core._edge_weighted_watershed_float32_uint64,
+    (np.dtype("float32"), np.dtype("int32")): _core._edge_weighted_watershed_float32_int32,
+    (np.dtype("float32"), np.dtype("int64")): _core._edge_weighted_watershed_float32_int64,
+    (np.dtype("float64"), np.dtype("uint32")): _core._edge_weighted_watershed_float64_uint32,
+    (np.dtype("float64"), np.dtype("uint64")): _core._edge_weighted_watershed_float64_uint64,
+    (np.dtype("float64"), np.dtype("int32")): _core._edge_weighted_watershed_float64_int32,
+    (np.dtype("float64"), np.dtype("int64")): _core._edge_weighted_watershed_float64_int64,
+}
+
 _PROJECT_NODE_LABELS_TO_PIXELS_BY_DTYPE = {
     np.dtype("uint32"): _core._project_node_labels_to_pixels_uint32,
     np.dtype("uint64"): _core._project_node_labels_to_pixels_uint64,
@@ -159,6 +170,17 @@ def _as_node_labels(labels, graph: UndirectedGraph | RegionAdjacencyGraph) -> np
     return np.ascontiguousarray(array)
 
 
+def _as_1d_array(values, dtype, name: str, expected_size: int) -> np.ndarray:
+    array = np.asarray(values, dtype=dtype)
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be a 1D array")
+    if array.shape[0] != expected_size:
+        raise ValueError(
+            f"{name} length must be {expected_size}, got {array.shape[0]}"
+        )
+    return np.ascontiguousarray(array)
+
+
 def _dense_labels(labels) -> np.ndarray:
     labels = np.asarray(labels, dtype=np.uint64)
     _, dense = np.unique(labels, return_inverse=True)
@@ -205,6 +227,73 @@ def connected_components(
     return _core._connected_components_masked(
         graph, np.ascontiguousarray(mask.astype(np.uint8, copy=False))
     )
+
+
+def edge_weighted_watershed(
+    graph: UndirectedGraph | RegionAdjacencyGraph,
+    edge_weights,
+    seeds,
+) -> np.ndarray:
+    """Kruskal-style edge-weighted seeded watershed on an undirected graph.
+
+    Edges are visited in ascending weight order. Two distinct components are
+    merged iff at least one of them is unlabeled (seed label ``0``); the
+    non-zero seed label then propagates. Two distinct already-labeled
+    components are never merged, so seed boundaries are preserved.
+
+    Parameters
+    ----------
+    graph:
+        :class:`UndirectedGraph` or :class:`RegionAdjacencyGraph`.
+    edge_weights:
+        1D array of length ``graph.number_of_edges``. Supported dtypes are
+        ``float32`` and ``float64``. Other floating dtypes are cast to
+        ``float32`` (matches nifty); other dtypes raise ``TypeError``.
+    seeds:
+        1D array of length ``graph.number_of_nodes``. Supported dtypes are
+        ``uint32``, ``uint64``, ``int32``, ``int64``. ``0`` marks unlabeled
+        nodes; positive ids are seed labels and propagate along low-weight
+        paths. Signed seed arrays must not contain negative values.
+
+    Returns
+    -------
+    np.ndarray
+        1D array of length ``graph.number_of_nodes`` with the same dtype as
+        ``seeds``. Nodes reachable from a seed receive that seed's label;
+        unreachable nodes remain ``0``. Seed label values are preserved (no
+        dense relabeling).
+    """
+    weight_array = np.asarray(edge_weights)
+    if weight_array.dtype not in (np.dtype("float32"), np.dtype("float64")):
+        if np.issubdtype(weight_array.dtype, np.floating):
+            weight_array = weight_array.astype(np.float32, copy=False)
+        else:
+            raise TypeError(
+                "edge_weights must have dtype float32 or float64, got "
+                f"dtype={weight_array.dtype}"
+            )
+
+    seed_array = np.asarray(seeds)
+    if seed_array.dtype not in (
+        np.dtype("uint32"),
+        np.dtype("uint64"),
+        np.dtype("int32"),
+        np.dtype("int64"),
+    ):
+        raise TypeError(
+            "seeds must have dtype uint32, uint64, int32, or int64, got "
+            f"dtype={seed_array.dtype}"
+        )
+
+    weight_array = _as_1d_array(
+        weight_array, weight_array.dtype, "edge_weights", int(graph.number_of_edges)
+    )
+    seed_array = _as_1d_array(
+        seed_array, seed_array.dtype, "seeds", int(graph.number_of_nodes)
+    )
+
+    run = _EDGE_WEIGHTED_WATERSHED_BY_DTYPE[(weight_array.dtype, seed_array.dtype)]
+    return run(graph, weight_array, seed_array)
 
 
 class MulticutObjective:
@@ -672,6 +761,7 @@ __all__ = [
     "connected_components",
     "edge_map_features",
     "edge_map_features_complex",
+    "edge_weighted_watershed",
     "external_multicut_problem_path",
     "load_external_multicut_problem",
     "load_external_multicut_problem_data",

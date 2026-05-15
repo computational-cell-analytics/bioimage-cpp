@@ -2,6 +2,7 @@
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/graph/connected_components.hxx"
+#include "bioimage_cpp/graph/edge_weighted_watershed.hxx"
 #include "bioimage_cpp/graph/feature_accumulation.hxx"
 #include "bioimage_cpp/graph/multicut.hxx"
 #include "bioimage_cpp/graph/node_label_projection.hxx"
@@ -12,6 +13,7 @@
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/vector.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -283,6 +285,55 @@ UInt64Array graph_connected_components_masked(const Graph &graph, ConstUInt8Arra
         labels = graph::connected_components(graph, edge_mask.data());
     }
     return vector_to_uint64_array(labels);
+}
+
+template <class T>
+using ConstArray1D = nb::ndarray<nb::numpy, const T, nb::c_contig>;
+
+template <class T>
+std::vector<T> array_1d_to_vector(
+    ConstArray1D<T> array,
+    const char *argument_name,
+    const std::uint64_t expected_size
+) {
+    if (array.ndim() != 1) {
+        throw std::invalid_argument(std::string(argument_name) + " must be a 1D array");
+    }
+    if (array.shape(0) != static_cast<std::size_t>(expected_size)) {
+        throw std::invalid_argument(
+            std::string(argument_name) + " length must match expected size"
+        );
+    }
+    const auto *data = array.data();
+    return std::vector<T>(data, data + array.shape(0));
+}
+
+template <class T>
+nb::ndarray<nb::numpy, T, nb::c_contig> vector_to_array_1d(const std::vector<T> &values) {
+    const std::size_t size = values.size();
+    auto *data = new T[size];
+    std::copy(values.begin(), values.end(), data);
+    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
+    const std::array<std::size_t, 1> shape{size};
+    return nb::ndarray<nb::numpy, T, nb::c_contig>(data, 1, shape.data(), owner);
+}
+
+template <class WeightT, class SeedT>
+nb::ndarray<nb::numpy, SeedT, nb::c_contig> graph_edge_weighted_watershed_t(
+    const Graph &graph,
+    ConstArray1D<WeightT> edge_weights,
+    ConstArray1D<SeedT> seeds
+) {
+    const auto weight_vector =
+        array_1d_to_vector<WeightT>(edge_weights, "edge_weights", graph.number_of_edges());
+    const auto seed_vector =
+        array_1d_to_vector<SeedT>(seeds, "seeds", graph.number_of_nodes());
+    std::vector<SeedT> labels;
+    {
+        nb::gil_scoped_release release;
+        labels = graph::edge_weighted_watershed<WeightT, SeedT>(graph, weight_vector, seed_vector);
+    }
+    return vector_to_array_1d<SeedT>(labels);
 }
 
 double multicut_energy(const Graph &graph, ConstDoubleArray costs, ConstUInt64Array labels) {
@@ -605,6 +656,25 @@ void bind_graph(nb::module_ &m) {
         nb::arg("graph"),
         nb::arg("edge_mask")
     );
+    const auto register_watershed = [&m]<class WeightT, class SeedT>(
+        const char *name
+    ) {
+        m.def(
+            name,
+            &graph_edge_weighted_watershed_t<WeightT, SeedT>,
+            nb::arg("graph"),
+            nb::arg("edge_weights"),
+            nb::arg("seeds")
+        );
+    };
+    register_watershed.operator()<float, std::uint32_t>("_edge_weighted_watershed_float32_uint32");
+    register_watershed.operator()<float, std::uint64_t>("_edge_weighted_watershed_float32_uint64");
+    register_watershed.operator()<float, std::int32_t>("_edge_weighted_watershed_float32_int32");
+    register_watershed.operator()<float, std::int64_t>("_edge_weighted_watershed_float32_int64");
+    register_watershed.operator()<double, std::uint32_t>("_edge_weighted_watershed_float64_uint32");
+    register_watershed.operator()<double, std::uint64_t>("_edge_weighted_watershed_float64_uint64");
+    register_watershed.operator()<double, std::int32_t>("_edge_weighted_watershed_float64_int32");
+    register_watershed.operator()<double, std::int64_t>("_edge_weighted_watershed_float64_int64");
     m.def(
         "_multicut_energy",
         &multicut_energy,
