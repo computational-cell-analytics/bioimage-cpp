@@ -33,6 +33,57 @@ Before introducing union-finds, priority queues, edge hashing, stride math, thre
 
 If a needed helper does not exist but is generally useful, add it to `detail/` as a header-only utility with a focused API rather than inlining it into one algorithm. Keep the contract small and well-documented; over time `detail/` is what lets multiple modules stay small and consistent.
 
+## Reusable algorithmic infrastructure
+
+Some larger pieces of infrastructure sit above `detail/` but are still
+intended to be reused across objective types. Check these before starting a
+new fusion-move / proposal-based / contraction-based solver:
+
+- `include/bioimage_cpp/graph/detail/fusion_contract.hxx` — objective-agnostic
+  agreement-projection primitive. `contract_by_agreement(graph, proposals,
+  n_proposals, ...)` returns `{contracted_graph, contracted_edge_of_original,
+  root_of_node}`. Already supports N ≥ 1 proposals; reused by both pairwise
+  and joint multi-proposal fuses.
+- `include/bioimage_cpp/graph/proposal_generator.hxx` — `ProposalGeneratorBase`
+  abstract class. Concrete generators (Watershed, GreedyAdditiveMulticut) live
+  in `proposal_generators/` and depend only on `(graph, edge_costs)` plus an
+  RNG seed. They emit `std::vector<std::uint64_t>` node labelings and are
+  therefore reusable across multicut, lifted multicut, mincut, etc.
+- `include/bioimage_cpp/graph/multicut/greedy_additive.hxx` — exposes
+  `GreedyAdditiveWorkspace` so multiple invocations on different graphs
+  share scratch buffers. Use this pattern (workspace + `reset(graph)`) when
+  a fusion-move driver calls a sub-solver inside its iteration loop.
+- `UndirectedGraph::from_sorted_unique_edges(N, edges, populate_lookup=false)`
+  — bulk graph construction without the per-edge hash insertion in
+  `insert_edge`. Pair with `populate_lookup=false` when the consumer only
+  walks edges / adjacency (the multicut sub-solvers do).
+- `detail/threading.hxx::parallel_for_chunks` — the only threading primitive
+  we use. New parallel solvers should not introduce alternatives.
+
+When porting fusion moves to a new objective (e.g. lifted multicut):
+
+1. The driver loop in `multicut/fusion_move.hxx::FusionMoveSolver::optimize`
+   is short and dense. Duplicate it for the new objective rather than
+   abstracting it via a template/CRTP base — the moving parts (cost
+   aggregation, energy evaluator, sub-solver type) are objective-specific
+   and template gymnastics buy little.
+2. Reuse `contract_by_agreement` unchanged; it operates on the *base* graph
+   only.
+3. Write a new `fuse_multi(...)` that aggregates *both* base and lifted (or
+   other auxiliary) weights through `contraction.contracted_edge_of_original`
+   and `contraction.root_of_node`, calls the new objective's sub-solver, and
+   lifts labels back via `root_of_node`.
+4. Reuse the existing `WatershedProposalGenerator` and
+   `GreedyAdditiveMulticutProposalGenerator` verbatim; they only depend on
+   the base graph + base costs and emit node labelings. Add objective-specific
+   generators (e.g. `GreedyAdditiveLiftedMulticutProposalGenerator`) only if a
+   meaningful new proposal strategy emerges.
+5. Reuse the per-thread parallel pattern from `optimize`: stage-1 parallel
+   proposal generation + parallel pairwise fuse, stage-2 sequential joint
+   multi-fuse on leftover candidates. Per-thread `GreedyAdditiveWorkspace`
+   becomes per-thread `<NewObjective>Workspace` if the new sub-solver follows
+   the same pattern.
+
 ## Dependencies
 
 **Allowed**: C++20 stdlib, `nanobind`, `numpy`, `scikit-build-core`, `cmake`, `pytest`, `cibuildwheel` (CI only).

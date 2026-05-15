@@ -466,12 +466,19 @@ Intentional differences vs. nifty:
   proposal-generator object is built lazily when `optimize` is called.
 - The driver warm-starts from the trivial singleton labeling by running the
   default greedy-additive sub-solver once before the proposal loop.
-- A best-of-three safety net (current, proposal, fused) keeps the running
-  energy monotonically non-increasing across iterations.
-- The current implementation is single-threaded and uses pairwise
-  (proposal, current) fuses. `number_of_threads` and
-  `number_of_parallel_proposals` are kept on the API for forward compatibility
-  but must be left at their defaults (`1` and `2` respectively).
+- A best-of safety net keeps the running energy monotonically non-increasing
+  across iterations (compared against current, proposals, fused, and the
+  stage-2 joint fuse).
+- Parallel proposal generation and a multi-proposal joint fuse are supported:
+  `number_of_threads=T` runs `number_of_parallel_proposals=P` proposal
+  generators in parallel within each iteration. By default `P=2` when `T=1`
+  and `P=T` when `T>1`; pass an explicit `number_of_parallel_proposals` to
+  override. Each parallel slot uses an independent proposal generator with
+  seed `proposal_generator.seed + slot_index` so the result is deterministic
+  for a given `(seed, T, P)`. When at least two parallel pairwise fuses fail
+  to improve on the current best, a joint multi-proposal fuse runs over the
+  surviving fused candidates (matches nifty's `ccFusionMoveBased` stage-2
+  behaviour).
 
 Notes:
 

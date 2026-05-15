@@ -5,6 +5,12 @@
 // and adds no overhead. Use it in development/profile-mode builds to find
 // hotspots; do not enable it in production wheels.
 
+// `NullProfiler` is always available; helper templates can request "no
+// profiling here" via the same type regardless of build mode.
+namespace bioimage_cpp::detail {
+struct NullProfiler {};
+} // namespace bioimage_cpp::detail
+
 #ifdef BIOIMAGE_PROFILE
 #include <chrono>
 #include <cstdio>
@@ -63,17 +69,30 @@ private:
     Profiler::Clock::time_point start_;
 };
 
+// Overload that accepts a NullProfiler and does nothing. Lets the same
+// macros expand cleanly when a profiled translation unit calls into a helper
+// that explicitly does not want to participate in profiling (e.g. work inside
+// parallel workers, where we measure wall-clock at the dispatch level).
+class ProfileTimerNull {
+public:
+    ProfileTimerNull(NullProfiler &, const char *) {}
+};
+
+inline ProfileTimer make_profile_timer(Profiler &profiler, const char *name) {
+    return ProfileTimer(profiler, name);
+}
+
+inline ProfileTimerNull make_profile_timer(NullProfiler &profiler, const char *name) {
+    return ProfileTimerNull(profiler, name);
+}
+
 } // namespace bioimage_cpp::detail
 
 #define BIOIMAGE_PROFILE_INIT(var) ::bioimage_cpp::detail::Profiler var;
-#define BIOIMAGE_PROFILE_SCOPE(var, name) ::bioimage_cpp::detail::ProfileTimer _bp_##__LINE__(var, name);
+#define BIOIMAGE_PROFILE_SCOPE(var, name) auto _bp_##__LINE__ = ::bioimage_cpp::detail::make_profile_timer(var, name);
 #define BIOIMAGE_PROFILE_REPORT(var) (var).report();
 
 #else
-
-namespace bioimage_cpp::detail {
-struct NullProfiler {};
-} // namespace bioimage_cpp::detail
 
 #define BIOIMAGE_PROFILE_INIT(var) ::bioimage_cpp::detail::NullProfiler var;
 #define BIOIMAGE_PROFILE_SCOPE(var, name) (void)var;

@@ -418,23 +418,27 @@ UInt64Array multicut_fusion_move(
     const Graph &graph,
     ConstDoubleArray costs,
     ConstUInt64Array initial_labels,
-    graph::ProposalGeneratorBase *proposal_generator,
+    std::vector<graph::ProposalGeneratorBase *> proposal_generators,
     const graph::multicut::SolverBase *sub_solver,
     const std::size_t number_of_iterations,
-    const std::size_t stop_if_no_improvement
+    const std::size_t stop_if_no_improvement,
+    const std::size_t number_of_threads,
+    const std::size_t number_of_parallel_proposals
 ) {
-    if (proposal_generator == nullptr) {
-        throw std::invalid_argument("proposal_generator must not be None");
+    if (proposal_generators.empty()) {
+        throw std::invalid_argument("proposal_generators must not be empty");
     }
     auto cost_vector = double_array_to_vector(costs, "edge_costs", graph.number_of_edges());
     auto label_vector =
         uint64_array_to_vector(initial_labels, "initial_labels", graph.number_of_nodes());
 
     graph::multicut::FusionMoveSolver solver(
-        *proposal_generator,
+        std::move(proposal_generators),
         sub_solver,
         number_of_iterations,
-        stop_if_no_improvement
+        stop_if_no_improvement,
+        number_of_threads,
+        number_of_parallel_proposals
     );
 
     std::vector<std::uint64_t> result;
@@ -842,10 +846,12 @@ void bind_graph(nb::module_ &m) {
         nb::arg("graph"),
         nb::arg("edge_costs"),
         nb::arg("initial_labels"),
-        nb::arg("proposal_generator"),
+        nb::arg("proposal_generators"),
         nb::arg("sub_solver").none(),
         nb::arg("number_of_iterations"),
-        nb::arg("stop_if_no_improvement")
+        nb::arg("stop_if_no_improvement"),
+        nb::arg("number_of_threads"),
+        nb::arg("number_of_parallel_proposals")
     );
 
     m.def(
