@@ -137,6 +137,57 @@ public:
         return 2 + 2 * number_of_edges();
     }
 
+    // Fast construction from a pre-sorted, deduplicated edge list.
+    //
+    // Precondition: `edges` is sorted ascending by `(u, v)` with `u < v` in
+    // every entry, and contains no duplicates. No node id may equal or exceed
+    // `number_of_nodes`. The call takes ownership of `edges` and uses it as
+    // the graph's edge storage, bypassing the per-edge hash dedup that
+    // `insert_edge` performs — useful when bulk-building a contracted graph
+    // whose unique edges are already known.
+    //
+    // When `populate_lookup` is false, the edge-lookup hash map is left empty
+    // and `find_edge`/`insert_edge` are not available on the returned graph.
+    // Used by the fusion-move contraction primitive, whose sub-solver only
+    // walks edges and adjacency lists.
+    static UndirectedGraph from_sorted_unique_edges(
+        const NodeId number_of_nodes,
+        std::vector<Edge> edges,
+        const bool populate_lookup = true
+    ) {
+        UndirectedGraph graph(number_of_nodes, static_cast<EdgeId>(edges.size()));
+
+        std::vector<std::size_t> degree(static_cast<std::size_t>(number_of_nodes), 0);
+        for (const auto &edge : edges) {
+            ++degree[static_cast<std::size_t>(edge.first)];
+            ++degree[static_cast<std::size_t>(edge.second)];
+        }
+        for (NodeId node = 0; node < number_of_nodes; ++node) {
+            graph.adjacency_[static_cast<std::size_t>(node)].reserve(
+                degree[static_cast<std::size_t>(node)]
+            );
+        }
+
+        if (populate_lookup) {
+            graph.edge_lookup_.reserve(edges.size());
+        }
+        for (std::size_t index = 0; index < edges.size(); ++index) {
+            const auto &edge = edges[index];
+            const auto edge_id = static_cast<EdgeId>(index);
+            graph.adjacency_[static_cast<std::size_t>(edge.first)].push_back(
+                Adjacency{edge.second, edge_id}
+            );
+            graph.adjacency_[static_cast<std::size_t>(edge.second)].push_back(
+                Adjacency{edge.first, edge_id}
+            );
+            if (populate_lookup) {
+                graph.edge_lookup_.emplace(edge, edge_id);
+            }
+        }
+        graph.edges_ = std::move(edges);
+        return graph;
+    }
+
     [[nodiscard]] std::pair<std::vector<EdgeId>, std::vector<EdgeId>>
     extract_subgraph_from_nodes(const std::vector<NodeId> &nodes) const {
         std::unordered_set<NodeId> node_set;

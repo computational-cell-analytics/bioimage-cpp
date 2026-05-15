@@ -20,6 +20,9 @@ namespace bioimage_cpp::graph {
 //
 // `n_seeds_fraction` is interpreted as a fraction of `number_of_nodes` when
 // <= 1.0 and as an absolute seed-pair count otherwise.
+//
+// Scratch buffers (noisy costs, seeds, watershed sort buffer) are held as
+// members and reused across `generate` calls.
 class WatershedProposalGenerator final : public ProposalGeneratorBase {
 public:
     WatershedProposalGenerator(
@@ -35,7 +38,9 @@ public:
           n_seeds_fraction_(n_seeds_fraction),
           seed_(seed),
           generator_(static_cast<std::mt19937::result_type>(seed)),
-          noise_(0.0, sigma) {
+          noise_(0.0, sigma),
+          noisy_costs_(edge_costs_.size()),
+          seeds_buffer_(static_cast<std::size_t>(graph.number_of_nodes())) {
         if (edge_costs_.size() != static_cast<std::size_t>(graph.number_of_edges())) {
             throw std::invalid_argument(
                 "edge_costs length must equal number_of_edges"
@@ -60,9 +65,8 @@ public:
             return;
         }
 
-        std::vector<float> noisy_costs(edge_costs_.size());
         for (std::size_t edge = 0; edge < edge_costs_.size(); ++edge) {
-            noisy_costs[edge] = static_cast<float>(edge_costs_[edge] + noise_(generator_));
+            noisy_costs_[edge] = static_cast<float>(edge_costs_[edge] + noise_(generator_));
         }
 
         std::size_t n_seed_pairs;
@@ -76,17 +80,22 @@ public:
         n_seed_pairs = std::max(std::size_t{1}, n_seed_pairs);
         n_seed_pairs = std::min(negative_edges_.size(), n_seed_pairs);
 
-        std::vector<std::uint64_t> seeds(static_cast<std::size_t>(number_of_nodes), 0);
+        std::fill(seeds_buffer_.begin(), seeds_buffer_.end(), std::uint64_t{0});
         std::uniform_int_distribution<std::size_t> edge_dist(0, negative_edges_.size() - 1);
         std::uint64_t next_label = 1;
         for (std::size_t i = 0; i < n_seed_pairs; ++i) {
             const auto edge = negative_edges_[edge_dist(generator_)];
             const auto uv = graph_.uv(edge);
-            seeds[static_cast<std::size_t>(uv.first)] = next_label++;
-            seeds[static_cast<std::size_t>(uv.second)] = next_label++;
+            seeds_buffer_[static_cast<std::size_t>(uv.first)] = next_label++;
+            seeds_buffer_[static_cast<std::size_t>(uv.second)] = next_label++;
         }
 
-        proposal = edge_weighted_watershed<float, std::uint64_t>(graph_, noisy_costs, seeds);
+        // Copy seeds into the output buffer; the kernel propagates labels in
+        // place on `proposal`.
+        proposal.assign(seeds_buffer_.begin(), seeds_buffer_.end());
+        edge_weighted_watershed_into<float, std::uint64_t>(
+            graph_, noisy_costs_, proposal, watershed_scratch_
+        );
     }
 
     void reset() override {
@@ -102,6 +111,9 @@ private:
     std::vector<std::uint64_t> negative_edges_;
     std::mt19937 generator_;
     std::normal_distribution<double> noise_;
+    std::vector<float> noisy_costs_;
+    std::vector<std::uint64_t> seeds_buffer_;
+    detail::EdgeWeightedWatershedScratch<float> watershed_scratch_;
 };
 
 } // namespace bioimage_cpp::graph

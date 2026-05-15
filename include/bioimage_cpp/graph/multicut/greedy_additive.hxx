@@ -9,6 +9,22 @@
 
 namespace bioimage_cpp::graph::multicut {
 
+// Reusable scratch state for `greedy_additive`. Construct once and call
+// `greedy_additive(..., workspace)` repeatedly to avoid per-call allocation
+// of the DynamicGraph, UnionFind, and EdgeHeap. Capacities only grow; the
+// internal vectors are reset (not freed) between calls.
+struct GreedyAdditiveWorkspace {
+    detail::DynamicGraph dynamic_graph;
+    bioimage_cpp::detail::UnionFind union_find{0};
+    detail::EdgeHeap heap;
+
+    void reset(const UndirectedGraph &graph) {
+        dynamic_graph.reset(graph);
+        union_find.reset(static_cast<std::size_t>(graph.number_of_nodes()));
+        heap.reset_capacity(static_cast<std::size_t>(graph.number_of_edges()));
+    }
+};
+
 inline std::vector<std::uint64_t> greedy_additive(
     const UndirectedGraph &graph,
     const std::vector<double> &costs,
@@ -16,12 +32,14 @@ inline std::vector<std::uint64_t> greedy_additive(
     const double node_num_stop,
     const bool add_noise,
     const int seed,
-    const double sigma
+    const double sigma,
+    GreedyAdditiveWorkspace &workspace
 ) {
     validate_costs(graph, costs);
-    detail::DynamicGraph dynamic_graph(graph);
-    bioimage_cpp::detail::UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
-    detail::EdgeHeap heap;
+    workspace.reset(graph);
+    auto &dynamic_graph = workspace.dynamic_graph;
+    auto &sets = workspace.union_find;
+    auto &heap = workspace.heap;
     detail::initialize_dynamic_graph(graph, costs, dynamic_graph, heap, false, add_noise, seed, sigma);
 
     while (!heap.empty() && dynamic_graph.alive_count > 1) {
@@ -37,6 +55,21 @@ inline std::vector<std::uint64_t> greedy_additive(
         detail::merge_dynamic_nodes(dynamic_graph, sets, heap, edge.u, edge.v, false);
     }
     return detail::labels_from_sets(sets, graph);
+}
+
+inline std::vector<std::uint64_t> greedy_additive(
+    const UndirectedGraph &graph,
+    const std::vector<double> &costs,
+    const double weight_stop,
+    const double node_num_stop,
+    const bool add_noise,
+    const int seed,
+    const double sigma
+) {
+    GreedyAdditiveWorkspace workspace;
+    return greedy_additive(
+        graph, costs, weight_stop, node_num_stop, add_noise, seed, sigma, workspace
+    );
 }
 
 class GreedyAdditiveSolver final : public SolverBase {

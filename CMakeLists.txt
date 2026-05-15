@@ -27,4 +27,9 @@ target_compile_options(_core PRIVATE
     $<$<NOT:$<CONFIG:Debug>>:-O3>
 )
 
+option(BIOIMAGE_PROFILE "Enable per-phase profiling instrumentation (development only)" OFF)
+if(BIOIMAGE_PROFILE)
+    target_compile_definitions(_core PRIVATE BIOIMAGE_PROFILE)
+endif()
+
 install(TARGETS _core LIBRARY DESTINATION bioimage_cpp)

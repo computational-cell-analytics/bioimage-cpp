@@ -120,6 +120,25 @@ Tests run against the installed Python package. For each public function, cover:
 
 Correct first, fast second. Benchmark before adding complexity. Prefer algorithmic improvements over build-level tweaks. Release the GIL for expensive kernels. Add threading only after the single-threaded implementation is stable; it must be portable and user-controllable.
 
+### Profiling
+
+Measure before optimizing. The codebase carries a lightweight per-phase profiling utility for exactly this:
+
+- Header: `include/bioimage_cpp/detail/profile.hxx`. Macros: `BIOIMAGE_PROFILE_INIT(name)`, `BIOIMAGE_PROFILE_SCOPE(name, "label")`, `BIOIMAGE_PROFILE_REPORT(name)`.
+- Gated behind the `BIOIMAGE_PROFILE` compile-time flag. Outside of profile builds the macros expand to no-ops and a `NullProfiler` stub so the same code compiles unchanged.
+- Enable via CMake option: `pip install -e . --no-build-isolation -C cmake.define.BIOIMAGE_PROFILE=ON`. Rebuild without the flag for production work.
+- Reports per-phase wall-clock totals to stderr at the end of the instrumented scope (e.g., at the end of `optimize`). Same labels accumulate across multiple invocations of the scope (e.g., per-iteration phases).
+
+Workflow when adding or chasing a performance issue:
+
+1. **Compare standalone primitives first** (`development/.../check_*.py` scripts vs. nifty). If a primitive is already fast, the gap is elsewhere — don't optimize it speculatively.
+2. **Instrument the suspect function** by wrapping each logical phase in a `BIOIMAGE_PROFILE_SCOPE`. Pick labels that map to one operation each ("agreement_contract", "sub_solve", "energy_eval", ...), not full call paths.
+3. **Build with `BIOIMAGE_PROFILE=ON` and run a realistic problem** — typically the external multicut instance loaded by the comparison scripts. Run with `--repeats 1` so the report isn't drowned out.
+4. **Optimize the largest phase** (50% phase beats two 10% phases combined). Re-measure after each change; verify no other phase regressed.
+5. **Strip the instrumentation when done** only if it adds clutter; otherwise leave it in place — it's free when the flag is off.
+
+Don't add `std::chrono` snippets ad hoc; use the existing macros so future profiling sessions land in a consistent format.
+
 ## Documentation
 
 `README.md` covers: what `bioimage-cpp` is and isn't, install/build, minimal examples, design philosophy. Public functions need concise docstrings documenting input shapes, supported dtypes, output shapes/dtypes, copy behavior, background-label behavior (if relevant), and axis/coordinate conventions.
