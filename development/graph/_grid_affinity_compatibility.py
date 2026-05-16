@@ -104,6 +104,12 @@ def bioimage_cpp_local(affinities: np.ndarray, offsets: list[tuple[int, ...]]):
     import bioimage_cpp as bic
 
     graph = bic.graph.grid_graph(affinities.shape[1:])
+    return bioimage_cpp_local_on_graph(graph, affinities, offsets)
+
+
+def bioimage_cpp_local_on_graph(graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]):
+    import bioimage_cpp as bic
+
     weights, valid_edges = bic.graph.grid_affinity_features(graph, affinities, offsets)
     if not np.all(valid_edges):
         raise AssertionError("local offsets did not cover all grid edges")
@@ -114,6 +120,12 @@ def bioimage_cpp_lifted(affinities: np.ndarray, offsets: list[tuple[int, ...]]):
     import bioimage_cpp as bic
 
     graph = bic.graph.grid_graph(affinities.shape[1:])
+    return bioimage_cpp_lifted_on_graph(graph, affinities, offsets)
+
+
+def bioimage_cpp_lifted_on_graph(graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]):
+    import bioimage_cpp as bic
+
     local_weights, valid_edges, lifted_uvs, lifted_weights, _ = (
         bic.graph.grid_affinity_features_with_lifted(graph, affinities, offsets)
     )
@@ -126,6 +138,10 @@ def nifty_local(affinities: np.ndarray, offsets: list[tuple[int, ...]]):
     import nifty.graph as ng
 
     graph = ng.undirectedGridGraph(list(affinities.shape[1:]))
+    return nifty_local_on_graph(graph, affinities, offsets)
+
+
+def nifty_local_on_graph(graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]):
     n_edges, uvs, weights = graph.affinitiesToEdgeMapWithOffsets(
         affinities,
         [list(offset) for offset in offsets],
@@ -137,6 +153,10 @@ def affogato_edges(affinities: np.ndarray, offsets: list[tuple[int, ...]]):
     from affogato.segmentation import MWSGridGraph
 
     graph = MWSGridGraph(list(affinities.shape[1:]))
+    return affogato_edges_on_graph(graph, affinities, offsets)
+
+
+def affogato_edges_on_graph(graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]):
     uvs, weights = graph.compute_nh_and_weights(
         affinities,
         [list(offset) for offset in offsets],

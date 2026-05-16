@@ -25,7 +25,8 @@ public:
         : UndirectedGraph(checked_node_count(shape), checked_edge_count(shape)),
           shape_(shape),
           strides_(compute_strides(shape)),
-          edge_offsets_(compute_edge_offsets(shape)) {
+          edge_offsets_(compute_edge_offsets(shape)),
+          edge_strides_(compute_edge_strides(shape)) {
         build_edges();
     }
 
@@ -101,7 +102,6 @@ public:
             throw std::out_of_range("axis must be < ndim");
         }
         const auto shape = edge_shape(axis);
-        const auto strides = compute_strides(shape);
         std::uint64_t local_edge = 0;
         for (std::size_t coord_axis = 0; coord_axis < D; ++coord_axis) {
             if (pivot_coordinate[coord_axis] >= shape[coord_axis]) {
@@ -110,9 +110,44 @@ public:
                     "] is outside the edge grid"
                 );
             }
-            local_edge += pivot_coordinate[coord_axis] * strides[coord_axis];
+            local_edge += pivot_coordinate[coord_axis] * edge_strides_[axis][coord_axis];
         }
         return edge_offsets_[axis] + local_edge;
+    }
+
+    EdgeId insert_edge(const NodeId u, const NodeId v) override {
+        const auto existing = find_edge(u, v);
+        if (existing >= 0) {
+            return static_cast<EdgeId>(existing);
+        }
+        return UndirectedGraph::insert_edge(u, v);
+    }
+
+    [[nodiscard]] std::int64_t find_edge(const NodeId u, const NodeId v) const override {
+        validate_node(u);
+        validate_node(v);
+        if (u == v) {
+            return -1;
+        }
+        const auto lower = std::min(u, v);
+        const auto upper = std::max(u, v);
+        const auto diff = upper - lower;
+        for (std::size_t axis = 0; axis < D; ++axis) {
+            if (diff != strides_[axis]) {
+                continue;
+            }
+            const auto axis_coordinate = (lower / strides_[axis]) % shape_[axis];
+            if (axis_coordinate + 1 >= shape_[axis]) {
+                return -1;
+            }
+            std::uint64_t local_edge = 0;
+            for (std::size_t coord_axis = 0; coord_axis < D; ++coord_axis) {
+                const auto coordinate = (lower / strides_[coord_axis]) % shape_[coord_axis];
+                local_edge += coordinate * edge_strides_[axis][coord_axis];
+            }
+            return static_cast<std::int64_t>(edge_offsets_[axis] + local_edge);
+        }
+        return UndirectedGraph::find_edge(u, v);
     }
 
     [[nodiscard]] std::pair<Coordinate, std::size_t>
@@ -218,6 +253,16 @@ private:
         return offsets;
     }
 
+    static std::array<Coordinate, D> compute_edge_strides(const Coordinate &shape) {
+        std::array<Coordinate, D> strides{};
+        for (std::size_t axis = 0; axis < D; ++axis) {
+            auto edge_shape = shape;
+            --edge_shape[axis];
+            strides[axis] = compute_strides(edge_shape);
+        }
+        return strides;
+    }
+
     [[nodiscard]] Coordinate edge_shape(const std::size_t axis) const {
         auto result = shape_;
         --result[axis];
@@ -229,11 +274,10 @@ private:
         std::uint64_t local_edge
     ) const {
         const auto shape = edge_shape(axis);
-        const auto strides = compute_strides(shape);
         Coordinate coordinate{};
         for (std::size_t coord_axis = 0; coord_axis < D; ++coord_axis) {
-            coordinate[coord_axis] = local_edge / strides[coord_axis];
-            local_edge -= coordinate[coord_axis] * strides[coord_axis];
+            coordinate[coord_axis] = local_edge / edge_strides_[axis][coord_axis];
+            local_edge -= coordinate[coord_axis] * edge_strides_[axis][coord_axis];
         }
         return coordinate;
     }
@@ -244,7 +288,7 @@ private:
             for (std::uint64_t local_edge = 0; local_edge < axis_edges; ++local_edge) {
                 const auto coordinate = edge_pivot_coordinates(axis, local_edge);
                 const auto u = node_id(coordinate);
-                insert_new_edge(u, u + strides_[axis]);
+                insert_new_edge_without_lookup(u, u + strides_[axis]);
             }
         }
     }
@@ -252,6 +296,7 @@ private:
     Coordinate shape_{};
     Coordinate strides_{};
     std::array<std::uint64_t, D + 1> edge_offsets_{};
+    std::array<Coordinate, D> edge_strides_{};
 };
 
 } // namespace bioimage_cpp::graph

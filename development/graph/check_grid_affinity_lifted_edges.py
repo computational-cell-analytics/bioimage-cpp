@@ -5,7 +5,9 @@ import argparse
 from _grid_affinity_compatibility import (
     add_common_arguments,
     affogato_edges,
+    affogato_edges_on_graph,
     bioimage_cpp_lifted,
+    bioimage_cpp_lifted_on_graph,
     compare_edge_sets,
     load_problem,
     prepare_2d_problem,
@@ -15,6 +17,8 @@ from _grid_affinity_compatibility import (
     split_affogato_edges,
     time_call,
 )
+
+import numpy as np
 
 
 def run_check(args: argparse.Namespace) -> None:
@@ -34,6 +38,21 @@ def run_check(args: argparse.Namespace) -> None:
     )
     affogato_timings, (affogato_uvs, affogato_weights) = time_call(
         lambda: affogato_edges(affinities, offsets), args.repeats
+    )
+
+    import bioimage_cpp as bic
+    from affogato.segmentation import MWSGridGraph
+
+    bic_graph = bic.graph.grid_graph(affinities.shape[1:])
+    bic_affinities = np.ascontiguousarray(affinities, dtype=np.float64)
+    affogato_graph = MWSGridGraph(list(affinities.shape[1:]))
+    bic_feature_timings, _ = time_call(
+        lambda: bioimage_cpp_lifted_on_graph(bic_graph, bic_affinities, offsets),
+        args.repeats,
+    )
+    affogato_feature_timings, _ = time_call(
+        lambda: affogato_edges_on_graph(affogato_graph, affinities, offsets),
+        args.repeats,
     )
     affogato_local_uvs, affogato_local_weights, affogato_lifted_uvs, affogato_lifted_weights = (
         split_affogato_edges(affogato_uvs, affogato_weights, graph)
@@ -64,7 +83,21 @@ def run_check(args: argparse.Namespace) -> None:
         f"lifted edges: {lifted_summary['number_of_edges']}, "
         f"max abs weight diff: {lifted_summary['max_abs_weight_diff']:.6g}"
     )
-    print_timing("local+lifted edges", "bioimage-cpp", bic_timings, "affogato", affogato_timings)
+    print_timing(
+        "local+lifted edges total",
+        "bioimage-cpp",
+        bic_timings,
+        "affogato",
+        affogato_timings,
+    )
+    print_timing(
+        "local+lifted edges prebuilt",
+        "bioimage-cpp",
+        bic_feature_timings,
+        "affogato",
+        affogato_feature_timings,
+    )
+    print("prebuilt bioimage-cpp timing excludes float32 -> float64 conversion")
 
 
 def main() -> None:

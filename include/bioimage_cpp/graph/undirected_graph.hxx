@@ -33,6 +33,7 @@ public:
         : number_of_nodes_(number_of_nodes),
           adjacency_(static_cast<std::size_t>(number_of_nodes)) {
         edges_.reserve(static_cast<std::size_t>(reserve_number_of_edges));
+        edge_lookup_.reserve(static_cast<std::size_t>(reserve_number_of_edges));
     }
 
     virtual ~UndirectedGraph() = default;
@@ -47,6 +48,7 @@ public:
         adjacency_.clear();
         adjacency_.resize(static_cast<std::size_t>(number_of_nodes));
         edges_.reserve(static_cast<std::size_t>(reserve_number_of_edges));
+        edge_lookup_.reserve(static_cast<std::size_t>(reserve_number_of_edges));
     }
 
     [[nodiscard]] NodeId number_of_nodes() const {
@@ -103,7 +105,7 @@ public:
         return adjacency_[static_cast<std::size_t>(node)];
     }
 
-    EdgeId insert_edge(const NodeId u, const NodeId v) {
+    virtual EdgeId insert_edge(const NodeId u, const NodeId v) {
         validate_node(u);
         validate_node(v);
         if (u == v) {
@@ -118,7 +120,7 @@ public:
         return insert_new_edge(key.first, key.second);
     }
 
-    [[nodiscard]] std::int64_t find_edge(const NodeId u, const NodeId v) const {
+    [[nodiscard]] virtual std::int64_t find_edge(const NodeId u, const NodeId v) const {
         validate_node(u);
         validate_node(v);
         if (u == v) {
@@ -220,6 +222,14 @@ protected:
         const auto edge = static_cast<EdgeId>(edges_.size());
         edges_.emplace_back(u, v);
         edge_lookup_.emplace(Edge{u, v}, edge);
+        adjacency_[static_cast<std::size_t>(u)].push_back(Adjacency{v, edge});
+        adjacency_[static_cast<std::size_t>(v)].push_back(Adjacency{u, edge});
+        return edge;
+    }
+
+    EdgeId insert_new_edge_without_lookup(const NodeId u, const NodeId v) {
+        const auto edge = static_cast<EdgeId>(edges_.size());
+        edges_.emplace_back(u, v);
         adjacency_[static_cast<std::size_t>(u)].push_back(Adjacency{v, edge});
         adjacency_[static_cast<std::size_t>(v)].push_back(Adjacency{u, edge});
         return edge;
