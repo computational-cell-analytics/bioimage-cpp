@@ -7,8 +7,8 @@ Downloads go through the shared pooch registry in :mod:`bioimage_cpp._data`
   :func:`multicut_problem_path` for the 6 multicut problems (3 samples × 2
   sizes from ``elf.segmentation.utils.load_multicut_problem``).
 - :func:`load_lifted_multicut_problem` /
-  :func:`lifted_multicut_problem_path` for the 2D and 3D lifted multicut
-  problems built by ``examples/segmentation/serialize_lifted_problem.py``.
+  :func:`lifted_multicut_problem_path` for the RAG-based and grid-graph
+  lifted multicut problems.
 
 A legacy compatibility layer (``load_external_multicut_problem`` and friends)
 delegates to sample A, size small, which is the problem the regression test
@@ -29,7 +29,7 @@ from bioimage_cpp._data import cache_dir, fetch
 
 VALID_SAMPLES = ("A", "B", "C")
 VALID_SIZES = ("small", "medium")
-VALID_LIFTED_SIZES = ("2d", "3d")
+VALID_LIFTED_SIZES = ("2d", "3d", "grid")
 
 
 # Legacy constants. The URL points at the canonical sample-A-small download
@@ -132,8 +132,8 @@ def load_lifted_multicut_problem(
     ----------
     size:
         ``"2d"`` for the small ISBI 2D slice (~756 nodes, fast, used by the
-        regression test) or ``"3d"`` for the full ISBI volume (~18k nodes,
-        used by the development comparison scripts).
+        regression test), ``"3d"`` for the full RAG-based ISBI volume
+        (~18k nodes), or ``"grid"`` for the grid-graph lifted problem.
     timeout:
         Optional HTTP timeout in seconds for the download.
     """

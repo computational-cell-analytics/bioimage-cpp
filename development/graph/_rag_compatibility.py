@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 from statistics import median
 from time import perf_counter
 
@@ -10,15 +9,10 @@ from skimage.feature import peak_local_max
 from skimage.measure import label as label_components
 from skimage.segmentation import watershed
 
+def load_problem():
+    from bioimage_cpp._data import load_isbi_affinities
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DATA_PREFIX = PROJECT_ROOT / "examples" / "segmentation" / "isbi-data-"
-
-
-def load_problem(data_prefix: Path | str = DEFAULT_DATA_PREFIX):
-    from elf.segmentation.utils import load_mutex_watershed_problem
-
-    affinities, offsets = load_mutex_watershed_problem(prefix=str(data_prefix))
+    affinities, offsets = load_isbi_affinities()
     return np.ascontiguousarray(affinities), [tuple(offset) for offset in offsets]
 
 
@@ -91,6 +85,10 @@ def make_watershed_labels(
 
 
 def time_call(function, repeats: int):
+    # One untimed warm-up call before the measured loop so the first sample
+    # doesn't carry nanobind tuple-shape caching, numpy ufunc init, code-page
+    # faults, etc. Mirrors the grid-affinity helper for consistency.
+    function()
     timings = []
     result = None
     for _ in range(repeats):
@@ -142,7 +140,9 @@ def compare_boundary_features(
     import bioimage_cpp as bic
     import nifty.graph.rag as nrag
 
-    block_shape = list(labels.shape)
+    # Don't force blockShape on the nifty side — its default block layout is
+    # what its parallelism is tuned for, and forcing a single block (== labels
+    # shape) starves nifty's worker pool.
     bic_timings, bic_features = time_call(
         lambda: bic.graph.edge_map_features(
             bic_rag, labels, boundary_map, number_of_threads=threads
@@ -153,7 +153,6 @@ def compare_boundary_features(
         lambda: nrag.accumulateEdgeMeanAndLength(
             nifty_rag,
             np.ascontiguousarray(boundary_map, dtype=np.float32),
-            blockShape=block_shape,
             numberOfThreads=threads,
         ),
         repeats,
@@ -199,9 +198,12 @@ def compare_affinity_features(
         ),
         repeats,
     )
-    # The installed Nifty wrapper can crash or fail when an explicit
-    # numberOfThreads is passed here. The default path is still the reference
-    # implementation and keeps this compatibility script robust.
+    # nifty's accumulateAffinityStandartFeatures crashes inside vigra's
+    # UserRangeHistogram when numberOfThreads=1 (the accumulators never get
+    # setMinMax). For threads >= 2 we can pass the value through; for the
+    # single-thread case we fall back to nifty's default (-1, all cores) and
+    # surface the unfairness in the printed report.
+    nifty_threads_effective = threads if threads != 1 else -1
     nifty_timings, nifty_features_full = time_call(
         lambda: nrag.accumulateAffinityStandartFeatures(
             nifty_rag,
@@ -209,6 +211,7 @@ def compare_affinity_features(
             offsets_for_nifty,
             min_val,
             max_val,
+            numberOfThreads=nifty_threads_effective,
         ),
         repeats,
     )
@@ -219,6 +222,8 @@ def compare_affinity_features(
     np.testing.assert_allclose(aligned_bic, nifty_features, rtol=1.0e-5, atol=1.0e-6)
     return bic_timings, nifty_timings, {
         "max_abs_diff": float(np.max(np.abs(aligned_bic - nifty_features))),
+        "nifty_threads_effective": nifty_threads_effective,
+        "nifty_threads_requested": threads,
     }
 
 
@@ -227,7 +232,6 @@ def run_compatibility_check(
     ndim: int,
     repeats: int,
     threads: int,
-    data_prefix: Path,
     z: int,
     yx_shape: tuple[int, int],
     zyx_shape: tuple[int, int, int],
@@ -238,7 +242,7 @@ def run_compatibility_check(
     import bioimage_cpp as bic
     import nifty.graph.rag as nrag
 
-    affinities, offsets = load_problem(data_prefix)
+    affinities, offsets = load_problem()
     if ndim == 2:
         direct_affinities, direct_offsets = prepare_2d_problem(affinities, offsets, z, yx_shape)
     elif ndim == 3:
@@ -297,7 +301,15 @@ def run_compatibility_check(
     print(f"boundary-map size convention: {boundary_summary['size_convention']}")
     _print_timing("affinity features", affinity_bic_timings, affinity_nifty_timings)
     print(f"affinity feature max abs diff: {affinity_summary['max_abs_diff']:.6g}")
-    print("nifty affinity timing uses the wrapper default thread handling")
+    requested = affinity_summary["nifty_threads_requested"]
+    effective = affinity_summary["nifty_threads_effective"]
+    if requested != effective:
+        print(
+            f"WARNING: affinity features — requested {requested} thread(s) but "
+            f"nifty was called with numberOfThreads={effective} "
+            "(its single-thread path crashes inside vigra's UserRangeHistogram). "
+            f"bioimage-cpp used {requested} thread(s); the timing comparison is NOT apples-to-apples."
+        )
 
 
 def _print_timing(name: str, bic_timings: list[float], nifty_timings: list[float]):
@@ -310,8 +322,9 @@ def _print_timing(name: str, bic_timings: list[float], nifty_timings: list[float
 
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--data-prefix", type=Path, default=DEFAULT_DATA_PREFIX)
-    parser.add_argument("--repeats", type=int, default=3)
+    # 5 matches the grid-affinity helper; median of 3 is noisy because one
+    # GC stall in the middle sample becomes the median.
+    parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--watershed-min-distance", type=int, default=5)
     parser.add_argument("--watershed-grid-spacing", type=int, default=12)

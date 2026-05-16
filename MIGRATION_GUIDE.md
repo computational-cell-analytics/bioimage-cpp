@@ -107,6 +107,13 @@ Important differences:
 - Bulk methods accept array-like inputs and return NumPy arrays.
 - Python-style names are preferred. A few nifty-style aliases are still present
   on `UndirectedGraph` for convenience, but new code should use snake_case.
+- `graph.clone()` returns an independent deep copy. The C++ class is
+  move-only (it owns a CSR adjacency buffer), so prefer this over
+  reassignment-by-value.
+- `graph.freeze()` eagerly builds the internal adjacency. Call it after a
+  batch of `insert_edge` calls if you intend to hand the graph to multiple
+  reader threads, or if you want to ensure subsequent `node_adjacency`
+  reads carry no first-call rebuild cost.
 
 Common method/property mapping:
 
@@ -125,6 +132,49 @@ Common method/property mapping:
 | `serializationSize` | `serialization_size` |
 | `extractSubgraphFromNodes` | `extract_subgraph_from_nodes` |
 | `edgesFromNodeList` | `edges_from_node_list` |
+
+## Grid Graphs
+
+Nifty-style regular grid graphs map to explicit 2D or 3D grid graph classes:
+
+```python
+graph = bic.graph.GridGraph2D((height, width))
+graph = bic.graph.GridGraph3D((depth, height, width))
+graph = bic.graph.grid_graph((height, width))
+```
+
+Grid graph nodes use NumPy C-order ids. For a 2D shape `(y, x)`, node
+`(row, col)` has id `row * x + col`; for 3D `(z, y, x)`, ids follow the same
+row-major convention. `GridGraph2D` and `GridGraph3D` inherit the regular
+`UndirectedGraph` API, so solvers, connected components, breadth-first search,
+and `uv_ids()` work unchanged.
+
+Important differences:
+
+- Only nearest-neighbor 2D and 3D grids are exposed for now.
+- Edge ids are deterministic axis blocks: axis 0 edges first, then axis 1, and
+  axis 2 for 3D.
+- Scalar boundary maps can be converted to edge weights with
+  `grid_boundary_features(graph, boundary_map)`.
+- Local affinity channels can be converted to edge-aligned weights with
+  `grid_affinity_features(graph, affinities, offsets)`.
+- Mixed local and long-range affinity offsets can be converted with
+  `grid_affinity_features_with_lifted(...)`, which returns local graph weights
+  plus explicit long-range `uv_ids` and weights for lifted multicut or mutex
+  watershed style workflows.
+- The three grid feature functions preserve `float32` and `float64` input
+  dtype end-to-end (no internal copy to `float64`); other dtypes are
+  promoted to `float64`. Output weight arrays match the input dtype.
+- Grid graph construction does not materialize the per-node adjacency
+  list. If you only need `uv_ids()` and edge features (the common case)
+  you pay nothing for adjacency. The first call to `node_adjacency`,
+  `connected_components`, `breadth_first_search`, or
+  `extract_subgraph_from_nodes` on a grid graph triggers a one-shot
+  rebuild; call `graph.freeze()` on the construction thread before
+  fan-out if you intend to use those from multiple threads.
+- Affogato-style masks and seed edges are not part of the public grid feature
+  API yet; the implementation is structured so these filters/extra edges can
+  be added later.
 
 ## Region Adjacency Graphs
 
@@ -677,8 +727,8 @@ shims default to sample A, size small and continue to honor the
 `BIOIMAGE_CPP_EXTERNAL_MULTICUT_PATH` and
 `BIOIMAGE_CPP_EXTERNAL_MULTICUT_CACHE` environment variables.
 
-Lifted multicut problems (2D ISBI slice and full 3D volume, built by
-`examples/segmentation/serialize_lifted_problem.py`):
+Lifted multicut problems (2D ISBI slice, RAG-based 3D volume, and grid-graph
+volume):
 
 ```python
 problem = bic.graph.load_lifted_multicut_problem(size="2d")
@@ -691,6 +741,8 @@ objective = bic.graph.LiftedMulticutObjective(
     lifted_costs=problem.lifted_costs,
 )
 ```
+
+Valid sizes are `"2d"`, `"3d"`, and `"grid"`.
 
 Notes:
 
@@ -790,6 +842,13 @@ Notes:
 
 ## Mutex Watershed
 
+`bioimage-cpp` ships two mutex-watershed entry points, mirroring the two
+affogato APIs: one that consumes a dense affinity grid, and one that
+consumes an arbitrary graph with a separate list of mutex (long-range
+repulsive) edges.
+
+### Grid-based mutex watershed (affinity volumes)
+
 Affogato:
 
 ```python
@@ -831,6 +890,73 @@ Important migration notes:
 - A boolean `mask` may be passed. Edges touching `False` pixels are ignored and
   masked pixels are set to label `0`.
 - Output labels are `uint64`, consecutive, and 1-based for foreground pixels.
+
+### Mutex watershed on a generic graph
+
+For mutex watershed on an arbitrary undirected graph (region adjacency graph
+or otherwise) with a separate list of long-range repulsive edges,
+`bioimage-cpp` provides `bic.graph.mutex_watershed_clustering`. This is a
+port of affogato's `compute_mws_clustering` using the same input format as
+`LiftedMulticutObjective`: a base graph carries the attractive edges, and
+long-range (called *mutex* here) edges are supplied alongside as a `(M, 2)`
+node-pair array. The same `(graph, edge_costs, lifted_uvs, lifted_costs)`
+tuple used to build a lifted multicut problem can be passed to the mutex
+watershed clustering without any reshaping.
+
+Affogato:
+
+```python
+from affogato.segmentation import compute_mws_clustering
+
+labels = compute_mws_clustering(
+    number_of_nodes,
+    uvs.astype(np.uint64),
+    mutex_uvs.astype(np.uint64),
+    weights.astype(np.float32),
+    mutex_weights.astype(np.float32),
+)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+graph = bic.graph.UndirectedGraph.from_edges(number_of_nodes, uvs)
+labels = bic.graph.mutex_watershed_clustering(
+    graph,
+    weights,
+    mutex_uvs,
+    mutex_weights,
+)
+```
+
+Notes:
+
+- The attractive edges are the edges of the base graph; the count and the
+  ordering of `weights` must match `graph.number_of_edges`. Mutex edges
+  are supplied separately as `(M, 2)` `uint64` pairs with matching
+  `mutex_weights`.
+- Both `weights` and `mutex_weights` accept `float32` and `float64`. The
+  wrapper dispatches to a templated C++ instantiation per dtype; other
+  floating dtypes are cast to `float32`. If the two arrays' dtypes do not
+  match, both are promoted to `float64` rather than silently downcast.
+- Higher weights are processed first (in descending order) — the same
+  convention affogato uses.
+- The implementation reuses the union-find and per-root mutex-set helpers
+  shared with the grid-based mutex watershed (`detail/mutex_storage.hxx`),
+  so behavior is consistent between the two entry points.
+- Output labels are dense `uint64` ids in `0 .. number_of_clusters - 1`,
+  assigned in first-occurrence order (matches the convention of the graph
+  multicut solvers, *not* the 1-based foreground labels produced by the
+  grid-based variant).
+- The function accepts both `UndirectedGraph` and `RegionAdjacencyGraph`.
+- Tie-breaking is deterministic: when weights are equal, attractive edges
+  are processed before mutex edges, then by index. Affogato's reference
+  uses a non-stable `std::sort`, so on inputs with many ties the two
+  implementations may produce slightly different (but very similar)
+  partitions. See `development/graph/check_mutex_clustering.py` for a
+  comparison harness.
 
 ## Dictionary-Based Relabeling
 

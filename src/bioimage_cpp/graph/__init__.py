@@ -139,6 +139,77 @@ class UndirectedGraph(_core.UndirectedGraph):
         return cls.from_edges(number_of_nodes, uvs)
 
 
+def _as_shape(shape, ndim: int, name: str = "shape") -> list[int]:
+    array = np.asarray(shape)
+    if array.ndim != 1 or array.shape[0] != ndim:
+        raise ValueError(f"{name} must be a 1D sequence of length {ndim}")
+    if not np.issubdtype(array.dtype, np.integer):
+        raise TypeError(f"{name} must contain integers")
+    if np.any(array <= 0):
+        raise ValueError(f"{name} dimensions must be greater than zero")
+    return [int(axis_size) for axis_size in array]
+
+
+class GridGraph2D(_core.GridGraph2D):
+    """Regular 2D nearest-neighbor grid graph.
+
+    Nodes use C-order ids for ``shape=(y, x)``. Edge ids are deterministic:
+    all y-axis edges first, then all x-axis edges.
+    """
+
+    def __init__(self, shape):
+        super().__init__(_as_shape(shape, 2))
+
+    def node_id(self, coordinate):
+        return super().node_id(_as_coordinate_array(coordinate, 2, "coordinate"))
+
+    def nodeId(self, coordinate):
+        return self.node_id(coordinate)
+
+    def offset_target(self, node: int, offset):
+        return super().offset_target(int(node), _as_offset_array(offset, 2, "offset"))
+
+    def offsetTarget(self, node: int, offset):
+        return self.offset_target(node, offset)
+
+
+class GridGraph3D(_core.GridGraph3D):
+    """Regular 3D nearest-neighbor grid graph.
+
+    Nodes use C-order ids for ``shape=(z, y, x)``. Edge ids are deterministic:
+    all z-axis edges first, then y-axis edges, then x-axis edges.
+    """
+
+    def __init__(self, shape):
+        super().__init__(_as_shape(shape, 3))
+
+    def node_id(self, coordinate):
+        return super().node_id(_as_coordinate_array(coordinate, 3, "coordinate"))
+
+    def nodeId(self, coordinate):
+        return self.node_id(coordinate)
+
+    def offset_target(self, node: int, offset):
+        return super().offset_target(int(node), _as_offset_array(offset, 3, "offset"))
+
+    def offsetTarget(self, node: int, offset):
+        return self.offset_target(node, offset)
+
+
+def _as_coordinate_array(coordinate, ndim: int, name: str) -> np.ndarray:
+    array = np.asarray(coordinate, dtype=np.uint64)
+    if array.ndim != 1 or array.shape[0] != ndim:
+        raise ValueError(f"{name} must be a 1D sequence of length {ndim}")
+    return np.ascontiguousarray(array)
+
+
+def _as_offset_array(offset, ndim: int, name: str) -> np.ndarray:
+    array = np.asarray(offset, dtype=np.int64)
+    if array.ndim != 1 or array.shape[0] != ndim:
+        raise ValueError(f"{name} must be a 1D sequence of length {ndim}")
+    return np.ascontiguousarray(array)
+
+
 def _as_uv_array(uvs, name: str) -> np.ndarray:
     array = np.asarray(uvs, dtype=np.uint64)
     if array.ndim != 2 or array.shape[1] != 2:
@@ -165,7 +236,7 @@ def _as_serialization_array(serialization) -> np.ndarray:
     return np.ascontiguousarray(array)
 
 
-def _copy_graph(graph: UndirectedGraph | RegionAdjacencyGraph) -> _core.UndirectedGraph:
+def _copy_graph(graph) -> _core.UndirectedGraph:
     # `uv_ids()` always returns a unique list (graphs deduplicate on insert),
     # so we can use the bulk constructor that skips per-edge hash dedup —
     # significantly faster than `insert_edges` for large graphs. The result
@@ -226,6 +297,169 @@ def _subproblem_from_edges(number_of_nodes: int, nodes, uvs, edge_costs):
 def undirected_graph(number_of_nodes: int) -> UndirectedGraph:
     """Create an :class:`UndirectedGraph`."""
     return UndirectedGraph(number_of_nodes)
+
+
+def grid_graph(shape):
+    """Create a regular 2D or 3D nearest-neighbor grid graph."""
+    ndim = np.asarray(shape).ndim
+    if ndim != 1:
+        raise ValueError("shape must be a 1D sequence")
+    n_axes = len(shape)
+    if n_axes == 2:
+        return GridGraph2D(shape)
+    if n_axes == 3:
+        return GridGraph3D(shape)
+    raise ValueError(f"shape must have length 2 or 3, got length={n_axes}")
+
+
+def _grid_ndim(graph) -> int:
+    if isinstance(graph, GridGraph2D):
+        return 2
+    if isinstance(graph, GridGraph3D):
+        return 3
+    raise TypeError("graph must be a GridGraph2D or GridGraph3D")
+
+
+def _grid_shape(graph) -> tuple[int, ...]:
+    return tuple(int(size) for size in graph.shape)
+
+
+_GRID_FLOAT_DTYPES = (np.dtype(np.float32), np.dtype(np.float64))
+
+
+def _as_grid_data(values, graph, name: str, *, with_channels: bool) -> np.ndarray:
+    array = np.asarray(values)
+    if array.dtype not in _GRID_FLOAT_DTYPES:
+        # Integer / non-float input falls back to float64 — the previous default.
+        # float32 and float64 inputs are passed through end-to-end, no copy.
+        array = array.astype(np.float64)
+    shape = _grid_shape(graph)
+    if with_channels:
+        if array.ndim != len(shape) + 1 or array.shape[1:] != shape:
+            raise ValueError(
+                f"{name} must have shape (channels, *graph.shape), got "
+                f"shape={array.shape}, graph shape={shape}"
+            )
+    elif array.shape != shape:
+        raise ValueError(
+            f"{name} shape must match graph shape, got "
+            f"{name} shape={array.shape}, graph shape={shape}"
+        )
+    return np.ascontiguousarray(array)
+
+
+def _normalize_grid_offsets(offsets, ndim: int, n_channels: int) -> list[tuple[int, ...]]:
+    normalized = [tuple(int(value) for value in offset) for offset in offsets]
+    if len(normalized) != n_channels:
+        raise ValueError(
+            "offsets length must match affinities channel count, got "
+            f"offsets length={len(normalized)}, channels={n_channels}"
+        )
+    if any(len(offset) != ndim for offset in normalized):
+        raise ValueError("each offset must have length matching graph ndim")
+    if any(all(value == 0 for value in offset) for offset in normalized):
+        raise ValueError("offsets must not contain the zero offset")
+    return normalized
+
+
+def _grid_dtype_suffix(array: np.ndarray) -> str:
+    if array.dtype == np.float32:
+        return "float32"
+    return "float64"
+
+
+_GRID_BOUNDARY_DISPATCH = {
+    (2, "float32"): _core._grid_boundary_features_2d_float32,
+    (2, "float64"): _core._grid_boundary_features_2d_float64,
+    (3, "float32"): _core._grid_boundary_features_3d_float32,
+    (3, "float64"): _core._grid_boundary_features_3d_float64,
+}
+_GRID_AFFINITY_DISPATCH = {
+    (2, "float32"): _core._grid_affinity_features_2d_float32,
+    (2, "float64"): _core._grid_affinity_features_2d_float64,
+    (3, "float32"): _core._grid_affinity_features_3d_float32,
+    (3, "float64"): _core._grid_affinity_features_3d_float64,
+}
+_GRID_AFFINITY_LIFTED_DISPATCH = {
+    (2, "float32"): _core._grid_affinity_features_with_lifted_2d_float32,
+    (2, "float64"): _core._grid_affinity_features_with_lifted_2d_float64,
+    (3, "float32"): _core._grid_affinity_features_with_lifted_3d_float32,
+    (3, "float64"): _core._grid_affinity_features_with_lifted_3d_float64,
+}
+
+
+def grid_boundary_features(graph, boundary_map) -> np.ndarray:
+    """Compute scalar nearest-neighbor grid edge weights from a boundary map.
+
+    The output is a 1D array aligned to ``graph.edges()``. Output dtype matches
+    the input: ``float32`` and ``float64`` inputs are processed without copying,
+    other dtypes are promoted to ``float64``. Each edge receives the average of
+    the two endpoint boundary-map values.
+    """
+    ndim = _grid_ndim(graph)
+    boundary_array = _as_grid_data(
+        boundary_map, graph, "boundary_map", with_channels=False
+    )
+    return _GRID_BOUNDARY_DISPATCH[(ndim, _grid_dtype_suffix(boundary_array))](
+        graph, boundary_array
+    )
+
+
+def grid_affinity_features(graph, affinities, offsets) -> tuple[np.ndarray, np.ndarray]:
+    """Map local affinity channels to grid graph edge weights.
+
+    Only nearest-neighbor offsets with L1 norm 1 are accepted. The returned
+    tuple is ``(edge_weights, valid_edges)``, both aligned to ``graph.edges()``.
+    ``edge_weights`` has the same dtype as ``affinities`` (``float32`` or
+    ``float64``; other dtypes are promoted to ``float64``). ``valid_edges`` is
+    boolean and marks local graph edges covered by offsets.
+    """
+    ndim = _grid_ndim(graph)
+    affinity_array = _as_grid_data(
+        affinities, graph, "affinities", with_channels=True
+    )
+    normalized_offsets = _normalize_grid_offsets(
+        offsets, ndim, int(affinity_array.shape[0])
+    )
+    weights, valid = _GRID_AFFINITY_DISPATCH[
+        (ndim, _grid_dtype_suffix(affinity_array))
+    ](graph, affinity_array, normalized_offsets)
+    return weights, valid.astype(bool, copy=False)
+
+
+def grid_affinity_features_with_lifted(
+    graph,
+    affinities,
+    offsets,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Map local affinities and emit explicit long-range grid edges.
+
+    Returns ``(local_weights, valid_local_edges, lifted_uvs, lifted_weights,
+    lifted_offset_ids)``. Local arrays are aligned to ``graph.edges()``.
+    Long-range arrays have one row/value per valid offset hit and are suitable
+    for lifted multicut or mutex-watershed style callers. Weight arrays share
+    the dtype of ``affinities`` (``float32`` or ``float64``; other dtypes are
+    promoted to ``float64``).
+    """
+    ndim = _grid_ndim(graph)
+    affinity_array = _as_grid_data(
+        affinities, graph, "affinities", with_channels=True
+    )
+    normalized_offsets = _normalize_grid_offsets(
+        offsets, ndim, int(affinity_array.shape[0])
+    )
+    local_weights, valid, lifted_uvs, lifted_weights, lifted_offset_ids = (
+        _GRID_AFFINITY_LIFTED_DISPATCH[
+            (ndim, _grid_dtype_suffix(affinity_array))
+        ](graph, affinity_array, normalized_offsets)
+    )
+    return (
+        local_weights,
+        valid.astype(bool, copy=False),
+        lifted_uvs,
+        lifted_weights,
+        lifted_offset_ids,
+    )
 
 
 RegionAdjacencyGraph = _core.RegionAdjacencyGraph
@@ -363,6 +597,99 @@ def edge_weighted_watershed(
 
     run = _EDGE_WEIGHTED_WATERSHED_BY_DTYPE[(weight_array.dtype, seed_array.dtype)]
     return run(graph, weight_array, seed_array)
+
+
+_MUTEX_WATERSHED_CLUSTERING_BY_DTYPE = {
+    np.dtype("float32"): _core._mutex_watershed_clustering_float32,
+    np.dtype("float64"): _core._mutex_watershed_clustering_float64,
+}
+
+
+def _resolve_weight_dtype(array, name: str) -> np.ndarray:
+    """Coerce a weights input to a supported floating dtype.
+
+    ``float32`` and ``float64`` pass through unchanged. Other floating
+    dtypes are cast to ``float32`` (matches the convention used by
+    :func:`edge_weighted_watershed`). Non-floating dtypes raise.
+    """
+    array = np.asarray(array)
+    if array.dtype in (np.dtype("float32"), np.dtype("float64")):
+        return array
+    if np.issubdtype(array.dtype, np.floating):
+        return array.astype(np.float32, copy=False)
+    raise TypeError(
+        f"{name} must have a floating dtype (float32 or float64), got "
+        f"dtype={array.dtype}"
+    )
+
+
+def mutex_watershed_clustering(
+    graph: UndirectedGraph | RegionAdjacencyGraph,
+    edge_costs,
+    mutex_uvs,
+    mutex_costs,
+) -> np.ndarray:
+    """Mutex watershed clustering on an undirected graph.
+
+    Attractive edges come from ``graph`` (one cost per edge in
+    ``edge_costs``); repulsive long-range edges are supplied separately as
+    ``mutex_uvs`` with weights ``mutex_costs``. All edges are jointly sorted
+    by descending weight and processed in a single pass: an attractive edge
+    merges its two components unless a mutex constraint already separates
+    them; a mutex edge installs a constraint between the two current
+    components.
+
+    The input format matches :class:`LiftedMulticutObjective` — the same
+    ``(graph, edge_costs, lifted_uvs, lifted_costs)`` arrays can be passed
+    here as ``(graph, edge_costs, mutex_uvs, mutex_costs)`` — though the
+    algorithms differ (mutex constraints are hard; lifted costs are soft).
+
+    Parameters
+    ----------
+    graph:
+        :class:`UndirectedGraph` or :class:`RegionAdjacencyGraph` defining
+        the attractive edges.
+    edge_costs:
+        1D array of length ``graph.number_of_edges``. Supported dtypes are
+        ``float32`` and ``float64``; other floating dtypes are cast to
+        ``float32``. Higher values are more attractive.
+    mutex_uvs:
+        ``(n_mutex, 2)`` uint64 array of (u, v) pairs for the mutex edges.
+    mutex_costs:
+        1D array of length ``n_mutex``. Same dtype rules as ``edge_costs``;
+        if the two dtypes differ both are promoted to ``float64``. Higher
+        values are stronger repulsions.
+
+    Returns
+    -------
+    np.ndarray
+        ``(graph.number_of_nodes,)`` uint64 array. Dense node labels in
+        ``[0, k)`` in first-occurrence order.
+    """
+    edge_cost_array = _resolve_weight_dtype(edge_costs, "edge_costs")
+    mutex_cost_array = _resolve_weight_dtype(mutex_costs, "mutex_costs")
+    # Use a single instantiation for both arrays. If the user supplied
+    # mismatched dtypes (one float32, one float64) we promote both to
+    # float64 — the wider type — rather than silently downcasting.
+    if edge_cost_array.dtype != mutex_cost_array.dtype:
+        edge_cost_array = edge_cost_array.astype(np.float64, copy=False)
+        mutex_cost_array = mutex_cost_array.astype(np.float64, copy=False)
+
+    edge_cost_array = _as_1d_array(
+        edge_cost_array,
+        edge_cost_array.dtype,
+        "edge_costs",
+        int(graph.number_of_edges),
+    )
+    mutex_uv_array = _as_uv_array(mutex_uvs, "mutex_uvs")
+    mutex_cost_array = _as_1d_array(
+        mutex_cost_array,
+        mutex_cost_array.dtype,
+        "mutex_costs",
+        int(mutex_uv_array.shape[0]),
+    )
+    run = _MUTEX_WATERSHED_CLUSTERING_BY_DTYPE[edge_cost_array.dtype]
+    return run(graph, edge_cost_array, mutex_uv_array, mutex_cost_array)
 
 
 class MulticutObjective:
@@ -1641,6 +1968,8 @@ __all__ = [
     "GreedyAdditiveMulticut",
     "GreedyAdditiveProposalGenerator",
     "GreedyFixationMulticut",
+    "GridGraph2D",
+    "GridGraph3D",
     "KernighanLinMulticut",
     "LiftedChainedSolvers",
     "LiftedGreedyAdditiveMulticut",
@@ -1663,6 +1992,10 @@ __all__ = [
     "edge_map_features",
     "edge_map_features_complex",
     "edge_weighted_watershed",
+    "grid_graph",
+    "grid_affinity_features",
+    "grid_affinity_features_with_lifted",
+    "grid_boundary_features",
     "lifted_affinity_features",
     "lifted_affinity_features_complex",
     "lifted_edges_from_affinities",
@@ -1674,6 +2007,7 @@ __all__ = [
     "load_multicut_problem",
     "load_multicut_problem_data",
     "multicut_problem_path",
+    "mutex_watershed_clustering",
     "project_node_labels_to_pixels",
     "region_adjacency_graph",
     "undirected_graph",

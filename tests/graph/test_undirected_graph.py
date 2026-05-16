@@ -117,3 +117,41 @@ def test_undirected_graph_rejects_invalid_edges():
         graph.insert_edge(0, 2)
     with pytest.raises(ValueError, match="uvs must have shape"):
         graph.insert_edges([0, 1])
+
+
+def test_undirected_graph_clone_is_independent_deep_copy():
+    original = bic.graph.UndirectedGraph(4)
+    original.insert_edge(0, 1)
+    original.insert_edge(1, 2)
+    original.insert_edge(2, 3)
+
+    copy = original.clone()
+    assert copy.number_of_nodes == 4
+    assert copy.number_of_edges == 3
+    np.testing.assert_array_equal(copy.uv_ids(), original.uv_ids())
+    np.testing.assert_array_equal(copy.node_adjacency(1), original.node_adjacency(1))
+
+    # Mutating the copy must not affect the original.
+    copy.insert_edge(0, 3)
+    assert copy.number_of_edges == 4
+    assert original.number_of_edges == 3
+    assert original.find_edge(0, 3) == -1
+    assert copy.find_edge(0, 3) == 3
+
+
+def test_undirected_graph_freeze_is_callable_after_inserts_and_after_reads():
+    graph = bic.graph.UndirectedGraph(3)
+    graph.insert_edge(0, 1)
+    graph.insert_edge(1, 2)
+    # Eagerly rebuild adjacency before any read.
+    graph.freeze()
+    np.testing.assert_array_equal(
+        graph.node_adjacency(1), np.array([[0, 0], [2, 1]], dtype=np.uint64)
+    )
+    # Frozen graph still accepts new edges; lazy rebuild fires again on next read.
+    graph.insert_edge(0, 2)
+    graph.freeze()
+    assert graph.number_of_edges == 3
+    np.testing.assert_array_equal(
+        np.sort(graph.node_adjacency(0)[:, 0]), np.array([1, 2], dtype=np.uint64)
+    )
