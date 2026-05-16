@@ -107,6 +107,13 @@ Important differences:
 - Bulk methods accept array-like inputs and return NumPy arrays.
 - Python-style names are preferred. A few nifty-style aliases are still present
   on `UndirectedGraph` for convenience, but new code should use snake_case.
+- `graph.clone()` returns an independent deep copy. The C++ class is
+  move-only (it owns a CSR adjacency buffer), so prefer this over
+  reassignment-by-value.
+- `graph.freeze()` eagerly builds the internal adjacency. Call it after a
+  batch of `insert_edge` calls if you intend to hand the graph to multiple
+  reader threads, or if you want to ensure subsequent `node_adjacency`
+  reads carry no first-call rebuild cost.
 
 Common method/property mapping:
 
@@ -125,6 +132,49 @@ Common method/property mapping:
 | `serializationSize` | `serialization_size` |
 | `extractSubgraphFromNodes` | `extract_subgraph_from_nodes` |
 | `edgesFromNodeList` | `edges_from_node_list` |
+
+## Grid Graphs
+
+Nifty-style regular grid graphs map to explicit 2D or 3D grid graph classes:
+
+```python
+graph = bic.graph.GridGraph2D((height, width))
+graph = bic.graph.GridGraph3D((depth, height, width))
+graph = bic.graph.grid_graph((height, width))
+```
+
+Grid graph nodes use NumPy C-order ids. For a 2D shape `(y, x)`, node
+`(row, col)` has id `row * x + col`; for 3D `(z, y, x)`, ids follow the same
+row-major convention. `GridGraph2D` and `GridGraph3D` inherit the regular
+`UndirectedGraph` API, so solvers, connected components, breadth-first search,
+and `uv_ids()` work unchanged.
+
+Important differences:
+
+- Only nearest-neighbor 2D and 3D grids are exposed for now.
+- Edge ids are deterministic axis blocks: axis 0 edges first, then axis 1, and
+  axis 2 for 3D.
+- Scalar boundary maps can be converted to edge weights with
+  `grid_boundary_features(graph, boundary_map)`.
+- Local affinity channels can be converted to edge-aligned weights with
+  `grid_affinity_features(graph, affinities, offsets)`.
+- Mixed local and long-range affinity offsets can be converted with
+  `grid_affinity_features_with_lifted(...)`, which returns local graph weights
+  plus explicit long-range `uv_ids` and weights for lifted multicut or mutex
+  watershed style workflows.
+- The three grid feature functions preserve `float32` and `float64` input
+  dtype end-to-end (no internal copy to `float64`); other dtypes are
+  promoted to `float64`. Output weight arrays match the input dtype.
+- Grid graph construction does not materialize the per-node adjacency
+  list. If you only need `uv_ids()` and edge features (the common case)
+  you pay nothing for adjacency. The first call to `node_adjacency`,
+  `connected_components`, `breadth_first_search`, or
+  `extract_subgraph_from_nodes` on a grid graph triggers a one-shot
+  rebuild; call `graph.freeze()` on the construction thread before
+  fan-out if you intend to use those from multiple threads.
+- Affogato-style masks and seed edges are not part of the public grid feature
+  API yet; the implementation is structured so these filters/extra edges can
+  be added later.
 
 ## Region Adjacency Graphs
 
