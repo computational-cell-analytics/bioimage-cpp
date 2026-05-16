@@ -9,15 +9,13 @@ RAG + lifted-edge construction so they stay in lockstep.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-
 import numpy as np
-from elf.segmentation.utils import load_mutex_watershed_problem
 from skimage.feature import peak_local_max
 from skimage.measure import label as label_components
 from skimage.segmentation import watershed
 
 import bioimage_cpp as bic
+from bioimage_cpp._data import load_isbi_affinities
 
 
 @dataclass
@@ -53,11 +51,10 @@ class LiftedProblem:
 
 
 def load_affinity_problem(
-    data_prefix: Path,
     ndim: int,
     z_slice: int,
 ) -> AffinityProblem:
-    affinities, offsets = load_mutex_watershed_problem(prefix=str(data_prefix))
+    affinities, offsets = load_isbi_affinities()
     offsets = [tuple(int(v) for v in offset) for offset in offsets]
     if ndim == 2:
         channels_2d = [index for index, offset in enumerate(offsets) if offset[0] == 0]

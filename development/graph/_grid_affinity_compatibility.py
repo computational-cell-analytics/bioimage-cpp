@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 from statistics import median
 from time import perf_counter
 from typing import Callable
 
 import numpy as np
 
+def load_problem():
+    from bioimage_cpp._data import load_isbi_affinities
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DATA_PREFIX = PROJECT_ROOT / "examples" / "segmentation" / "isbi-data-"
-
-
-def load_problem(data_prefix: Path | str = DEFAULT_DATA_PREFIX):
-    from elf.segmentation.utils import load_mutex_watershed_problem
-
-    affinities, offsets = load_mutex_watershed_problem(prefix=str(data_prefix))
+    affinities, offsets = load_isbi_affinities()
     return np.ascontiguousarray(affinities), [tuple(offset) for offset in offsets]
 
 
@@ -255,7 +249,6 @@ def print_timing(name: str, first_name: str, first_timings: list[float],
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ndim", type=int, choices=(2, 3), default=2)
-    parser.add_argument("--data-prefix", type=Path, default=DEFAULT_DATA_PREFIX)
     # Default bumped from 3 to 5 — median of 3 is the middle sample and is
     # noisy if anything (GC, cache eviction) lands inside one of the three
     # runs. With `time_call` doing one warm-up before this, 5 samples gives

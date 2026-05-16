@@ -20,22 +20,19 @@ from pathlib import Path
 import numpy as np
 
 import bioimage_cpp as bic
+from bioimage_cpp._data import load_isbi_affinities
 
 
 THIS_DIR = Path(__file__).resolve().parent
-DEFAULT_DATA_PREFIX = THIS_DIR / "isbi-data-"
 DEFAULT_OUTPUT = THIS_DIR / "grid_lifted_multicut_problem.npz"
 
 
 def load_affinities(
-    data_prefix: Path,
     ndim: int,
     spatial_shape: tuple[int, ...],
     z_slice: int,
 ) -> tuple[np.ndarray, list[tuple[int, ...]]]:
-    from elf.segmentation.utils import load_mutex_watershed_problem
-
-    affinities, offsets = load_mutex_watershed_problem(prefix=str(data_prefix))
+    affinities, offsets = load_isbi_affinities()
     offsets = [tuple(int(v) for v in offset) for offset in offsets]
 
     if ndim == 2:
@@ -125,7 +122,6 @@ def main():
         default=0,
         help="Z slice used for 2D extraction.",
     )
-    parser.add_argument("--data-prefix", type=Path, default=DEFAULT_DATA_PREFIX)
     parser.add_argument("--local-threshold", type=float, default=0.1)
     parser.add_argument("--lifted-threshold", type=float, default=0.1)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -133,7 +129,7 @@ def main():
 
     spatial_shape = parse_spatial_shape(args.spatial_shape, args.ndim)
     affinities, offsets = load_affinities(
-        args.data_prefix, args.ndim, spatial_shape, args.z_slice
+        args.ndim, spatial_shape, args.z_slice
     )
     n_nodes, local_uvs, local_costs, lifted_uvs, lifted_costs = (
         build_grid_lifted_problem(

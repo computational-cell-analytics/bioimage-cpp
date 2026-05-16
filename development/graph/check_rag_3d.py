@@ -17,7 +17,6 @@ def main() -> None:
         ndim=3,
         repeats=args.repeats,
         threads=args.threads,
-        data_prefix=args.data_prefix,
         z=0,
         yx_shape=(0, 0),
         zyx_shape=tuple(args.shape),

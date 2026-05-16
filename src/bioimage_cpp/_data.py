@@ -21,7 +21,8 @@ Lifted multicut problems (``.npz`` files written by
 - ``lifted_multicut_problem_grid.npz`` — lifted multicut problem from grid graph (large, ~260k nodes).
 
 Affinities:
-- ``affinities.h5`` — HDF5 file with sample affinities from the ISBI volume. Contains affinties under key `affinities`.
+- ``affinities`` — HDF5 file with sample affinities from the ISBI volume.
+  Contains affinities under key ``affinities``.
 """
 
 from __future__ import annotations
@@ -30,8 +31,30 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "bioimage-cpp"
 CACHE_ENV_VAR = "BIOIMAGE_CPP_CACHE"
+ISBI_AFFINITY_FILENAME = "affinities"
+ISBI_AFFINITY_OFFSETS = (
+    (-1, 0, 0),
+    (0, -1, 0),
+    (0, 0, -1),
+    (-1, -1, -1),
+    (-1, 1, 1),
+    (-1, -1, 1),
+    (-1, 1, -1),
+    (0, -9, 0),
+    (0, 0, -9),
+    (0, -9, -9),
+    (0, 9, -9),
+    (0, -9, -4),
+    (0, -4, -9),
+    (0, 4, -9),
+    (0, 9, -4),
+    (0, -27, 0),
+    (0, 0, -27),
+)
 
 
 # Each entry is filename -> (url, sha256). To refresh a hash, delete the
@@ -142,3 +165,52 @@ def fetch(filename: str, *, timeout: Optional[float] = None) -> Path:
             f"could not download {filename} from {url}: {error}"
         ) from error
     return Path(local_path)
+
+
+def affinity_path(*, timeout: Optional[float] = None) -> Path:
+    """Return the cached path to the registered ISBI affinity HDF5 file."""
+    return fetch(ISBI_AFFINITY_FILENAME, timeout=timeout)
+
+
+def load_isbi_affinities(
+    *,
+    timeout: Optional[float] = None,
+) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
+    """Load the registered ISBI affinity volume and its offsets.
+
+    The offsets are the fixed channel offsets used by
+    ``elf.segmentation.utils.load_mutex_watershed_problem`` for this data.
+    """
+    try:
+        import h5py
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "h5py is required to load the registered ISBI affinity file. "
+            "Install it with `pip install h5py`."
+        ) from error
+
+    with h5py.File(affinity_path(timeout=timeout), "r") as f:
+        affinities = f["affinities"][:]
+    return np.ascontiguousarray(affinities), list(ISBI_AFFINITY_OFFSETS)
+
+
+def load_isbi_raw(
+    *,
+    timeout: Optional[float] = None,
+) -> np.ndarray:
+    """Load the registered ISBI raw volume.
+
+    The raw data is stored in the same HDF5 file as the affinities under key
+    ``raw``.
+    """
+    try:
+        import h5py
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "h5py is required to load the registered ISBI raw file. "
+            "Install it with `pip install h5py`."
+        ) from error
+
+    with h5py.File(affinity_path(timeout=timeout), "r") as f:
+        raw = f["raw"][:]
+    return np.ascontiguousarray(raw)

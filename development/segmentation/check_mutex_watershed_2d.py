@@ -29,7 +29,6 @@ def main() -> None:
     run_check(
         ndim=2,
         repeats=args.repeats,
-        data_prefix=args.data_prefix,
         z=args.z,
         yx_shape=tuple(args.shape),
         zyx_shape=(0, 0, 0),

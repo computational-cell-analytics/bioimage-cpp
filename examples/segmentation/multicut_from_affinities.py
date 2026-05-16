@@ -1,25 +1,19 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import napari
 import numpy as np
-from elf.io import open_file
-from elf.segmentation.utils import load_mutex_watershed_problem
 from skimage.feature import peak_local_max
 from skimage.measure import label as label_components
 from skimage.segmentation import find_boundaries, watershed
 
 import bioimage_cpp as bic
+from bioimage_cpp._data import load_isbi_affinities, load_isbi_raw
 
 
-THIS_DIR = Path(__file__).resolve().parent
-DEFAULT_DATA_PREFIX = THIS_DIR / "isbi-data-"
-
-
-def load_problem(data_prefix: Path, ndim: int, z_slice: int):
-    affinities, offsets = load_mutex_watershed_problem(prefix=str(data_prefix))
+def load_problem(ndim: int, z_slice: int):
+    affinities, offsets = load_isbi_affinities()
     offsets = [tuple(int(v) for v in offset) for offset in offsets]
     if ndim == 2:
         channels_2d = [index for index, offset in enumerate(offsets) if offset[0] == 0]
@@ -36,11 +30,9 @@ def load_problem(data_prefix: Path, ndim: int, z_slice: int):
     return direct_affinities, direct_offsets
 
 
-def load_raw(data_prefix: Path, ndim: int, z_slice: int):
-    data_path = data_prefix.with_name(data_prefix.name + "test.h5")
-    with open_file(data_path, "r") as f:
-        raw = f["raw"][z_slice] if ndim == 2 else f["raw"][:]
-    return raw
+def load_raw(ndim: int, z_slice: int) -> np.ndarray:
+    raw = load_isbi_raw()
+    return np.ascontiguousarray(raw[z_slice] if ndim == 2 else raw)
 
 
 def make_heightmap(affinities: np.ndarray) -> np.ndarray:
@@ -128,7 +120,6 @@ def main():
     )
     parser.add_argument("--ndim", type=int, choices=(2, 3), default=2)
     parser.add_argument("--z-slice", type=int, default=0)
-    parser.add_argument("--data-prefix", type=Path, default=DEFAULT_DATA_PREFIX)
     parser.add_argument("--threshold", type=float, default=0.1)
     parser.add_argument("--threads", type=int, default=0)
     parser.add_argument("--watershed-min-distance", type=int, default=5)
@@ -136,8 +127,8 @@ def main():
     parser.add_argument("--max-markers", type=int, default=2048)
     args = parser.parse_args()
 
-    affinities, offsets = load_problem(args.data_prefix, args.ndim, args.z_slice)
-    raw = load_raw(args.data_prefix, args.ndim, args.z_slice)
+    affinities, offsets = load_problem(args.ndim, args.z_slice)
+    raw = load_raw(args.ndim, args.z_slice)
     heightmap, oversegmentation, segmentation = multicut_from_affinities(
         affinities,
         offsets,

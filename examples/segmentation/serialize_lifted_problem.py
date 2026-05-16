@@ -25,7 +25,6 @@ from _lifted_problem import build_lifted_problem, load_affinity_problem
 
 
 THIS_DIR = Path(__file__).resolve().parent
-DEFAULT_DATA_PREFIX = THIS_DIR / "isbi-data-"
 DEFAULT_OUTPUT = THIS_DIR / "lifted_multicut_problem.npz"
 
 
@@ -38,7 +37,6 @@ def main():
     )
     parser.add_argument("--ndim", type=int, choices=(2, 3), default=2)
     parser.add_argument("--z-slice", type=int, default=0)
-    parser.add_argument("--data-prefix", type=Path, default=DEFAULT_DATA_PREFIX)
     parser.add_argument("--local-threshold", type=float, default=0.1)
     parser.add_argument("--lifted-threshold", type=float, default=0.1)
     parser.add_argument("--threads", type=int, default=0)
@@ -48,7 +46,7 @@ def main():
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
-    affinity_problem = load_affinity_problem(args.data_prefix, args.ndim, args.z_slice)
+    affinity_problem = load_affinity_problem(args.ndim, args.z_slice)
     lifted_problem = build_lifted_problem(
         affinity_problem,
         local_threshold=args.local_threshold,

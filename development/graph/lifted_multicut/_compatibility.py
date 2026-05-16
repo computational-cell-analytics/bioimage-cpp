@@ -12,7 +12,7 @@ def parser(description: str) -> argparse.ArgumentParser:
     arg_parser = argparse.ArgumentParser(description=description)
     arg_parser.add_argument(
         "--size",
-        choices=("2d", "3d"),
+        choices=("2d", "3d", "grid"),
         default="3d",
         help="Lifted multicut problem instance to load (default: 3d).",
     )
