@@ -30,10 +30,7 @@ public:
         const NodeId number_of_nodes = 0,
         const EdgeId reserve_number_of_edges = 0
     )
-        : number_of_nodes_(number_of_nodes),
-          adjacency_(static_cast<std::size_t>(number_of_nodes)) {
-        edges_.reserve(static_cast<std::size_t>(reserve_number_of_edges));
-        edge_lookup_.reserve(static_cast<std::size_t>(reserve_number_of_edges));
+        : UndirectedGraph(number_of_nodes, reserve_number_of_edges, reserve_number_of_edges) {
     }
 
     virtual ~UndirectedGraph() = default;
@@ -218,6 +215,22 @@ public:
     }
 
 protected:
+    // Internal constructor that lets subclasses opt out of pre-reserving the
+    // `(u, v) -> edge_id` hash map. Subclasses (e.g. `GridGraph`) that build
+    // their edges analytically and never populate `edge_lookup_` for their
+    // intrinsic edges should pass `reserve_lookup = 0` so we don't allocate
+    // millions of empty hash buckets that are never written to.
+    UndirectedGraph(
+        const NodeId number_of_nodes,
+        const EdgeId reserve_edges,
+        const EdgeId reserve_lookup
+    )
+        : number_of_nodes_(number_of_nodes),
+          adjacency_(static_cast<std::size_t>(number_of_nodes)) {
+        edges_.reserve(static_cast<std::size_t>(reserve_edges));
+        edge_lookup_.reserve(static_cast<std::size_t>(reserve_lookup));
+    }
+
     EdgeId insert_new_edge(const NodeId u, const NodeId v) {
         const auto edge = static_cast<EdgeId>(edges_.size());
         edges_.emplace_back(u, v);

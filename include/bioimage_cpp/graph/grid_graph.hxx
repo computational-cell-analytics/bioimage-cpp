@@ -22,7 +22,7 @@ public:
     using Coordinate = std::array<std::uint64_t, D>;
 
     explicit GridGraph(const Coordinate &shape)
-        : UndirectedGraph(checked_node_count(shape), checked_edge_count(shape)),
+        : UndirectedGraph(checked_node_count(shape), checked_edge_count(shape), 0),
           shape_(shape),
           strides_(compute_strides(shape)),
           edge_offsets_(compute_edge_offsets(shape)),
@@ -116,11 +116,18 @@ public:
     }
 
     EdgeId insert_edge(const NodeId u, const NodeId v) override {
+        if (u == v) {
+            throw std::invalid_argument("self edges are not supported");
+        }
         const auto existing = find_edge(u, v);
         if (existing >= 0) {
             return static_cast<EdgeId>(existing);
         }
-        return UndirectedGraph::insert_edge(u, v);
+        // `find_edge` already validated the node ids and missed both the grid
+        // analytical check and the parent hash map, so we can insert directly
+        // without paying for another hash lookup inside `UndirectedGraph::insert_edge`.
+        const auto key = detail::edge_key(u, v);
+        return UndirectedGraph::insert_new_edge(key.first, key.second);
     }
 
     [[nodiscard]] std::int64_t find_edge(const NodeId u, const NodeId v) const override {
@@ -282,14 +289,41 @@ private:
         return coordinate;
     }
 
+    // Walk a sub-shape of the node grid in C-order and invoke `callback(flat)`
+    // for every node id in it. Flat node ids are computed incrementally by
+    // addition only — no per-step divisions, no per-step bounds checks. The
+    // template recursion lets the compiler unroll the entire nest for D = 2/3.
+    template <std::size_t Axis, class Callback>
+    static void enumerate_subshape_in_c_order(
+        const Coordinate &subshape,
+        const Coordinate &node_strides,
+        std::uint64_t base_flat,
+        Callback &&callback
+    ) {
+        if constexpr (Axis == D) {
+            callback(base_flat);
+        } else {
+            std::uint64_t flat = base_flat;
+            for (std::uint64_t i = 0; i < subshape[Axis]; ++i) {
+                enumerate_subshape_in_c_order<Axis + 1>(
+                    subshape, node_strides, flat, callback
+                );
+                flat += node_strides[Axis];
+            }
+        }
+    }
+
     void build_edges() {
         for (std::size_t axis = 0; axis < D; ++axis) {
-            const auto axis_edges = edge_offsets_[axis + 1] - edge_offsets_[axis];
-            for (std::uint64_t local_edge = 0; local_edge < axis_edges; ++local_edge) {
-                const auto coordinate = edge_pivot_coordinates(axis, local_edge);
-                const auto u = node_id(coordinate);
-                insert_new_edge_without_lookup(u, u + strides_[axis]);
-            }
+            auto pivot_shape = shape_;
+            --pivot_shape[axis];
+            const auto axis_step = strides_[axis];
+            enumerate_subshape_in_c_order<0>(
+                pivot_shape, strides_, 0,
+                [this, axis_step](const std::uint64_t u) {
+                    insert_new_edge_without_lookup(u, u + axis_step);
+                }
+            );
         }
     }
 
