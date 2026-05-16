@@ -599,6 +599,57 @@ def edge_weighted_watershed(
     return run(graph, weight_array, seed_array)
 
 
+def mutex_watershed_clustering(
+    graph: UndirectedGraph | RegionAdjacencyGraph,
+    edge_costs,
+    mutex_uvs,
+    mutex_costs,
+) -> np.ndarray:
+    """Mutex watershed clustering on an undirected graph.
+
+    Attractive edges come from ``graph`` (one cost per edge in
+    ``edge_costs``); repulsive long-range edges are supplied separately as
+    ``mutex_uvs`` with weights ``mutex_costs``. All edges are jointly sorted
+    by descending weight and processed in a single pass: an attractive edge
+    merges its two components unless a mutex constraint already separates
+    them; a mutex edge installs a constraint between the two current
+    components.
+
+    The input format matches :class:`LiftedMulticutObjective` — the same
+    ``(graph, edge_costs, lifted_uvs, lifted_costs)`` arrays can be passed
+    here as ``(graph, edge_costs, mutex_uvs, mutex_costs)`` — though the
+    algorithms differ (mutex constraints are hard; lifted costs are soft).
+
+    Parameters
+    ----------
+    graph:
+        :class:`UndirectedGraph` or :class:`RegionAdjacencyGraph` defining
+        the attractive edges.
+    edge_costs:
+        1D float64 array of length ``graph.number_of_edges``. Higher
+        values are more attractive.
+    mutex_uvs:
+        ``(n_mutex, 2)`` uint64 array of (u, v) pairs for the mutex edges.
+    mutex_costs:
+        1D float64 array of length ``n_mutex``. Higher values are stronger
+        repulsions.
+
+    Returns
+    -------
+    np.ndarray
+        ``(graph.number_of_nodes,)`` uint64 array. Dense node labels in
+        ``[0, k)`` in first-occurrence order.
+    """
+    edge_cost_array = _as_edge_costs(edge_costs, graph)
+    mutex_uv_array = _as_uv_array(mutex_uvs, "mutex_uvs")
+    mutex_cost_array = _as_1d_array(
+        mutex_costs, np.float64, "mutex_costs", int(mutex_uv_array.shape[0])
+    )
+    return _core._mutex_watershed_clustering(
+        graph, edge_cost_array, mutex_uv_array, mutex_cost_array
+    )
+
+
 class MulticutObjective:
     """Multicut objective for an undirected graph and edge costs."""
 
@@ -1818,6 +1869,7 @@ __all__ = [
     "load_multicut_problem",
     "load_multicut_problem_data",
     "multicut_problem_path",
+    "mutex_watershed_clustering",
     "project_node_labels_to_pixels",
     "region_adjacency_graph",
     "undirected_graph",
