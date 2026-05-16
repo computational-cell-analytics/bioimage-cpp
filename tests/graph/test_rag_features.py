@@ -89,6 +89,89 @@ def test_affinity_features_simple():
     )
 
 
+def _reference_affinity_features(labels, rag, affinities, offsets):
+    """Trivial Python reference: per-channel sweep with explicit bounds checks."""
+    uv_ids = np.asarray(rag.uv_ids(), dtype=np.uint64)
+    edge_lookup = {(int(u), int(v)): i for i, (u, v) in enumerate(uv_ids)}
+    out = np.zeros((len(edge_lookup), 2), dtype=np.float64)
+    shape = labels.shape
+    for channel, offset in enumerate(offsets):
+        for index in np.ndindex(*shape):
+            target = tuple(int(c) + int(d) for c, d in zip(index, offset))
+            if any(t < 0 or t >= s for t, s in zip(target, shape)):
+                continue
+            u, v = int(labels[index]), int(labels[target])
+            if u == v:
+                continue
+            key = (min(u, v), max(u, v))
+            edge = edge_lookup.get(key)
+            if edge is None:
+                # Pair (u,v) doesn't exist as a RAG edge (e.g. when the offset
+                # reaches further than direct neighbors). The kernel skips
+                # these via find_edge -> -1; the reference must match.
+                continue
+            out[edge, 0] += float(affinities[(channel,) + index])
+            out[edge, 1] += 1.0
+    for edge in range(len(edge_lookup)):
+        if out[edge, 1] > 0:
+            out[edge, 0] /= out[edge, 1]
+    return out
+
+
+@pytest.mark.parametrize(
+    "offsets",
+    [
+        # axis-aligned positive offsets (the only case the previous tests covered)
+        [[0, 1], [1, 0]],
+        # negative offsets — must still hit the valid box correctly
+        [[0, -1], [-1, 0]],
+        # large magnitude that crops most of the image
+        [[0, 3], [3, 0]],
+        # diagonal / multi-axis nonzero — exercises the new valid-box math
+        [[1, 1], [1, -1], [-1, 1]],
+        # offset larger than an axis — must produce zero contributions
+        [[10, 0], [0, 10]],
+    ],
+)
+def test_affinity_features_2d_offsets_match_reference(offsets):
+    rng = np.random.default_rng(42)
+    labels = rng.integers(0, 5, size=(5, 7)).astype(np.uint32)
+    rag = bic.graph.region_adjacency_graph(labels)
+    affinities = rng.standard_normal(
+        (len(offsets),) + labels.shape
+    ).astype(np.float32)
+
+    expected = _reference_affinity_features(labels, rag, affinities, offsets)
+    got = bic.graph.affinity_features(rag, labels, affinities, offsets=offsets)
+
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "offsets",
+    [
+        [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        [[-1, 0, 0], [0, -1, 0], [0, 0, -1]],
+        # 3D diagonal
+        [[1, 1, 1], [1, -1, 1], [-1, 1, -1]],
+        # mixed magnitudes
+        [[2, 0, 0], [0, 0, -3]],
+    ],
+)
+def test_affinity_features_3d_offsets_match_reference(offsets):
+    rng = np.random.default_rng(7)
+    labels = rng.integers(0, 4, size=(4, 5, 6)).astype(np.uint32)
+    rag = bic.graph.region_adjacency_graph(labels)
+    affinities = rng.standard_normal(
+        (len(offsets),) + labels.shape
+    ).astype(np.float32)
+
+    expected = _reference_affinity_features(labels, rag, affinities, offsets)
+    got = bic.graph.affinity_features(rag, labels, affinities, offsets=offsets)
+
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+
 def test_affinity_features_complex_parallel_matches_single_thread():
     labels = np.array([[0, 1, 1], [2, 2, 3], [2, 4, 3]], dtype=np.uint64)
     rag = bic.graph.region_adjacency_graph(labels)
