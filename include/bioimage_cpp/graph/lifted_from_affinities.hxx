@@ -65,34 +65,65 @@ inline void validate_affinity_inputs(
 }
 
 template <class LabelT>
-void discover_lifted_chunk(
+void discover_lifted_2d_chunk(
     const RegionAdjacencyGraph &rag,
     const LabelT *labels,
     const std::vector<std::vector<std::ptrdiff_t>> &offsets,
     const std::vector<std::size_t> &long_range_channels,
-    const std::vector<std::ptrdiff_t> &shape,
-    const std::vector<std::ptrdiff_t> &strides,
-    const std::size_t node_begin,
-    const std::size_t node_end,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t y_begin,
+    const std::size_t y_end,
     std::unordered_set<bioimage_cpp::detail::Edge, bioimage_cpp::detail::EdgeHash> &out
 ) {
     for (const auto channel : long_range_channels) {
-        const auto &offset = offsets[channel];
-        for (std::uint64_t node = node_begin; node < node_end; ++node) {
-            std::uint64_t target = 0;
-            if (!bioimage_cpp::detail::valid_offset_target(node, offset, shape, strides, target)) {
-                continue;
+        const auto &off = offsets[channel];
+        detail_features::sweep_offset_box_2d(
+            off[0], off[1], height, width, y_begin, y_end,
+            [&](const std::uint64_t node, const std::uint64_t target) {
+                const auto u = detail_features::label_at(labels, node);
+                const auto v = detail_features::label_at(labels, target);
+                if (u == v) {
+                    return;
+                }
+                if (rag.find_edge(u, v) >= 0) {
+                    return;
+                }
+                out.insert(bioimage_cpp::detail::edge_key(u, v));
             }
-            const auto u = detail_features::label_at(labels, node);
-            const auto v = detail_features::label_at(labels, target);
-            if (u == v) {
-                continue;
+        );
+    }
+}
+
+template <class LabelT>
+void discover_lifted_3d_chunk(
+    const RegionAdjacencyGraph &rag,
+    const LabelT *labels,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets,
+    const std::vector<std::size_t> &long_range_channels,
+    const std::size_t depth,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t z_begin,
+    const std::size_t z_end,
+    std::unordered_set<bioimage_cpp::detail::Edge, bioimage_cpp::detail::EdgeHash> &out
+) {
+    for (const auto channel : long_range_channels) {
+        const auto &off = offsets[channel];
+        detail_features::sweep_offset_box_3d(
+            off[0], off[1], off[2], depth, height, width, z_begin, z_end,
+            [&](const std::uint64_t node, const std::uint64_t target) {
+                const auto u = detail_features::label_at(labels, node);
+                const auto v = detail_features::label_at(labels, target);
+                if (u == v) {
+                    return;
+                }
+                if (rag.find_edge(u, v) >= 0) {
+                    return;
+                }
+                out.insert(bioimage_cpp::detail::edge_key(u, v));
             }
-            if (rag.find_edge(u, v) >= 0) {
-                continue;
-            }
-            out.insert(bioimage_cpp::detail::edge_key(u, v));
-        }
+        );
     }
 }
 
@@ -133,11 +164,10 @@ std::vector<bioimage_cpp::detail::Edge> lifted_edges_from_offsets(
         return {};
     }
 
-    const auto number_of_nodes = detail_features::number_of_pixels(labels.shape);
+    const auto work_items = static_cast<std::size_t>(labels.shape[0]);
     const auto n_threads = bioimage_cpp::detail::normalize_thread_count(
-        number_of_threads, number_of_nodes
+        number_of_threads, work_items
     );
-    const auto strides = bioimage_cpp::detail::c_order_strides(labels.shape);
 
     using EdgeSet = std::unordered_set<
         bioimage_cpp::detail::Edge, bioimage_cpp::detail::EdgeHash
@@ -146,12 +176,24 @@ std::vector<bioimage_cpp::detail::Edge> lifted_edges_from_offsets(
 
     bioimage_cpp::detail::parallel_for_chunks(
         n_threads,
-        number_of_nodes,
+        work_items,
         [&](const std::size_t thread_id, const std::size_t begin, const std::size_t end) {
-            detail_lifted::discover_lifted_chunk(
-                rag, labels.data, offsets, long_range_channels,
-                labels.shape, strides, begin, end, per_thread[thread_id]
-            );
+            if (labels.ndim() == 2) {
+                detail_lifted::discover_lifted_2d_chunk(
+                    rag, labels.data, offsets, long_range_channels,
+                    static_cast<std::size_t>(labels.shape[0]),
+                    static_cast<std::size_t>(labels.shape[1]),
+                    begin, end, per_thread[thread_id]
+                );
+            } else {
+                detail_lifted::discover_lifted_3d_chunk(
+                    rag, labels.data, offsets, long_range_channels,
+                    static_cast<std::size_t>(labels.shape[0]),
+                    static_cast<std::size_t>(labels.shape[1]),
+                    static_cast<std::size_t>(labels.shape[2]),
+                    begin, end, per_thread[thread_id]
+                );
+            }
         }
     );
 
@@ -173,39 +215,82 @@ std::vector<bioimage_cpp::detail::Edge> lifted_edges_from_offsets(
 namespace detail_lifted {
 
 template <class LabelT, class ValueT, class Stats>
-void scan_lifted_affinity_chunk(
+void scan_lifted_affinity_2d_chunk(
     const std::unordered_map<bioimage_cpp::detail::Edge, std::size_t, bioimage_cpp::detail::EdgeHash>
         &lifted_index,
     const LabelT *labels,
     const ValueT *affinities,
     const std::vector<std::vector<std::ptrdiff_t>> &offsets,
     const std::vector<std::size_t> &long_range_channels,
-    const std::vector<std::ptrdiff_t> &shape,
-    const std::size_t node_begin,
-    const std::size_t node_end,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t y_begin,
+    const std::size_t y_end,
     std::vector<Stats> &stats
 ) {
-    const auto strides = bioimage_cpp::detail::c_order_strides(shape);
-    const auto number_of_nodes = static_cast<std::uint64_t>(detail_features::number_of_pixels(shape));
+    const auto number_of_nodes = static_cast<std::uint64_t>(height * width);
     for (const auto channel : long_range_channels) {
-        const auto &offset = offsets[channel];
-        const auto channel_offset = static_cast<std::uint64_t>(channel) * number_of_nodes;
-        for (std::uint64_t node = node_begin; node < node_end; ++node) {
-            std::uint64_t target = 0;
-            if (!bioimage_cpp::detail::valid_offset_target(node, offset, shape, strides, target)) {
-                continue;
+        const auto &off = offsets[channel];
+        const auto channel_offset =
+            static_cast<std::uint64_t>(channel) * number_of_nodes;
+        detail_features::sweep_offset_box_2d(
+            off[0], off[1], height, width, y_begin, y_end,
+            [&](const std::uint64_t node, const std::uint64_t target) {
+                const auto u = detail_features::label_at(labels, node);
+                const auto v = detail_features::label_at(labels, target);
+                if (u == v) {
+                    return;
+                }
+                const auto found = lifted_index.find(
+                    bioimage_cpp::detail::edge_key(u, v)
+                );
+                if (found == lifted_index.end()) {
+                    return;
+                }
+                stats[found->second].add(affinities[channel_offset + node]);
             }
-            const auto u = detail_features::label_at(labels, node);
-            const auto v = detail_features::label_at(labels, target);
-            if (u == v) {
-                continue;
+        );
+    }
+}
+
+template <class LabelT, class ValueT, class Stats>
+void scan_lifted_affinity_3d_chunk(
+    const std::unordered_map<bioimage_cpp::detail::Edge, std::size_t, bioimage_cpp::detail::EdgeHash>
+        &lifted_index,
+    const LabelT *labels,
+    const ValueT *affinities,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets,
+    const std::vector<std::size_t> &long_range_channels,
+    const std::size_t depth,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t z_begin,
+    const std::size_t z_end,
+    std::vector<Stats> &stats
+) {
+    const auto slice_size = height * width;
+    const auto number_of_nodes = static_cast<std::uint64_t>(depth * slice_size);
+    for (const auto channel : long_range_channels) {
+        const auto &off = offsets[channel];
+        const auto channel_offset =
+            static_cast<std::uint64_t>(channel) * number_of_nodes;
+        detail_features::sweep_offset_box_3d(
+            off[0], off[1], off[2], depth, height, width, z_begin, z_end,
+            [&](const std::uint64_t node, const std::uint64_t target) {
+                const auto u = detail_features::label_at(labels, node);
+                const auto v = detail_features::label_at(labels, target);
+                if (u == v) {
+                    return;
+                }
+                const auto found = lifted_index.find(
+                    bioimage_cpp::detail::edge_key(u, v)
+                );
+                if (found == lifted_index.end()) {
+                    return;
+                }
+                stats[found->second].add(affinities[channel_offset + node]);
             }
-            const auto found = lifted_index.find(bioimage_cpp::detail::edge_key(u, v));
-            if (found == lifted_index.end()) {
-                continue;
-            }
-            stats[found->second].add(affinities[channel_offset + node]);
-        }
+        );
     }
 }
 
@@ -297,21 +382,34 @@ void accumulate_lifted_affinity_features(
         return;
     }
 
-    const auto number_of_nodes = detail_features::number_of_pixels(labels.shape);
+    const auto work_items = static_cast<std::size_t>(labels.shape[0]);
     const auto n_threads = bioimage_cpp::detail::normalize_thread_count(
-        number_of_threads, number_of_nodes
+        number_of_threads, work_items
     );
 
     const auto run_scan = [&](auto &per_thread_stats) {
         bioimage_cpp::detail::parallel_for_chunks(
             n_threads,
-            number_of_nodes,
+            work_items,
             [&](const std::size_t thread_id, const std::size_t begin, const std::size_t end) {
-                detail_lifted::scan_lifted_affinity_chunk(
-                    lifted_index, labels.data, affinities.data,
-                    offsets, long_range_channels, labels.shape,
-                    begin, end, per_thread_stats[thread_id]
-                );
+                if (labels.ndim() == 2) {
+                    detail_lifted::scan_lifted_affinity_2d_chunk(
+                        lifted_index, labels.data, affinities.data,
+                        offsets, long_range_channels,
+                        static_cast<std::size_t>(labels.shape[0]),
+                        static_cast<std::size_t>(labels.shape[1]),
+                        begin, end, per_thread_stats[thread_id]
+                    );
+                } else {
+                    detail_lifted::scan_lifted_affinity_3d_chunk(
+                        lifted_index, labels.data, affinities.data,
+                        offsets, long_range_channels,
+                        static_cast<std::size_t>(labels.shape[0]),
+                        static_cast<std::size_t>(labels.shape[1]),
+                        static_cast<std::size_t>(labels.shape[2]),
+                        begin, end, per_thread_stats[thread_id]
+                    );
+                }
             }
         );
     };

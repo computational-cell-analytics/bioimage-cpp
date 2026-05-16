@@ -225,6 +225,83 @@ inline void valid_axis_range(
     }
 }
 
+// Sweep every (node, target) pair on a 2D grid for which `node + offset` stays
+// in bounds, restricted to the half-open y-slab [y_begin, y_end). The body
+// receives flat C-order indices for both endpoints and is expected to inline
+// at -O2 since this is a header-only template with a fully-known callable
+// type at instantiation.
+template <class Body>
+void sweep_offset_box_2d(
+    const std::ptrdiff_t dy,
+    const std::ptrdiff_t dx,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t y_begin,
+    const std::size_t y_end,
+    const Body &body
+) {
+    std::size_t y_lo_full, y_hi_full, x_lo, x_hi;
+    valid_axis_range(dy, height, y_lo_full, y_hi_full);
+    valid_axis_range(dx, width, x_lo, x_hi);
+    const auto y_lo = std::max(y_lo_full, y_begin);
+    const auto y_hi = std::min(y_hi_full, y_end);
+    if (y_lo >= y_hi || x_lo >= x_hi) {
+        return;
+    }
+    const auto offset_stride = dy * static_cast<std::ptrdiff_t>(width) + dx;
+    for (std::size_t y = y_lo; y < y_hi; ++y) {
+        const auto row_offset = y * width;
+        for (std::size_t x = x_lo; x < x_hi; ++x) {
+            const auto node = row_offset + x;
+            const auto target = static_cast<std::uint64_t>(
+                static_cast<std::ptrdiff_t>(node) + offset_stride
+            );
+            body(static_cast<std::uint64_t>(node), target);
+        }
+    }
+}
+
+// 3D variant of `sweep_offset_box_2d`. Restricts the sweep to a z-slab.
+template <class Body>
+void sweep_offset_box_3d(
+    const std::ptrdiff_t dz,
+    const std::ptrdiff_t dy,
+    const std::ptrdiff_t dx,
+    const std::size_t depth,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t z_begin,
+    const std::size_t z_end,
+    const Body &body
+) {
+    std::size_t z_lo_full, z_hi_full, y_lo, y_hi, x_lo, x_hi;
+    valid_axis_range(dz, depth, z_lo_full, z_hi_full);
+    valid_axis_range(dy, height, y_lo, y_hi);
+    valid_axis_range(dx, width, x_lo, x_hi);
+    const auto z_lo = std::max(z_lo_full, z_begin);
+    const auto z_hi = std::min(z_hi_full, z_end);
+    if (z_lo >= z_hi || y_lo >= y_hi || x_lo >= x_hi) {
+        return;
+    }
+    const auto slice_size = height * width;
+    const auto offset_stride =
+        dz * static_cast<std::ptrdiff_t>(slice_size) +
+        dy * static_cast<std::ptrdiff_t>(width) + dx;
+    for (std::size_t z = z_lo; z < z_hi; ++z) {
+        const auto slice_offset = z * slice_size;
+        for (std::size_t y = y_lo; y < y_hi; ++y) {
+            const auto row_offset = slice_offset + y * width;
+            for (std::size_t x = x_lo; x < x_hi; ++x) {
+                const auto node = row_offset + x;
+                const auto target = static_cast<std::uint64_t>(
+                    static_cast<std::ptrdiff_t>(node) + offset_stride
+                );
+                body(static_cast<std::uint64_t>(node), target);
+            }
+        }
+    }
+}
+
 template <class LabelT, class ValueT, class Stats>
 void scan_affinity_2d_chunk(
     const RegionAdjacencyGraph &rag,
@@ -240,25 +317,11 @@ void scan_affinity_2d_chunk(
     const auto number_of_nodes = static_cast<std::uint64_t>(height * width);
     for (std::size_t channel = 0; channel < offsets.size(); ++channel) {
         const auto &off = offsets[channel];
-        std::size_t y_lo_full, y_hi_full, x_lo, x_hi;
-        valid_axis_range(off[0], height, y_lo_full, y_hi_full);
-        valid_axis_range(off[1], width, x_lo, x_hi);
-        const auto y_lo = std::max(y_lo_full, y_begin);
-        const auto y_hi = std::min(y_hi_full, y_end);
-        if (y_lo >= y_hi || x_lo >= x_hi) {
-            continue;
-        }
-        const auto offset_stride =
-            off[0] * static_cast<std::ptrdiff_t>(width) + off[1];
         const auto channel_offset =
             static_cast<std::uint64_t>(channel) * number_of_nodes;
-        for (std::size_t y = y_lo; y < y_hi; ++y) {
-            const auto row_offset = y * width;
-            for (std::size_t x = x_lo; x < x_hi; ++x) {
-                const auto node = row_offset + x;
-                const auto target = static_cast<std::uint64_t>(
-                    static_cast<std::ptrdiff_t>(node) + offset_stride
-                );
+        sweep_offset_box_2d(
+            off[0], off[1], height, width, y_begin, y_end,
+            [&](const std::uint64_t node, const std::uint64_t target) {
                 const auto u = label_at(labels, node);
                 const auto v = label_at(labels, target);
                 const auto edge = edge_for_labels(rag, u, v);
@@ -268,7 +331,7 @@ void scan_affinity_2d_chunk(
                     );
                 }
             }
-        }
+        );
     }
 }
 
@@ -289,41 +352,21 @@ void scan_affinity_3d_chunk(
     const auto number_of_nodes = static_cast<std::uint64_t>(depth * slice_size);
     for (std::size_t channel = 0; channel < offsets.size(); ++channel) {
         const auto &off = offsets[channel];
-        std::size_t z_lo_full, z_hi_full, y_lo, y_hi, x_lo, x_hi;
-        valid_axis_range(off[0], depth, z_lo_full, z_hi_full);
-        valid_axis_range(off[1], height, y_lo, y_hi);
-        valid_axis_range(off[2], width, x_lo, x_hi);
-        const auto z_lo = std::max(z_lo_full, z_begin);
-        const auto z_hi = std::min(z_hi_full, z_end);
-        if (z_lo >= z_hi || y_lo >= y_hi || x_lo >= x_hi) {
-            continue;
-        }
-        const auto offset_stride =
-            off[0] * static_cast<std::ptrdiff_t>(slice_size) +
-            off[1] * static_cast<std::ptrdiff_t>(width) +
-            off[2];
         const auto channel_offset =
             static_cast<std::uint64_t>(channel) * number_of_nodes;
-        for (std::size_t z = z_lo; z < z_hi; ++z) {
-            const auto slice_offset = z * slice_size;
-            for (std::size_t y = y_lo; y < y_hi; ++y) {
-                const auto row_offset = slice_offset + y * width;
-                for (std::size_t x = x_lo; x < x_hi; ++x) {
-                    const auto node = row_offset + x;
-                    const auto target = static_cast<std::uint64_t>(
-                        static_cast<std::ptrdiff_t>(node) + offset_stride
+        sweep_offset_box_3d(
+            off[0], off[1], off[2], depth, height, width, z_begin, z_end,
+            [&](const std::uint64_t node, const std::uint64_t target) {
+                const auto u = label_at(labels, node);
+                const auto v = label_at(labels, target);
+                const auto edge = edge_for_labels(rag, u, v);
+                if (edge >= 0) {
+                    stats[static_cast<std::size_t>(edge)].add(
+                        affinities[channel_offset + node]
                     );
-                    const auto u = label_at(labels, node);
-                    const auto v = label_at(labels, target);
-                    const auto edge = edge_for_labels(rag, u, v);
-                    if (edge >= 0) {
-                        stats[static_cast<std::size_t>(edge)].add(
-                            affinities[channel_offset + node]
-                        );
-                    }
                 }
             }
-        }
+        );
     }
 }
 
