@@ -2,6 +2,7 @@
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/grid.hxx"
+#include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/detail/threading.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 
@@ -204,29 +205,123 @@ void scan_edge_map_3d_chunk(
     }
 }
 
+// Given an offset along one axis and the axis length, return the half-open
+// range of axis coordinates `[lo, hi)` for which `coord + delta` stays in
+// `[0, length)`. Returns `lo >= hi` if the offset is larger than the axis.
+inline void valid_axis_range(
+    const std::ptrdiff_t delta,
+    const std::size_t length,
+    std::size_t &lo,
+    std::size_t &hi
+) {
+    if (delta >= 0) {
+        lo = 0;
+        const auto d = static_cast<std::size_t>(delta);
+        hi = (d >= length) ? 0 : (length - d);
+    } else {
+        const auto d = static_cast<std::size_t>(-delta);
+        lo = (d >= length) ? length : d;
+        hi = length;
+    }
+}
+
 template <class LabelT, class ValueT, class Stats>
-void scan_affinity_chunk(
+void scan_affinity_2d_chunk(
     const RegionAdjacencyGraph &rag,
     const LabelT *labels,
     const ValueT *affinities,
     const std::vector<std::vector<std::ptrdiff_t>> &offsets,
-    const std::vector<std::ptrdiff_t> &shape,
-    const std::size_t node_begin,
-    const std::size_t node_end,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t y_begin,
+    const std::size_t y_end,
     std::vector<Stats> &stats
 ) {
-    const auto spatial_strides = bioimage_cpp::detail::c_order_strides(shape);
-    const auto number_of_nodes = static_cast<std::uint64_t>(number_of_pixels(shape));
+    const auto number_of_nodes = static_cast<std::uint64_t>(height * width);
     for (std::size_t channel = 0; channel < offsets.size(); ++channel) {
-        const auto channel_offset = static_cast<std::uint64_t>(channel) * number_of_nodes;
-        for (std::uint64_t node = node_begin; node < node_end; ++node) {
-            std::uint64_t target = 0;
-            if (!bioimage_cpp::detail::valid_offset_target(node, offsets[channel], shape, spatial_strides, target)) {
-                continue;
+        const auto &off = offsets[channel];
+        std::size_t y_lo_full, y_hi_full, x_lo, x_hi;
+        valid_axis_range(off[0], height, y_lo_full, y_hi_full);
+        valid_axis_range(off[1], width, x_lo, x_hi);
+        const auto y_lo = std::max(y_lo_full, y_begin);
+        const auto y_hi = std::min(y_hi_full, y_end);
+        if (y_lo >= y_hi || x_lo >= x_hi) {
+            continue;
+        }
+        const auto offset_stride =
+            off[0] * static_cast<std::ptrdiff_t>(width) + off[1];
+        const auto channel_offset =
+            static_cast<std::uint64_t>(channel) * number_of_nodes;
+        for (std::size_t y = y_lo; y < y_hi; ++y) {
+            const auto row_offset = y * width;
+            for (std::size_t x = x_lo; x < x_hi; ++x) {
+                const auto node = row_offset + x;
+                const auto target = static_cast<std::uint64_t>(
+                    static_cast<std::ptrdiff_t>(node) + offset_stride
+                );
+                const auto u = label_at(labels, node);
+                const auto v = label_at(labels, target);
+                const auto edge = edge_for_labels(rag, u, v);
+                if (edge >= 0) {
+                    stats[static_cast<std::size_t>(edge)].add(
+                        affinities[channel_offset + node]
+                    );
+                }
             }
-            const auto edge = edge_for_labels(rag, label_at(labels, node), label_at(labels, target));
-            if (edge >= 0) {
-                stats[static_cast<std::size_t>(edge)].add(affinities[channel_offset + node]);
+        }
+    }
+}
+
+template <class LabelT, class ValueT, class Stats>
+void scan_affinity_3d_chunk(
+    const RegionAdjacencyGraph &rag,
+    const LabelT *labels,
+    const ValueT *affinities,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets,
+    const std::size_t depth,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t z_begin,
+    const std::size_t z_end,
+    std::vector<Stats> &stats
+) {
+    const auto slice_size = height * width;
+    const auto number_of_nodes = static_cast<std::uint64_t>(depth * slice_size);
+    for (std::size_t channel = 0; channel < offsets.size(); ++channel) {
+        const auto &off = offsets[channel];
+        std::size_t z_lo_full, z_hi_full, y_lo, y_hi, x_lo, x_hi;
+        valid_axis_range(off[0], depth, z_lo_full, z_hi_full);
+        valid_axis_range(off[1], height, y_lo, y_hi);
+        valid_axis_range(off[2], width, x_lo, x_hi);
+        const auto z_lo = std::max(z_lo_full, z_begin);
+        const auto z_hi = std::min(z_hi_full, z_end);
+        if (z_lo >= z_hi || y_lo >= y_hi || x_lo >= x_hi) {
+            continue;
+        }
+        const auto offset_stride =
+            off[0] * static_cast<std::ptrdiff_t>(slice_size) +
+            off[1] * static_cast<std::ptrdiff_t>(width) +
+            off[2];
+        const auto channel_offset =
+            static_cast<std::uint64_t>(channel) * number_of_nodes;
+        for (std::size_t z = z_lo; z < z_hi; ++z) {
+            const auto slice_offset = z * slice_size;
+            for (std::size_t y = y_lo; y < y_hi; ++y) {
+                const auto row_offset = slice_offset + y * width;
+                for (std::size_t x = x_lo; x < x_hi; ++x) {
+                    const auto node = row_offset + x;
+                    const auto target = static_cast<std::uint64_t>(
+                        static_cast<std::ptrdiff_t>(node) + offset_stride
+                    );
+                    const auto u = label_at(labels, node);
+                    const auto v = label_at(labels, target);
+                    const auto edge = edge_for_labels(rag, u, v);
+                    if (edge >= 0) {
+                        stats[static_cast<std::size_t>(edge)].add(
+                            affinities[channel_offset + node]
+                        );
+                    }
+                }
             }
         }
     }
@@ -408,40 +503,79 @@ void accumulate_affinity_features(
         throw std::invalid_argument("out shape must be (number_of_edges, number_of_features)");
     }
 
-    const auto number_of_nodes = detail_features::number_of_pixels(labels.shape);
-    const auto n_threads = detail::normalize_thread_count(number_of_threads, number_of_nodes);
+    const auto work_items = static_cast<std::size_t>(labels.shape[0]);
+    const auto n_threads = detail::normalize_thread_count(number_of_threads, work_items);
     const auto number_of_edges = static_cast<std::size_t>(rag.number_of_edges());
 
+    BIOIMAGE_PROFILE_INIT(aff_profiler);
+
     const auto run_scan = [&](auto &per_thread_stats) {
+        BIOIMAGE_PROFILE_SCOPE(aff_profiler, "aff:scan");
         bioimage_cpp::detail::parallel_for_chunks(
             n_threads,
-            number_of_nodes,
+            work_items,
             [&](const std::size_t thread_id, const std::size_t begin, const std::size_t end) {
-                detail_features::scan_affinity_chunk(
-                    rag, labels.data, affinities.data, offsets, labels.shape,
-                    begin, end, per_thread_stats[thread_id]
-                );
+                if (labels.ndim() == 2) {
+                    detail_features::scan_affinity_2d_chunk(
+                        rag, labels.data, affinities.data, offsets,
+                        static_cast<std::size_t>(labels.shape[0]),
+                        static_cast<std::size_t>(labels.shape[1]),
+                        begin, end, per_thread_stats[thread_id]
+                    );
+                } else {
+                    detail_features::scan_affinity_3d_chunk(
+                        rag, labels.data, affinities.data, offsets,
+                        static_cast<std::size_t>(labels.shape[0]),
+                        static_cast<std::size_t>(labels.shape[1]),
+                        static_cast<std::size_t>(labels.shape[2]),
+                        begin, end, per_thread_stats[thread_id]
+                    );
+                }
             }
         );
     };
 
     if (compute_complex_features) {
-        std::vector<std::vector<detail_features::ComplexStats>> per_thread_stats(
-            n_threads,
-            std::vector<detail_features::ComplexStats>(number_of_edges)
-        );
+        std::vector<std::vector<detail_features::ComplexStats>> per_thread_stats;
+        {
+            BIOIMAGE_PROFILE_SCOPE(aff_profiler, "aff:alloc");
+            per_thread_stats.assign(
+                n_threads,
+                std::vector<detail_features::ComplexStats>(number_of_edges)
+            );
+        }
         run_scan(per_thread_stats);
-        auto stats = detail_features::merge_stats(per_thread_stats, number_of_edges);
-        detail_features::write_complex_features(stats, out);
+        std::vector<detail_features::ComplexStats> stats;
+        {
+            BIOIMAGE_PROFILE_SCOPE(aff_profiler, "aff:merge");
+            stats = detail_features::merge_stats(per_thread_stats, number_of_edges);
+        }
+        {
+            BIOIMAGE_PROFILE_SCOPE(aff_profiler, "aff:write");
+            detail_features::write_complex_features(stats, out);
+        }
     } else {
-        std::vector<std::vector<detail_features::SimpleStats>> per_thread_stats(
-            n_threads,
-            std::vector<detail_features::SimpleStats>(number_of_edges)
-        );
+        std::vector<std::vector<detail_features::SimpleStats>> per_thread_stats;
+        {
+            BIOIMAGE_PROFILE_SCOPE(aff_profiler, "aff:alloc");
+            per_thread_stats.assign(
+                n_threads,
+                std::vector<detail_features::SimpleStats>(number_of_edges)
+            );
+        }
         run_scan(per_thread_stats);
-        auto stats = detail_features::merge_stats(per_thread_stats, number_of_edges);
-        detail_features::write_simple_features(stats, out);
+        std::vector<detail_features::SimpleStats> stats;
+        {
+            BIOIMAGE_PROFILE_SCOPE(aff_profiler, "aff:merge");
+            stats = detail_features::merge_stats(per_thread_stats, number_of_edges);
+        }
+        {
+            BIOIMAGE_PROFILE_SCOPE(aff_profiler, "aff:write");
+            detail_features::write_simple_features(stats, out);
+        }
     }
+
+    BIOIMAGE_PROFILE_REPORT(aff_profiler);
 }
 
 } // namespace bioimage_cpp::graph
