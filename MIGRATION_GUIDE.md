@@ -696,8 +696,8 @@ shims default to sample A, size small and continue to honor the
 `BIOIMAGE_CPP_EXTERNAL_MULTICUT_PATH` and
 `BIOIMAGE_CPP_EXTERNAL_MULTICUT_CACHE` environment variables.
 
-Lifted multicut problems (2D ISBI slice and full 3D volume, built by
-`examples/segmentation/serialize_lifted_problem.py`):
+Lifted multicut problems (2D ISBI slice, RAG-based 3D volume, and grid-graph
+volume):
 
 ```python
 problem = bic.graph.load_lifted_multicut_problem(size="2d")
@@ -710,6 +710,8 @@ objective = bic.graph.LiftedMulticutObjective(
     lifted_costs=problem.lifted_costs,
 )
 ```
+
+Valid sizes are `"2d"`, `"3d"`, and `"grid"`.
 
 Notes:
 

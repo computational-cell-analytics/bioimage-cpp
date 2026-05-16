@@ -1,26 +1,19 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import napari
-from elf.io import open_file
 from skimage.segmentation import find_boundaries
 
 import bioimage_cpp as bic
+from bioimage_cpp._data import load_isbi_raw
 
 from _lifted_problem import build_lifted_problem, load_affinity_problem
 
 
-THIS_DIR = Path(__file__).resolve().parent
-DEFAULT_DATA_PREFIX = THIS_DIR / "isbi-data-"
-
-
-def load_raw(data_prefix: Path, ndim: int, z_slice: int):
-    data_path = data_prefix.with_name(data_prefix.name + "test.h5")
-    with open_file(data_path, "r") as f:
-        raw = f["raw"][z_slice] if ndim == 2 else f["raw"][:]
-    return raw
+def load_raw(ndim: int, z_slice: int):
+    raw = load_isbi_raw()
+    return raw[z_slice] if ndim == 2 else raw
 
 
 def main():
@@ -32,7 +25,6 @@ def main():
     )
     parser.add_argument("--ndim", type=int, choices=(2, 3), default=2)
     parser.add_argument("--z-slice", type=int, default=0)
-    parser.add_argument("--data-prefix", type=Path, default=DEFAULT_DATA_PREFIX)
     parser.add_argument("--local-threshold", type=float, default=0.1)
     parser.add_argument("--lifted-threshold", type=float, default=0.1)
     parser.add_argument("--threads", type=int, default=0)
@@ -42,8 +34,8 @@ def main():
     parser.add_argument("--kl-outer-iterations", type=int, default=10)
     args = parser.parse_args()
 
-    affinity_problem = load_affinity_problem(args.data_prefix, args.ndim, args.z_slice)
-    raw = load_raw(args.data_prefix, args.ndim, args.z_slice)
+    affinity_problem = load_affinity_problem(args.ndim, args.z_slice)
+    raw = load_raw(args.ndim, args.z_slice)
 
     lifted_problem = build_lifted_problem(
         affinity_problem,

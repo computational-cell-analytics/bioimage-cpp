@@ -37,7 +37,7 @@ import numpy as np
 
 
 def run_check(args: argparse.Namespace) -> None:
-    affinities, offsets = load_problem(args.data_prefix)
+    affinities, offsets = load_problem()
     if args.ndim == 2:
         affinities, offsets = prepare_2d_problem(
             affinities, offsets, z=args.z, yx_shape=tuple(args.yx_shape)

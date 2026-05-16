@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 from statistics import median
 from time import perf_counter
 
@@ -10,15 +9,10 @@ from skimage.feature import peak_local_max
 from skimage.measure import label as label_components
 from skimage.segmentation import watershed
 
+def load_problem():
+    from bioimage_cpp._data import load_isbi_affinities
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DATA_PREFIX = PROJECT_ROOT / "examples" / "segmentation" / "isbi-data-"
-
-
-def load_problem(data_prefix: Path | str = DEFAULT_DATA_PREFIX):
-    from elf.segmentation.utils import load_mutex_watershed_problem
-
-    affinities, offsets = load_mutex_watershed_problem(prefix=str(data_prefix))
+    affinities, offsets = load_isbi_affinities()
     return np.ascontiguousarray(affinities), [tuple(offset) for offset in offsets]
 
 
@@ -227,7 +221,6 @@ def run_compatibility_check(
     ndim: int,
     repeats: int,
     threads: int,
-    data_prefix: Path,
     z: int,
     yx_shape: tuple[int, int],
     zyx_shape: tuple[int, int, int],
@@ -238,7 +231,7 @@ def run_compatibility_check(
     import bioimage_cpp as bic
     import nifty.graph.rag as nrag
 
-    affinities, offsets = load_problem(data_prefix)
+    affinities, offsets = load_problem()
     if ndim == 2:
         direct_affinities, direct_offsets = prepare_2d_problem(affinities, offsets, z, yx_shape)
     elif ndim == 3:
@@ -310,7 +303,6 @@ def _print_timing(name: str, bic_timings: list[float], nifty_timings: list[float
 
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--data-prefix", type=Path, default=DEFAULT_DATA_PREFIX)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--watershed-min-distance", type=int, default=5)

@@ -1,7 +1,6 @@
 import napari
 
-from elf.segmentation.utils import load_mutex_watershed_problem
-from elf.io import open_file
+from bioimage_cpp._data import load_isbi_affinities, load_isbi_raw
 
 
 def mws_bic(affinities, offsets):
@@ -26,17 +25,14 @@ def _filter_2d(affinities, offsets):
 
 
 def main():
-    prefix = "isbi-data-"
-    data_path = f"{prefix}test.h5"
-    affinities, offsets = load_mutex_watershed_problem(prefix=prefix)
+    affinities, offsets = load_isbi_affinities()
+    raw = load_isbi_raw()
 
     check_2d = True
     if check_2d:
         affinities, offsets = _filter_2d(affinities, offsets)
+        raw = raw[0]
     segmentation = mws_bic(affinities, offsets)
-
-    with open_file(data_path, "r") as f:
-        raw = f["raw"][0] if check_2d else f["raw"][:]
 
     viewer = napari.Viewer()
     viewer.add_image(raw, name="raw")
