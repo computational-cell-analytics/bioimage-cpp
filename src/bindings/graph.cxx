@@ -791,18 +791,19 @@ UInt64Array lifted_multicut_kernighan_lin(
     return vector_to_uint64_array(label_vector);
 }
 
-UInt64Array mutex_watershed_clustering(
+template <class WeightT>
+UInt64Array mutex_watershed_clustering_t(
     const Graph &graph,
-    ConstDoubleArray edge_costs,
+    ConstArray1D<WeightT> edge_costs,
     ConstUInt64Array mutex_uvs,
-    ConstDoubleArray mutex_costs
+    ConstArray1D<WeightT> mutex_costs
 ) {
     const auto edge_cost_vector =
-        double_array_to_vector(edge_costs, "edge_costs", graph.number_of_edges());
+        array_1d_to_vector<WeightT>(edge_costs, "edge_costs", graph.number_of_edges());
     require_uv_array(mutex_uvs, "mutex_uvs");
     const auto n_mutex = mutex_uvs.shape(0);
     const auto mutex_cost_vector =
-        double_array_to_vector(mutex_costs, "mutex_costs", static_cast<std::uint64_t>(n_mutex));
+        array_1d_to_vector<WeightT>(mutex_costs, "mutex_costs", static_cast<std::uint64_t>(n_mutex));
 
     std::vector<std::array<std::uint64_t, 2>> mutex_uv_vector(n_mutex);
     const auto *uv_data = mutex_uvs.data();
@@ -814,7 +815,7 @@ UInt64Array mutex_watershed_clustering(
     std::vector<std::uint64_t> labels;
     {
         nb::gil_scoped_release release;
-        labels = graph::mutex_watershed_clustering(
+        labels = graph::mutex_watershed_clustering<WeightT>(
             graph, edge_cost_vector, mutex_uv_vector, mutex_cost_vector
         );
     }
@@ -1460,14 +1461,18 @@ void bind_graph(nb::module_ &m) {
         nb::arg("epsilon")
     );
 
-    m.def(
-        "_mutex_watershed_clustering",
-        &mutex_watershed_clustering,
-        nb::arg("graph"),
-        nb::arg("edge_costs"),
-        nb::arg("mutex_uvs"),
-        nb::arg("mutex_costs")
-    );
+    const auto register_mutex_watershed_clustering = [&m]<class WeightT>(const char *name) {
+        m.def(
+            name,
+            &mutex_watershed_clustering_t<WeightT>,
+            nb::arg("graph"),
+            nb::arg("edge_costs"),
+            nb::arg("mutex_uvs"),
+            nb::arg("mutex_costs")
+        );
+    };
+    register_mutex_watershed_clustering.operator()<float>("_mutex_watershed_clustering_float32");
+    register_mutex_watershed_clustering.operator()<double>("_mutex_watershed_clustering_float64");
 
     // Lifted multicut sub-solver hierarchy. Same shape as the multicut sub-
     // solver bindings — opaque to Python, used by future fusion-move drivers.

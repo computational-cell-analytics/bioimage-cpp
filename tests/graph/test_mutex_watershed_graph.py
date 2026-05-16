@@ -195,6 +195,66 @@ def test_mismatched_mutex_costs_raises():
         bic.graph.mutex_watershed_clustering(graph, edge_costs, mutex_uvs, bad_mutex_costs)
 
 
+def test_float32_inputs_supported():
+    graph = _graph_from_edges(4, [[0, 1], [1, 2], [2, 3]])
+    edge_costs = np.array([10.0, 9.0, 4.0], dtype=np.float32)
+    mutex_uvs = np.array([[0, 3]], dtype=np.uint64)
+    mutex_costs = np.array([5.0], dtype=np.float32)
+
+    labels = bic.graph.mutex_watershed_clustering(
+        graph, edge_costs, mutex_uvs, mutex_costs
+    )
+
+    assert labels.dtype == np.uint64
+    np.testing.assert_array_equal(_canonicalize(labels), np.array([0, 0, 0, 1]))
+
+
+def test_float32_and_float64_agree_on_simple_problem():
+    # On inputs where no weights tie, float32 and float64 must produce the
+    # exact same partition.
+    graph = _graph_from_edges(5, [[0, 1], [1, 2], [2, 3], [3, 4]])
+    edge_costs = np.array([1.0, -0.25, 0.75, -0.5], dtype=np.float64)
+    mutex_uvs = np.array([[0, 4], [1, 3]], dtype=np.uint64)
+    mutex_costs = np.array([2.0, 0.1], dtype=np.float64)
+
+    labels_64 = bic.graph.mutex_watershed_clustering(
+        graph, edge_costs, mutex_uvs, mutex_costs
+    )
+    labels_32 = bic.graph.mutex_watershed_clustering(
+        graph,
+        edge_costs.astype(np.float32),
+        mutex_uvs,
+        mutex_costs.astype(np.float32),
+    )
+    np.testing.assert_array_equal(_canonicalize(labels_32), _canonicalize(labels_64))
+
+
+def test_mismatched_dtypes_are_promoted():
+    # Passing float32 edge_costs alongside float64 mutex_costs is accepted —
+    # the wrapper promotes both to float64 before dispatching.
+    graph = _graph_from_edges(3, [[0, 1], [1, 2]])
+    edge_costs = np.array([1.0, 1.0], dtype=np.float32)
+    mutex_uvs = np.array([[0, 2]], dtype=np.uint64)
+    mutex_costs = np.array([2.0], dtype=np.float64)
+
+    labels = bic.graph.mutex_watershed_clustering(
+        graph, edge_costs, mutex_uvs, mutex_costs
+    )
+    np.testing.assert_array_equal(_canonicalize(labels), np.array([0, 0, 1]))
+
+
+def test_integer_edge_costs_rejected():
+    graph = _graph_from_edges(3, [[0, 1], [1, 2]])
+    bad_edge_costs = np.array([1, 1], dtype=np.int32)
+    mutex_uvs = np.zeros((0, 2), dtype=np.uint64)
+    mutex_costs = np.zeros(0, dtype=np.float64)
+
+    with pytest.raises(TypeError):
+        bic.graph.mutex_watershed_clustering(
+            graph, bad_edge_costs, mutex_uvs, mutex_costs
+        )
+
+
 def test_out_of_range_mutex_endpoint_raises():
     graph = _graph_from_edges(3, [[0, 1], [1, 2]])
     edge_costs = np.array([1.0, 1.0], dtype=np.float64)

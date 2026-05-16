@@ -26,11 +26,16 @@ namespace bioimage_cpp::graph {
 //
 // This is a port of `compute_mws_clustering` from the affogato library,
 // adapted to bioimage-cpp's UndirectedGraph and detail/ primitives.
-inline std::vector<std::uint64_t> mutex_watershed_clustering(
+//
+// Templated on the weight type. Concrete instantiations for `float` and
+// `double` are provided by the binding layer; other floating types are
+// supported but must be instantiated explicitly.
+template <class WeightT>
+std::vector<std::uint64_t> mutex_watershed_clustering(
     const UndirectedGraph &graph,
-    const std::vector<double> &edge_costs,
+    const std::vector<WeightT> &edge_costs,
     const std::vector<std::array<std::uint64_t, 2>> &mutex_uvs,
-    const std::vector<double> &mutex_costs
+    const std::vector<WeightT> &mutex_costs
 ) {
     const auto number_of_edges = static_cast<std::size_t>(graph.number_of_edges());
     if (edge_costs.size() != number_of_edges) {
@@ -64,7 +69,7 @@ inline std::vector<std::uint64_t> mutex_watershed_clustering(
     }
 
     struct WeightedEdge {
-        double weight;
+        WeightT weight;
         std::uint64_t index;
         bool is_mutex;
     };
