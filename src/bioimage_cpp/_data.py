@@ -17,7 +17,11 @@ Lifted multicut problems (``.npz`` files written by
 ``examples/segmentation/serialize_lifted_problem.py``):
 
 - ``lifted_multicut_problem_2d.npz`` — 2D ISBI slice (small, ~756 nodes).
-- ``lifted_multicut_problem_3d.npz`` — full 3D ISBI volume (large, ~18k nodes).
+- ``lifted_multicut_problem_3d.npz`` — full 3D ISBI volume (medium, ~18k nodes).
+- ``lifted_multicut_problem_grid.npz`` — lifted multicut problem from grid graph (large, ~260k nodes).
+
+Affinities:
+- ``affinities.h5`` — HDF5 file with sample affinities from the ISBI volume. Contains affinties under key `affinities`.
 """
 
 from __future__ import annotations
@@ -65,6 +69,14 @@ _REGISTRY: dict[str, tuple[str, Optional[str]]] = {
     "lifted_multicut_problem_3d.npz": (
         "https://owncloud.gwdg.de/index.php/s/ZVzDy8Xb0Dr2Ell/download",
         "269ce644e2b9f8259f7f2ff827d5808ac5c9bfe6ca0444e298290f23867dce8a",
+    ),
+    "lifted_multicut_problem_grid.npz": (
+        "https://owncloud.gwdg.de/index.php/s/YWNZSYsBd1VwSX1/download",
+        "20583b2000838ed0942f8f1c343b84287d8bf218d19d77a8b5627924661c5aa3",
+    ),
+    "affinities": (
+        "https://owncloud.gwdg.de/index.php/s/aAyF2ekzsW7DFJo/download",
+        "6472ad0fcf3c57a4ae345fda68c3cbb6072ee3e8db67b423502746b46d8cd5e5",
     ),
 }
 
