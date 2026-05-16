@@ -314,10 +314,21 @@ private:
     }
 
     void build_edges() {
-        // Phase 1: emit every edge into `edges_` in canonical order
-        // (axis-major, C-order within each axis). Sequential `emplace_back`
-        // into a single pre-reserved vector is cache-friendly. `edges_` was
+        // Emit every edge into `edges_` in canonical order (axis-major,
+        // C-order within each axis). Sequential `emplace_back` into a
+        // single pre-reserved vector is cache-friendly. `edges_` was
         // already reserved by the `UndirectedGraph` ctor.
+        //
+        // We deliberately do NOT call `rebuild_adjacency_from_edges()`
+        // here. The dominant grid-graph workflow (build graph → compute
+        // edge features via `uv_ids()`) never touches adjacency, so the
+        // ~400 ms rebuild on a 12 M-edge 3D grid is pure waste in that
+        // case. Callers that need adjacency (BFS, connected components,
+        // `extract_subgraph_from_nodes`) trigger a lazy rebuild via the
+        // base-class `node_adjacency` path on first use, paying the cost
+        // exactly once. Multi-threaded readers should call `freeze()` on
+        // the construction thread before fan-out — the same convention
+        // any insert-built `UndirectedGraph` already follows.
         auto &edges = access_edges();
         for (std::size_t axis = 0; axis < D; ++axis) {
             auto pivot_shape = shape_;
@@ -330,10 +341,6 @@ private:
                 }
             );
         }
-        // Phase 2: fill adjacency in bulk — exact-size reserve per node,
-        // no per-edge geometric-growth reallocs across millions of small
-        // adjacency vectors. This is the dominant win on large grids.
-        rebuild_adjacency_from_edges();
     }
 
     Coordinate shape_{};

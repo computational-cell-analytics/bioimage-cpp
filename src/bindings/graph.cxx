@@ -1120,6 +1120,8 @@ void bind_graph(nb::module_ &m) {
             nb::arg("nodes")
         )
         .def("edges_from_node_list", &graph_edges_from_node_list, nb::arg("nodes"))
+        .def("freeze", &Graph::freeze)
+        .def("clone", &Graph::clone)
         .def_static(
             "from_edges",
             &graph_from_edges,
