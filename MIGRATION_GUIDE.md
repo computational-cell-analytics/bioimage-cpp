@@ -811,6 +811,13 @@ Notes:
 
 ## Mutex Watershed
 
+`bioimage-cpp` ships two mutex-watershed entry points, mirroring the two
+affogato APIs: one that consumes a dense affinity grid, and one that
+consumes an arbitrary graph with a separate list of mutex (long-range
+repulsive) edges.
+
+### Grid-based mutex watershed (affinity volumes)
+
 Affogato:
 
 ```python
@@ -852,6 +859,73 @@ Important migration notes:
 - A boolean `mask` may be passed. Edges touching `False` pixels are ignored and
   masked pixels are set to label `0`.
 - Output labels are `uint64`, consecutive, and 1-based for foreground pixels.
+
+### Mutex watershed on a generic graph
+
+For mutex watershed on an arbitrary undirected graph (region adjacency graph
+or otherwise) with a separate list of long-range repulsive edges,
+`bioimage-cpp` provides `bic.graph.mutex_watershed_clustering`. This is a
+port of affogato's `compute_mws_clustering` using the same input format as
+`LiftedMulticutObjective`: a base graph carries the attractive edges, and
+long-range (called *mutex* here) edges are supplied alongside as a `(M, 2)`
+node-pair array. The same `(graph, edge_costs, lifted_uvs, lifted_costs)`
+tuple used to build a lifted multicut problem can be passed to the mutex
+watershed clustering without any reshaping.
+
+Affogato:
+
+```python
+from affogato.segmentation import compute_mws_clustering
+
+labels = compute_mws_clustering(
+    number_of_nodes,
+    uvs.astype(np.uint64),
+    mutex_uvs.astype(np.uint64),
+    weights.astype(np.float32),
+    mutex_weights.astype(np.float32),
+)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+graph = bic.graph.UndirectedGraph.from_edges(number_of_nodes, uvs)
+labels = bic.graph.mutex_watershed_clustering(
+    graph,
+    weights,
+    mutex_uvs,
+    mutex_weights,
+)
+```
+
+Notes:
+
+- The attractive edges are the edges of the base graph; the count and the
+  ordering of `weights` must match `graph.number_of_edges`. Mutex edges
+  are supplied separately as `(M, 2)` `uint64` pairs with matching
+  `mutex_weights`.
+- Both `weights` and `mutex_weights` accept `float32` and `float64`. The
+  wrapper dispatches to a templated C++ instantiation per dtype; other
+  floating dtypes are cast to `float32`. If the two arrays' dtypes do not
+  match, both are promoted to `float64` rather than silently downcast.
+- Higher weights are processed first (in descending order) — the same
+  convention affogato uses.
+- The implementation reuses the union-find and per-root mutex-set helpers
+  shared with the grid-based mutex watershed (`detail/mutex_storage.hxx`),
+  so behavior is consistent between the two entry points.
+- Output labels are dense `uint64` ids in `0 .. number_of_clusters - 1`,
+  assigned in first-occurrence order (matches the convention of the graph
+  multicut solvers, *not* the 1-based foreground labels produced by the
+  grid-based variant).
+- The function accepts both `UndirectedGraph` and `RegionAdjacencyGraph`.
+- Tie-breaking is deterministic: when weights are equal, attractive edges
+  are processed before mutex edges, then by index. Affogato's reference
+  uses a non-stable `std::sort`, so on inputs with many ties the two
+  implementations may produce slightly different (but very similar)
+  partitions. See `development/graph/check_mutex_clustering.py` for a
+  comparison harness.
 
 ## Dictionary-Based Relabeling
 
