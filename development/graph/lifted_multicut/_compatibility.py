@@ -29,6 +29,12 @@ def parser(description: str) -> argparse.ArgumentParser:
         help="Download timeout in seconds if the lifted problem is not cached.",
     )
     arg_parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="Number of threads for solvers that support it.",
+    )
+    arg_parser.add_argument(
         "--energy-bound",
         type=float,
         default=None,

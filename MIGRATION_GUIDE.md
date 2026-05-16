@@ -538,13 +538,44 @@ energy = objective.energy(labels)
 - `overwrite_existing` — when `True`, lifted entries that coincide with an
   existing edge replace its weight; the default accumulates.
 
-Available solvers (no fusion-move / ILP solvers yet):
+Available solvers (no ILP solvers yet):
 
 | nifty factory | bioimage-cpp solver |
 | --- | --- |
 | `liftedMulticutGreedyAdditiveFactory()` | `LiftedGreedyAdditiveMulticut()` |
 | `liftedMulticutKernighanLinFactory(...)` | `LiftedKernighanLinMulticut(...)` |
+| `fusionMoveBasedFactory(...)` | `FusionMoveLiftedMulticut(...)` |
 | `chainedSolversFactory([...])` | `LiftedChainedSolvers([...])` |
+
+`FusionMoveLiftedMulticut` mirrors `FusionMoveMulticut` (same proposal-generator
+plumbing, same threading + multi-proposal joint-fuse semantics, same best-of
+safety net). The differences are:
+
+- Proposal generators operate on the *base* graph and base edge costs (only
+  base-graph edges are candidate cut edges; lifted edges contribute to energy
+  but cannot be contracted directly). The driver extracts the base costs from
+  `objective.weights[:objective.number_of_base_edges]` automatically.
+- Each fuse contracts the base graph by agreement, aggregates *both* base and
+  lifted weights onto the contracted lifted-multicut subproblem (lifted edges
+  whose endpoints land on already-existing contracted base edges fold into
+  them; the rest become new contracted lifted edges), and solves the
+  subproblem with a `LiftedMulticutSolver`.
+- The default sub-solver and warm-start are `LiftedGreedyAdditiveMulticut`.
+  Both `LiftedGreedyAdditiveMulticut` and `LiftedKernighanLinMulticut` are
+  pluggable via `sub_solver=`.
+
+```python
+solver = bic.graph.FusionMoveLiftedMulticut(
+    proposal_generator=bic.graph.WatershedProposalGenerator(
+        sigma=1.0, n_seeds_fraction=0.1, seed=0,
+    ),
+    sub_solver=bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=3),
+    number_of_iterations=10,
+    stop_if_no_improvement=4,
+    number_of_threads=4,
+)
+labels = solver.optimize(objective)
+```
 
 A typical warm-started solve combines greedy and KL:
 

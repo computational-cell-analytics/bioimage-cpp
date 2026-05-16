@@ -7,6 +7,7 @@
 #include "bioimage_cpp/graph/feature_accumulation.hxx"
 #include "bioimage_cpp/graph/lifted_from_affinities.hxx"
 #include "bioimage_cpp/graph/lifted_multicut.hxx"
+#include "bioimage_cpp/graph/lifted_multicut/fusion_move.hxx"
 #include "bioimage_cpp/graph/multicut.hxx"
 #include "bioimage_cpp/graph/multicut/fusion_move.hxx"
 #include "bioimage_cpp/graph/multicut/greedy_additive.hxx"
@@ -579,6 +580,75 @@ UInt64Array multicut_fusion_move(
     return vector_to_uint64_array(result);
 }
 
+UInt64Array lifted_multicut_fusion_move(
+    const Graph &base_graph,
+    const Graph &lifted_graph,
+    ConstDoubleArray weights,
+    const std::uint64_t n_base_edges,
+    ConstUInt64Array initial_labels,
+    std::vector<graph::ProposalGeneratorBase *> proposal_generators,
+    const graph::lifted_multicut::SolverBase *sub_solver,
+    const std::size_t number_of_iterations,
+    const std::size_t stop_if_no_improvement,
+    const std::size_t number_of_threads,
+    const std::size_t number_of_parallel_proposals
+) {
+    if (proposal_generators.empty()) {
+        throw std::invalid_argument("proposal_generators must not be empty");
+    }
+    if (n_base_edges > lifted_graph.number_of_edges()) {
+        throw std::invalid_argument(
+            "n_base_edges must be <= lifted graph number_of_edges"
+        );
+    }
+    auto weight_vector =
+        double_array_to_vector(weights, "edge_weights", lifted_graph.number_of_edges());
+    auto label_vector =
+        uint64_array_to_vector(initial_labels, "initial_labels", base_graph.number_of_nodes());
+
+    // Decompose the user's lifted graph into base + lifted parts for the
+    // Objective constructor (which rebuilds the lifted graph internally). The
+    // overhead is one O(E) walk; the C++ Objective consumes only base costs
+    // and per-lifted-edge (u, v, weight) triples.
+    std::vector<double> base_weights(
+        weight_vector.begin(), weight_vector.begin() + static_cast<std::ptrdiff_t>(n_base_edges)
+    );
+    const auto n_lifted_edges = lifted_graph.number_of_edges() - n_base_edges;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> lifted_uvs;
+    lifted_uvs.reserve(static_cast<std::size_t>(n_lifted_edges));
+    std::vector<double> lifted_weights;
+    lifted_weights.reserve(static_cast<std::size_t>(n_lifted_edges));
+    for (std::uint64_t edge = n_base_edges; edge < lifted_graph.number_of_edges(); ++edge) {
+        const auto uv = lifted_graph.uv(edge);
+        lifted_uvs.emplace_back(uv.first, uv.second);
+        lifted_weights.push_back(weight_vector[static_cast<std::size_t>(edge)]);
+    }
+
+    graph::lifted_multicut::FusionMoveSolver solver(
+        std::move(proposal_generators),
+        sub_solver,
+        number_of_iterations,
+        stop_if_no_improvement,
+        number_of_threads,
+        number_of_parallel_proposals
+    );
+
+    std::vector<std::uint64_t> result;
+    {
+        nb::gil_scoped_release release;
+        graph::lifted_multicut::Objective objective(
+            base_graph,
+            std::move(base_weights),
+            lifted_uvs,
+            lifted_weights,
+            false
+        );
+        objective.set_labels(std::move(label_vector));
+        result = solver.optimize(objective);
+    }
+    return vector_to_uint64_array(result);
+}
+
 template <class T>
 Rag region_adjacency_graph_t(
     LabelArray<T> labels,
@@ -1127,6 +1197,22 @@ void bind_graph(nb::module_ &m) {
         &multicut_fusion_move,
         nb::arg("graph"),
         nb::arg("edge_costs"),
+        nb::arg("initial_labels"),
+        nb::arg("proposal_generators"),
+        nb::arg("sub_solver").none(),
+        nb::arg("number_of_iterations"),
+        nb::arg("stop_if_no_improvement"),
+        nb::arg("number_of_threads"),
+        nb::arg("number_of_parallel_proposals")
+    );
+
+    m.def(
+        "_lifted_multicut_fusion_move",
+        &lifted_multicut_fusion_move,
+        nb::arg("base_graph"),
+        nb::arg("lifted_graph"),
+        nb::arg("edge_weights"),
+        nb::arg("n_base_edges"),
         nb::arg("initial_labels"),
         nb::arg("proposal_generators"),
         nb::arg("sub_solver").none(),
