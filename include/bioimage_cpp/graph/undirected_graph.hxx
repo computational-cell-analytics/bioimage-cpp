@@ -154,36 +154,21 @@ public:
         std::vector<Edge> edges,
         const bool populate_lookup = true
     ) {
-        UndirectedGraph graph(number_of_nodes, static_cast<EdgeId>(edges.size()));
-
-        std::vector<std::size_t> degree(static_cast<std::size_t>(number_of_nodes), 0);
-        for (const auto &edge : edges) {
-            ++degree[static_cast<std::size_t>(edge.first)];
-            ++degree[static_cast<std::size_t>(edge.second)];
-        }
-        for (NodeId node = 0; node < number_of_nodes; ++node) {
-            graph.adjacency_[static_cast<std::size_t>(node)].reserve(
-                degree[static_cast<std::size_t>(node)]
-            );
-        }
-
+        const auto n_edges = static_cast<EdgeId>(edges.size());
+        UndirectedGraph graph(
+            number_of_nodes,
+            n_edges,
+            populate_lookup ? n_edges : 0
+        );
+        graph.edges_ = std::move(edges);
+        graph.rebuild_adjacency_from_edges();
         if (populate_lookup) {
-            graph.edge_lookup_.reserve(edges.size());
-        }
-        for (std::size_t index = 0; index < edges.size(); ++index) {
-            const auto &edge = edges[index];
-            const auto edge_id = static_cast<EdgeId>(index);
-            graph.adjacency_[static_cast<std::size_t>(edge.first)].push_back(
-                Adjacency{edge.second, edge_id}
-            );
-            graph.adjacency_[static_cast<std::size_t>(edge.second)].push_back(
-                Adjacency{edge.first, edge_id}
-            );
-            if (populate_lookup) {
-                graph.edge_lookup_.emplace(edge, edge_id);
+            for (std::size_t index = 0; index < graph.edges_.size(); ++index) {
+                graph.edge_lookup_.emplace(
+                    graph.edges_[index], static_cast<EdgeId>(index)
+                );
             }
         }
-        graph.edges_ = std::move(edges);
         return graph;
     }
 
@@ -246,6 +231,50 @@ protected:
         adjacency_[static_cast<std::size_t>(u)].push_back(Adjacency{v, edge});
         adjacency_[static_cast<std::size_t>(v)].push_back(Adjacency{u, edge});
         return edge;
+    }
+
+    // Mutable access to the underlying edge list for subclasses that emit
+    // edges in bulk. The caller is responsible for re-establishing the
+    // invariants between `edges_` and `adjacency_` (see
+    // `rebuild_adjacency_from_edges`) before exposing the graph to clients.
+    std::vector<Edge> &access_edges() {
+        return edges_;
+    }
+
+    // Bulk-populate `adjacency_` from `edges_`. Assumes `edges_` already
+    // contains every edge in the order the subclass wants its `EdgeId`s
+    // assigned (the index into `edges_` becomes the edge id).
+    //
+    // Computes the exact degree of each node in one pass, reserves that
+    // capacity per `adjacency_[u]`, then fills in a second pass. With
+    // exact capacity reserved up front each `adjacency_[u]` gets a single
+    // allocation of optimal size — no geometric-growth reallocs, no
+    // fragmentation from intermediate buffers. For grid-shaped topologies
+    // where one push_back per axis would otherwise hammer many small
+    // vectors, this is dramatically faster than `insert_new_edge_*`
+    // accumulating both `edges_` and `adjacency_` in lockstep.
+    //
+    // Existing contents of `adjacency_` are discarded.
+    void rebuild_adjacency_from_edges() {
+        std::vector<std::size_t> degree(static_cast<std::size_t>(number_of_nodes_), 0);
+        for (const auto &edge : edges_) {
+            ++degree[static_cast<std::size_t>(edge.first)];
+            ++degree[static_cast<std::size_t>(edge.second)];
+        }
+        for (std::size_t node = 0; node < adjacency_.size(); ++node) {
+            adjacency_[node].clear();
+            adjacency_[node].reserve(degree[node]);
+        }
+        for (std::size_t index = 0; index < edges_.size(); ++index) {
+            const auto &edge = edges_[index];
+            const auto edge_id = static_cast<EdgeId>(index);
+            adjacency_[static_cast<std::size_t>(edge.first)].push_back(
+                Adjacency{edge.second, edge_id}
+            );
+            adjacency_[static_cast<std::size_t>(edge.second)].push_back(
+                Adjacency{edge.first, edge_id}
+            );
+        }
     }
 
     void validate_node(const NodeId node) const {

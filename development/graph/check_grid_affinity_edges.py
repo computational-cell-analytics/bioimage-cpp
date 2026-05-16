@@ -6,8 +6,10 @@ from _grid_affinity_compatibility import (
     add_common_arguments,
     affogato_edges,
     affogato_edges_on_graph,
+    assert_local_offsets_cover_all_edges,
     bioimage_cpp_local,
-    bioimage_cpp_local_on_graph,
+    bioimage_cpp_local_weights_only,
+    bioimage_cpp_local_with_uvs,
     compare_edge_sets,
     load_problem,
     nifty_local,
@@ -22,6 +24,18 @@ from _grid_affinity_compatibility import (
 import numpy as np
 
 
+# Notes on remaining apples-to-apples caveats (left in-code rather than fixed):
+# * affogato's `MWSGridGraph` carries MWS-specific state and is heavier to
+#   construct than a pure undirected grid graph. The "total" timings include
+#   that cost on the affogato side. This isn't a bug in the comparison, it
+#   reflects affogato's intended workload.
+# * nifty / affogato accept the chosen dtype directly (verified separately);
+#   feeding all three libraries the same dtype removes the previous implicit
+#   float32 -> float64 copy that was charged only to bioimage-cpp.
+# * `time_call` does an untimed warm-up call before the measured loop so the
+#   first sample doesn't carry one-shot init costs.
+
+
 def run_check(args: argparse.Namespace) -> None:
     affinities, offsets = load_problem(args.data_prefix)
     if args.ndim == 2:
@@ -33,6 +47,9 @@ def run_check(args: argparse.Namespace) -> None:
             affinities, offsets, zyx_shape=tuple(args.zyx_shape)
         )
     affinities, offsets = select_local_offsets(affinities, offsets)
+    # One conversion to the chosen common dtype, BEFORE any timed work.
+    # bioimage-cpp, nifty, and affogato all consume this same array.
+    affinities = np.ascontiguousarray(affinities, dtype=np.dtype(args.dtype))
 
     bic_timings, (bic_uvs, bic_weights) = time_call(
         lambda: bioimage_cpp_local(affinities, offsets), args.repeats
@@ -49,11 +66,16 @@ def run_check(args: argparse.Namespace) -> None:
     from affogato.segmentation import MWSGridGraph
 
     bic_graph = bic.graph.grid_graph(affinities.shape[1:])
-    bic_affinities = np.ascontiguousarray(affinities, dtype=np.float64)
     nifty_graph = ng.undirectedGridGraph(list(affinities.shape[1:]))
     affogato_graph = MWSGridGraph(list(affinities.shape[1:]))
-    bic_feature_timings, _ = time_call(
-        lambda: bioimage_cpp_local_on_graph(bic_graph, bic_affinities, offsets),
+    # One-shot correctness check, OUTSIDE the timing loop.
+    assert_local_offsets_cover_all_edges(bic_graph, affinities, offsets)
+
+    # Apples-to-apples timing #1: each library returns (uvs, weights) for a
+    # pre-built graph. nifty and affogato bundle uvs in their return value,
+    # bioimage-cpp materializes them via graph.uv_ids().
+    bic_with_uvs_timings, _ = time_call(
+        lambda: bioimage_cpp_local_with_uvs(bic_graph, affinities, offsets),
         args.repeats,
     )
     nifty_feature_timings, _ = time_call(
@@ -62,6 +84,14 @@ def run_check(args: argparse.Namespace) -> None:
     )
     affogato_feature_timings, _ = time_call(
         lambda: affogato_edges_on_graph(affogato_graph, affinities, offsets),
+        args.repeats,
+    )
+    # Apples-to-apples timing #2: bioimage-cpp ONLY computes weights (no
+    # uvs materialization). This isolates the cost of the feature kernel
+    # itself. There is no nifty/affogato equivalent that returns just
+    # weights, so this is reported on its own.
+    bic_weights_only_timings, _ = time_call(
+        lambda: bioimage_cpp_local_weights_only(bic_graph, affinities, offsets),
         args.repeats,
     )
 
@@ -73,7 +103,12 @@ def run_check(args: argparse.Namespace) -> None:
     )
 
     print(f"Grid local affinity edge check ({args.ndim}D)")
-    print(f"affinities shape: {affinities.shape}, offsets: {offsets}")
+    print(
+        f"affinities shape: {affinities.shape}, dtype: {affinities.dtype}, "
+        f"size: {affinities.nbytes / 1e6:.2f} MB, offsets: {len(offsets)}, "
+        f"repeats: {args.repeats}"
+    )
+    print(f"offsets: {offsets}")
     print(
         f"nifty edges: {nifty_summary['number_of_edges']}, "
         f"max abs weight diff: {nifty_summary['max_abs_weight_diff']:.6g}"
@@ -85,20 +120,26 @@ def run_check(args: argparse.Namespace) -> None:
     print_timing("local edges total", "bioimage-cpp", bic_timings, "nifty", nifty_timings)
     print_timing("local edges total", "bioimage-cpp", bic_timings, "affogato", affogato_timings)
     print_timing(
-        "local edges prebuilt",
+        "local edges prebuilt (with uvs)",
         "bioimage-cpp",
-        bic_feature_timings,
+        bic_with_uvs_timings,
         "nifty",
         nifty_feature_timings,
     )
     print_timing(
-        "local edges prebuilt",
+        "local edges prebuilt (with uvs)",
         "bioimage-cpp",
-        bic_feature_timings,
+        bic_with_uvs_timings,
         "affogato",
         affogato_feature_timings,
     )
-    print("prebuilt bioimage-cpp timing excludes float32 -> float64 conversion")
+    # Weights-only kernel timing (no comparator — informational).
+    from statistics import median
+
+    print(
+        "local edges prebuilt (weights only, no uvs materialization) "
+        f"bioimage-cpp median runtime: {median(bic_weights_only_timings):.6f} s"
+    )
 
 
 def main() -> None:

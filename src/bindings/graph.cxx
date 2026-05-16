@@ -52,9 +52,16 @@ using Int64Array = nb::ndarray<nb::numpy, std::int64_t, nb::c_contig>;
 using ConstInt64Array = nb::ndarray<nb::numpy, const std::int64_t, nb::c_contig>;
 using DoubleArray = nb::ndarray<nb::numpy, double, nb::c_contig>;
 using ConstDoubleArray = nb::ndarray<nb::numpy, const double, nb::c_contig>;
+using FloatArray = nb::ndarray<nb::numpy, float, nb::c_contig>;
+using ConstFloatArray = nb::ndarray<nb::numpy, const float, nb::c_contig>;
 
 template <class T>
 using LabelArray = nb::ndarray<nb::numpy, const T, nb::c_contig>;
+
+template <class T>
+using FloatingArray = nb::ndarray<nb::numpy, T, nb::c_contig>;
+template <class T>
+using ConstFloatingArray = nb::ndarray<nb::numpy, const T, nb::c_contig>;
 
 void require_uv_array(const ConstUInt64Array &uvs, const char *argument_name) {
     if (uvs.ndim() != 2 || uvs.shape(1) != 2) {
@@ -102,6 +109,33 @@ DoubleArray make_double_array(const std::vector<std::size_t> &shape) {
     auto *data = new double[size]();
     nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<double *>(p); });
     return DoubleArray(data, shape.size(), shape.data(), owner);
+}
+
+template <class T>
+FloatingArray<T> make_floating_array(const std::vector<std::size_t> &shape) {
+    std::size_t size = 1;
+    for (const auto axis_size : shape) {
+        size *= axis_size;
+    }
+    auto *data = new T[size]();
+    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
+    return FloatingArray<T>(data, shape.size(), shape.data(), owner);
+}
+
+template <class T>
+FloatingArray<T> vector_to_floating_array(const std::vector<T> &values) {
+    auto result = make_floating_array<T>({values.size()});
+    std::copy(values.begin(), values.end(), result.data());
+    return result;
+}
+
+template <class T>
+std::vector<std::ptrdiff_t> const_floating_shape(ConstFloatingArray<T> array) {
+    std::vector<std::ptrdiff_t> shape(array.ndim());
+    for (std::size_t axis = 0; axis < array.ndim(); ++axis) {
+        shape[axis] = static_cast<std::ptrdiff_t>(array.shape(axis));
+    }
+    return shape;
 }
 
 std::vector<std::ptrdiff_t> const_double_shape(ConstDoubleArray array) {
@@ -223,42 +257,42 @@ std::int64_t grid_offset_target(
     return static_cast<std::int64_t>(target);
 }
 
-template <std::size_t D>
-DoubleArray grid_boundary_features_t(
+template <class T, std::size_t D>
+FloatingArray<T> grid_boundary_features_t(
     const graph::GridGraph<D> &graph,
-    ConstDoubleArray boundary_map
+    ConstFloatingArray<T> boundary_map
 ) {
-    auto result = make_double_array({static_cast<std::size_t>(graph.number_of_edges())});
-    ConstArrayView<double> boundary_view{
+    auto result = make_floating_array<T>({static_cast<std::size_t>(graph.number_of_edges())});
+    ConstArrayView<T> boundary_view{
         boundary_map.data(),
-        const_double_shape(boundary_map),
+        const_floating_shape<T>(boundary_map),
         {},
     };
-    ArrayView<double> out_view{
+    ArrayView<T> out_view{
         result.data(),
         {static_cast<std::ptrdiff_t>(graph.number_of_edges())},
         {},
     };
 
     nb::gil_scoped_release release;
-    graph::grid_boundary_features<D>(graph, boundary_view, out_view);
+    graph::grid_boundary_features<T, D>(graph, boundary_view, out_view);
     return result;
 }
 
-template <std::size_t D>
+template <class T, std::size_t D>
 nb::tuple grid_affinity_features_t(
     const graph::GridGraph<D> &graph,
-    ConstDoubleArray affinities,
+    ConstFloatingArray<T> affinities,
     const std::vector<std::vector<std::ptrdiff_t>> &offsets
 ) {
-    auto weights = make_double_array({static_cast<std::size_t>(graph.number_of_edges())});
+    auto weights = make_floating_array<T>({static_cast<std::size_t>(graph.number_of_edges())});
     auto valid_edges = make_uint8_array({static_cast<std::size_t>(graph.number_of_edges())});
-    ConstArrayView<double> affinities_view{
+    ConstArrayView<T> affinities_view{
         affinities.data(),
-        const_double_shape(affinities),
+        const_floating_shape<T>(affinities),
         {},
     };
-    ArrayView<double> weights_view{
+    ArrayView<T> weights_view{
         weights.data(),
         {static_cast<std::ptrdiff_t>(graph.number_of_edges())},
         {},
@@ -271,38 +305,38 @@ nb::tuple grid_affinity_features_t(
 
     {
         nb::gil_scoped_release release;
-        graph::grid_local_affinity_features<D>(
+        graph::grid_local_affinity_features<T, D>(
             graph, affinities_view, offsets, weights_view, valid_view
         );
     }
     return nb::make_tuple(weights, valid_edges);
 }
 
-template <std::size_t D>
+template <class T, std::size_t D>
 nb::tuple grid_affinity_features_with_lifted_t(
     const graph::GridGraph<D> &graph,
-    ConstDoubleArray affinities,
+    ConstFloatingArray<T> affinities,
     const std::vector<std::vector<std::ptrdiff_t>> &offsets
 ) {
-    ConstArrayView<double> affinities_view{
+    ConstArrayView<T> affinities_view{
         affinities.data(),
-        const_double_shape(affinities),
+        const_floating_shape<T>(affinities),
         {},
     };
 
-    graph::GridLiftedAffinityFeatures features;
+    graph::GridLiftedAffinityFeatures<T> features;
     {
         nb::gil_scoped_release release;
-        features = graph::grid_affinity_features_with_lifted<D>(
+        features = graph::grid_affinity_features_with_lifted<T, D>(
             graph, affinities_view, offsets
         );
     }
 
     return nb::make_tuple(
-        vector_to_double_array(features.local_weights),
+        vector_to_floating_array<T>(features.local_weights),
         vector_to_uint8_array(features.valid_local_edges),
         edges_to_uv_array(features.lifted_uvs),
-        vector_to_double_array(features.lifted_weights),
+        vector_to_floating_array<T>(features.lifted_weights),
         vector_to_uint64_array(features.lifted_offset_ids)
     );
 }
@@ -1156,45 +1190,55 @@ void bind_graph(nb::module_ &m) {
     nb::class_<Rag, Graph>(m, "RegionAdjacencyGraph")
         .def_prop_ro("shape", &Rag::shape);
 
-    m.def(
-        "_grid_boundary_features_2d",
-        &grid_boundary_features_t<2>,
-        nb::arg("graph"),
-        nb::arg("boundary_map")
+    const auto register_grid_boundary = [&m]<class T, std::size_t D>(const char *name) {
+        m.def(
+            name,
+            &grid_boundary_features_t<T, D>,
+            nb::arg("graph"),
+            nb::arg("boundary_map")
+        );
+    };
+    register_grid_boundary.operator()<float, 2>("_grid_boundary_features_2d_float32");
+    register_grid_boundary.operator()<double, 2>("_grid_boundary_features_2d_float64");
+    register_grid_boundary.operator()<float, 3>("_grid_boundary_features_3d_float32");
+    register_grid_boundary.operator()<double, 3>("_grid_boundary_features_3d_float64");
+
+    const auto register_grid_affinity = [&m]<class T, std::size_t D>(const char *name) {
+        m.def(
+            name,
+            &grid_affinity_features_t<T, D>,
+            nb::arg("graph"),
+            nb::arg("affinities"),
+            nb::arg("offsets")
+        );
+    };
+    register_grid_affinity.operator()<float, 2>("_grid_affinity_features_2d_float32");
+    register_grid_affinity.operator()<double, 2>("_grid_affinity_features_2d_float64");
+    register_grid_affinity.operator()<float, 3>("_grid_affinity_features_3d_float32");
+    register_grid_affinity.operator()<double, 3>("_grid_affinity_features_3d_float64");
+
+    const auto register_grid_affinity_lifted = [&m]<class T, std::size_t D>(
+        const char *name
+    ) {
+        m.def(
+            name,
+            &grid_affinity_features_with_lifted_t<T, D>,
+            nb::arg("graph"),
+            nb::arg("affinities"),
+            nb::arg("offsets")
+        );
+    };
+    register_grid_affinity_lifted.operator()<float, 2>(
+        "_grid_affinity_features_with_lifted_2d_float32"
     );
-    m.def(
-        "_grid_boundary_features_3d",
-        &grid_boundary_features_t<3>,
-        nb::arg("graph"),
-        nb::arg("boundary_map")
+    register_grid_affinity_lifted.operator()<double, 2>(
+        "_grid_affinity_features_with_lifted_2d_float64"
     );
-    m.def(
-        "_grid_affinity_features_2d",
-        &grid_affinity_features_t<2>,
-        nb::arg("graph"),
-        nb::arg("affinities"),
-        nb::arg("offsets")
+    register_grid_affinity_lifted.operator()<float, 3>(
+        "_grid_affinity_features_with_lifted_3d_float32"
     );
-    m.def(
-        "_grid_affinity_features_3d",
-        &grid_affinity_features_t<3>,
-        nb::arg("graph"),
-        nb::arg("affinities"),
-        nb::arg("offsets")
-    );
-    m.def(
-        "_grid_affinity_features_with_lifted_2d",
-        &grid_affinity_features_with_lifted_t<2>,
-        nb::arg("graph"),
-        nb::arg("affinities"),
-        nb::arg("offsets")
-    );
-    m.def(
-        "_grid_affinity_features_with_lifted_3d",
-        &grid_affinity_features_with_lifted_t<3>,
-        nb::arg("graph"),
-        nb::arg("affinities"),
-        nb::arg("offsets")
+    register_grid_affinity_lifted.operator()<double, 3>(
+        "_grid_affinity_features_with_lifted_3d_float64"
     );
 
     m.def(

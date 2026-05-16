@@ -70,6 +70,12 @@ def select_mixed_offsets(
 
 
 def time_call(function: Callable[[], tuple[np.ndarray, np.ndarray]], repeats: int):
+    # One untimed warm-up before the measured loop. The first call typically
+    # pays for code-page faults and one-time library initialization
+    # (nanobind tuple shapes, numpy ufunc caches, ...) that aren't part of
+    # the steady-state cost we care about. Without warm-up these costs leak
+    # into the first sample and skew the median for low `repeats` values.
+    function()
     timings = []
     result = None
     for _ in range(repeats):
@@ -104,15 +110,34 @@ def bioimage_cpp_local(affinities: np.ndarray, offsets: list[tuple[int, ...]]):
     import bioimage_cpp as bic
 
     graph = bic.graph.grid_graph(affinities.shape[1:])
-    return bioimage_cpp_local_on_graph(graph, affinities, offsets)
+    weights, _ = bic.graph.grid_affinity_features(graph, affinities, offsets)
+    return graph.uv_ids(), weights
 
 
-def bioimage_cpp_local_on_graph(graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]):
+def bioimage_cpp_local_weights_only(
+    graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]
+):
+    """Compute edge weights only — no (uvs, weights) materialization.
+
+    This isolates the cost of the feature kernel from the cost of returning
+    the canonical uv_ids array. Use this when comparing against libraries
+    that already cache uvs in the graph object.
+    """
     import bioimage_cpp as bic
 
-    weights, valid_edges = bic.graph.grid_affinity_features(graph, affinities, offsets)
-    if not np.all(valid_edges):
-        raise AssertionError("local offsets did not cover all grid edges")
+    weights, _ = bic.graph.grid_affinity_features(graph, affinities, offsets)
+    return weights
+
+
+def bioimage_cpp_local_with_uvs(
+    graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]
+):
+    """Compute weights AND materialize uvs — apples-to-apples with nifty's
+    ``affinitiesToEdgeMapWithOffsets`` and affogato's
+    ``compute_nh_and_weights``, both of which return uvs in their output."""
+    import bioimage_cpp as bic
+
+    weights, _ = bic.graph.grid_affinity_features(graph, affinities, offsets)
     return graph.uv_ids(), weights
 
 
@@ -120,18 +145,43 @@ def bioimage_cpp_lifted(affinities: np.ndarray, offsets: list[tuple[int, ...]]):
     import bioimage_cpp as bic
 
     graph = bic.graph.grid_graph(affinities.shape[1:])
-    return bioimage_cpp_lifted_on_graph(graph, affinities, offsets)
-
-
-def bioimage_cpp_lifted_on_graph(graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]):
-    import bioimage_cpp as bic
-
-    local_weights, valid_edges, lifted_uvs, lifted_weights, _ = (
+    local_weights, _, lifted_uvs, lifted_weights, _ = (
         bic.graph.grid_affinity_features_with_lifted(graph, affinities, offsets)
     )
+    return graph, graph.uv_ids(), local_weights, lifted_uvs, lifted_weights
+
+
+def bioimage_cpp_lifted_features_only(
+    graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]
+):
+    """Lifted features without graph.uv_ids() — see the local variant."""
+    import bioimage_cpp as bic
+
+    local_weights, _, lifted_uvs, lifted_weights, _ = (
+        bic.graph.grid_affinity_features_with_lifted(graph, affinities, offsets)
+    )
+    return local_weights, lifted_uvs, lifted_weights
+
+
+def bioimage_cpp_lifted_with_uvs(
+    graph, affinities: np.ndarray, offsets: list[tuple[int, ...]]
+):
+    """Lifted features WITH local uvs (apples-to-apples with affogato)."""
+    import bioimage_cpp as bic
+
+    local_weights, _, lifted_uvs, lifted_weights, _ = (
+        bic.graph.grid_affinity_features_with_lifted(graph, affinities, offsets)
+    )
+    return graph.uv_ids(), local_weights, lifted_uvs, lifted_weights
+
+
+def assert_local_offsets_cover_all_edges(graph, affinities, offsets) -> None:
+    """One-shot correctness check called outside of the timing loop."""
+    import bioimage_cpp as bic
+
+    _, valid_edges = bic.graph.grid_affinity_features(graph, affinities, offsets)
     if not np.all(valid_edges):
         raise AssertionError("local offsets did not cover all grid edges")
-    return graph, graph.uv_ids(), local_weights, lifted_uvs, lifted_weights
 
 
 def nifty_local(affinities: np.ndarray, offsets: list[tuple[int, ...]]):
@@ -206,7 +256,19 @@ def print_timing(name: str, first_name: str, first_timings: list[float],
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ndim", type=int, choices=(2, 3), default=2)
     parser.add_argument("--data-prefix", type=Path, default=DEFAULT_DATA_PREFIX)
-    parser.add_argument("--repeats", type=int, default=3)
+    # Default bumped from 3 to 5 — median of 3 is the middle sample and is
+    # noisy if anything (GC, cache eviction) lands inside one of the three
+    # runs. With `time_call` doing one warm-up before this, 5 samples gives
+    # a usable median without much added cost.
+    parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--z", type=int, default=20)
     parser.add_argument("--yx-shape", type=int, nargs=2, default=(512, 512))
     parser.add_argument("--zyx-shape", type=int, nargs=3, default=(16, 512, 512))
+    # Affinity dtype that every library receives. nifty and affogato accept
+    # both float32 and float64 at near-identical speed (verified separately),
+    # and bioimage-cpp now templates on the value type, so feeding all three
+    # the same dtype removes the previous implicit float32 -> float64 copy
+    # that was charged only to bioimage-cpp.
+    parser.add_argument(
+        "--dtype", choices=("float32", "float64"), default="float32"
+    )

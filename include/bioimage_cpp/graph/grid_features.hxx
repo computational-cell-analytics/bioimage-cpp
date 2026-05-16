@@ -70,10 +70,10 @@ void require_graph_shape(
     }
 }
 
-template <std::size_t D>
+template <class T, std::size_t D>
 void require_affinity_shape(
     const GridGraph<D> &graph,
-    const ConstArrayView<double> &affinities,
+    const ConstArrayView<T> &affinities,
     const std::vector<std::vector<std::ptrdiff_t>> &offsets
 ) {
     if (affinities.ndim() != static_cast<std::ptrdiff_t>(D + 1)) {
@@ -229,11 +229,11 @@ std::uint64_t local_edge_id_from_source_coordinate(
 
 } // namespace detail_grid_features
 
-template <std::size_t D>
+template <class T, std::size_t D>
 void grid_boundary_features(
     const GridGraph<D> &graph,
-    const ConstArrayView<double> &boundary_map,
-    const ArrayView<double> &out
+    const ConstArrayView<T> &boundary_map,
+    const ArrayView<T> &out
 ) {
     detail_grid_features::require_graph_shape(graph, boundary_map.shape, "boundary_map");
     if (out.shape != std::vector<std::ptrdiff_t>{
@@ -244,19 +244,20 @@ void grid_boundary_features(
     const auto &uv_ids = graph.uv_ids();
     for (std::size_t edge = 0; edge < uv_ids.size(); ++edge) {
         const auto &uv = uv_ids[edge];
-        out.data[edge] = 0.5 * (boundary_map.data[uv.first] + boundary_map.data[uv.second]);
+        out.data[edge] = static_cast<T>(0.5) *
+                         (boundary_map.data[uv.first] + boundary_map.data[uv.second]);
     }
 }
 
-template <std::size_t D>
+template <class T, std::size_t D>
 void grid_local_affinity_features(
     const GridGraph<D> &graph,
-    const ConstArrayView<double> &affinities,
+    const ConstArrayView<T> &affinities,
     const std::vector<std::vector<std::ptrdiff_t>> &offsets,
-    const ArrayView<double> &weights,
+    const ArrayView<T> &weights,
     const ArrayView<std::uint8_t> &valid_edges
 ) {
-    detail_grid_features::require_affinity_shape(graph, affinities, offsets);
+    detail_grid_features::require_affinity_shape<T, D>(graph, affinities, offsets);
     if (weights.shape != std::vector<std::ptrdiff_t>{
             static_cast<std::ptrdiff_t>(graph.number_of_edges())}) {
         throw std::invalid_argument("weights shape must be (number_of_edges,)");
@@ -272,7 +273,7 @@ void grid_local_affinity_features(
 
     const auto number_of_nodes = graph.number_of_nodes();
     for (std::uint64_t edge = 0; edge < graph.number_of_edges(); ++edge) {
-        weights.data[edge] = 0.0;
+        weights.data[edge] = static_cast<T>(0);
         valid_edges.data[edge] = 0;
     }
 
@@ -309,26 +310,27 @@ void grid_local_affinity_features(
     }
 }
 
+template <class T>
 struct GridLiftedAffinityFeatures {
-    std::vector<double> local_weights;
+    std::vector<T> local_weights;
     std::vector<std::uint8_t> valid_local_edges;
     std::vector<bioimage_cpp::detail::Edge> lifted_uvs;
-    std::vector<double> lifted_weights;
+    std::vector<T> lifted_weights;
     std::vector<std::uint64_t> lifted_offset_ids;
 };
 
-template <std::size_t D>
-GridLiftedAffinityFeatures grid_affinity_features_with_lifted(
+template <class T, std::size_t D>
+GridLiftedAffinityFeatures<T> grid_affinity_features_with_lifted(
     const GridGraph<D> &graph,
-    const ConstArrayView<double> &affinities,
+    const ConstArrayView<T> &affinities,
     const std::vector<std::vector<std::ptrdiff_t>> &offsets
 ) {
-    detail_grid_features::require_affinity_shape(graph, affinities, offsets);
+    detail_grid_features::require_affinity_shape<T, D>(graph, affinities, offsets);
     detail_grid_features::check_no_negated_long_range_offsets<D>(offsets);
 
     const auto number_of_nodes = graph.number_of_nodes();
-    GridLiftedAffinityFeatures result;
-    result.local_weights.assign(static_cast<std::size_t>(graph.number_of_edges()), 0.0);
+    GridLiftedAffinityFeatures<T> result;
+    result.local_weights.assign(static_cast<std::size_t>(graph.number_of_edges()), static_cast<T>(0));
     result.valid_local_edges.assign(static_cast<std::size_t>(graph.number_of_edges()), 0);
 
     std::uint64_t lifted_capacity = 0;

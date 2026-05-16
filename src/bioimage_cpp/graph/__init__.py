@@ -324,8 +324,15 @@ def _grid_shape(graph) -> tuple[int, ...]:
     return tuple(int(size) for size in graph.shape)
 
 
+_GRID_FLOAT_DTYPES = (np.dtype(np.float32), np.dtype(np.float64))
+
+
 def _as_grid_data(values, graph, name: str, *, with_channels: bool) -> np.ndarray:
-    array = np.asarray(values, dtype=np.float64)
+    array = np.asarray(values)
+    if array.dtype not in _GRID_FLOAT_DTYPES:
+        # Integer / non-float input falls back to float64 — the previous default.
+        # float32 and float64 inputs are passed through end-to-end, no copy.
+        array = array.astype(np.float64)
     shape = _grid_shape(graph)
     if with_channels:
         if array.ndim != len(shape) + 1 or array.shape[1:] != shape:
@@ -355,19 +362,47 @@ def _normalize_grid_offsets(offsets, ndim: int, n_channels: int) -> list[tuple[i
     return normalized
 
 
+def _grid_dtype_suffix(array: np.ndarray) -> str:
+    if array.dtype == np.float32:
+        return "float32"
+    return "float64"
+
+
+_GRID_BOUNDARY_DISPATCH = {
+    (2, "float32"): _core._grid_boundary_features_2d_float32,
+    (2, "float64"): _core._grid_boundary_features_2d_float64,
+    (3, "float32"): _core._grid_boundary_features_3d_float32,
+    (3, "float64"): _core._grid_boundary_features_3d_float64,
+}
+_GRID_AFFINITY_DISPATCH = {
+    (2, "float32"): _core._grid_affinity_features_2d_float32,
+    (2, "float64"): _core._grid_affinity_features_2d_float64,
+    (3, "float32"): _core._grid_affinity_features_3d_float32,
+    (3, "float64"): _core._grid_affinity_features_3d_float64,
+}
+_GRID_AFFINITY_LIFTED_DISPATCH = {
+    (2, "float32"): _core._grid_affinity_features_with_lifted_2d_float32,
+    (2, "float64"): _core._grid_affinity_features_with_lifted_2d_float64,
+    (3, "float32"): _core._grid_affinity_features_with_lifted_3d_float32,
+    (3, "float64"): _core._grid_affinity_features_with_lifted_3d_float64,
+}
+
+
 def grid_boundary_features(graph, boundary_map) -> np.ndarray:
     """Compute scalar nearest-neighbor grid edge weights from a boundary map.
 
-    The output is a 1D ``float64`` array aligned to ``graph.edges()``.
-    Each edge receives the average of the two endpoint boundary-map values.
+    The output is a 1D array aligned to ``graph.edges()``. Output dtype matches
+    the input: ``float32`` and ``float64`` inputs are processed without copying,
+    other dtypes are promoted to ``float64``. Each edge receives the average of
+    the two endpoint boundary-map values.
     """
-    _grid_ndim(graph)
+    ndim = _grid_ndim(graph)
     boundary_array = _as_grid_data(
         boundary_map, graph, "boundary_map", with_channels=False
     )
-    if isinstance(graph, GridGraph2D):
-        return _core._grid_boundary_features_2d(graph, boundary_array)
-    return _core._grid_boundary_features_3d(graph, boundary_array)
+    return _GRID_BOUNDARY_DISPATCH[(ndim, _grid_dtype_suffix(boundary_array))](
+        graph, boundary_array
+    )
 
 
 def grid_affinity_features(graph, affinities, offsets) -> tuple[np.ndarray, np.ndarray]:
@@ -375,7 +410,9 @@ def grid_affinity_features(graph, affinities, offsets) -> tuple[np.ndarray, np.n
 
     Only nearest-neighbor offsets with L1 norm 1 are accepted. The returned
     tuple is ``(edge_weights, valid_edges)``, both aligned to ``graph.edges()``.
-    ``valid_edges`` is boolean and marks local graph edges covered by offsets.
+    ``edge_weights`` has the same dtype as ``affinities`` (``float32`` or
+    ``float64``; other dtypes are promoted to ``float64``). ``valid_edges`` is
+    boolean and marks local graph edges covered by offsets.
     """
     ndim = _grid_ndim(graph)
     affinity_array = _as_grid_data(
@@ -384,14 +421,9 @@ def grid_affinity_features(graph, affinities, offsets) -> tuple[np.ndarray, np.n
     normalized_offsets = _normalize_grid_offsets(
         offsets, ndim, int(affinity_array.shape[0])
     )
-    if isinstance(graph, GridGraph2D):
-        weights, valid = _core._grid_affinity_features_2d(
-            graph, affinity_array, normalized_offsets
-        )
-    else:
-        weights, valid = _core._grid_affinity_features_3d(
-            graph, affinity_array, normalized_offsets
-        )
+    weights, valid = _GRID_AFFINITY_DISPATCH[
+        (ndim, _grid_dtype_suffix(affinity_array))
+    ](graph, affinity_array, normalized_offsets)
     return weights, valid.astype(bool, copy=False)
 
 
@@ -405,7 +437,9 @@ def grid_affinity_features_with_lifted(
     Returns ``(local_weights, valid_local_edges, lifted_uvs, lifted_weights,
     lifted_offset_ids)``. Local arrays are aligned to ``graph.edges()``.
     Long-range arrays have one row/value per valid offset hit and are suitable
-    for lifted multicut or mutex-watershed style callers.
+    for lifted multicut or mutex-watershed style callers. Weight arrays share
+    the dtype of ``affinities`` (``float32`` or ``float64``; other dtypes are
+    promoted to ``float64``).
     """
     ndim = _grid_ndim(graph)
     affinity_array = _as_grid_data(
@@ -414,18 +448,11 @@ def grid_affinity_features_with_lifted(
     normalized_offsets = _normalize_grid_offsets(
         offsets, ndim, int(affinity_array.shape[0])
     )
-    if isinstance(graph, GridGraph2D):
-        local_weights, valid, lifted_uvs, lifted_weights, lifted_offset_ids = (
-            _core._grid_affinity_features_with_lifted_2d(
-                graph, affinity_array, normalized_offsets
-            )
-        )
-    else:
-        local_weights, valid, lifted_uvs, lifted_weights, lifted_offset_ids = (
-            _core._grid_affinity_features_with_lifted_3d(
-                graph, affinity_array, normalized_offsets
-            )
-        )
+    local_weights, valid, lifted_uvs, lifted_weights, lifted_offset_ids = (
+        _GRID_AFFINITY_LIFTED_DISPATCH[
+            (ndim, _grid_dtype_suffix(affinity_array))
+        ](graph, affinity_array, normalized_offsets)
+    )
     return (
         local_weights,
         valid.astype(bool, copy=False),

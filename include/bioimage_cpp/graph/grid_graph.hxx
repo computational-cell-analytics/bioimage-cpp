@@ -314,17 +314,26 @@ private:
     }
 
     void build_edges() {
+        // Phase 1: emit every edge into `edges_` in canonical order
+        // (axis-major, C-order within each axis). Sequential `emplace_back`
+        // into a single pre-reserved vector is cache-friendly. `edges_` was
+        // already reserved by the `UndirectedGraph` ctor.
+        auto &edges = access_edges();
         for (std::size_t axis = 0; axis < D; ++axis) {
             auto pivot_shape = shape_;
             --pivot_shape[axis];
             const auto axis_step = strides_[axis];
             enumerate_subshape_in_c_order<0>(
                 pivot_shape, strides_, 0,
-                [this, axis_step](const std::uint64_t u) {
-                    insert_new_edge_without_lookup(u, u + axis_step);
+                [&edges, axis_step](const std::uint64_t u) {
+                    edges.emplace_back(u, u + axis_step);
                 }
             );
         }
+        // Phase 2: fill adjacency in bulk — exact-size reserve per node,
+        // no per-edge geometric-growth reallocs across millions of small
+        // adjacency vectors. This is the dominant win on large grids.
+        rebuild_adjacency_from_edges();
     }
 
     Coordinate shape_{};
