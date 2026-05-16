@@ -5,6 +5,8 @@
 #include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/edge_weighted_watershed.hxx"
 #include "bioimage_cpp/graph/feature_accumulation.hxx"
+#include "bioimage_cpp/graph/grid_features.hxx"
+#include "bioimage_cpp/graph/grid_graph.hxx"
 #include "bioimage_cpp/graph/lifted_from_affinities.hxx"
 #include "bioimage_cpp/graph/lifted_multicut.hxx"
 #include "bioimage_cpp/graph/multicut.hxx"
@@ -39,11 +41,15 @@ namespace bioimage_cpp::bindings {
 namespace {
 
 using Graph = graph::UndirectedGraph;
+using GridGraph2D = graph::GridGraph<2>;
+using GridGraph3D = graph::GridGraph<3>;
 using Rag = graph::RegionAdjacencyGraph;
+using UInt8Array = nb::ndarray<nb::numpy, std::uint8_t, nb::c_contig>;
 using UInt64Array = nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig>;
 using ConstUInt8Array = nb::ndarray<nb::numpy, const std::uint8_t, nb::c_contig>;
 using ConstUInt64Array = nb::ndarray<nb::numpy, const std::uint64_t, nb::c_contig>;
 using Int64Array = nb::ndarray<nb::numpy, std::int64_t, nb::c_contig>;
+using ConstInt64Array = nb::ndarray<nb::numpy, const std::int64_t, nb::c_contig>;
 using DoubleArray = nb::ndarray<nb::numpy, double, nb::c_contig>;
 using ConstDoubleArray = nb::ndarray<nb::numpy, const double, nb::c_contig>;
 
@@ -68,6 +74,16 @@ UInt64Array make_uint64_array(const std::vector<std::size_t> &shape) {
     return UInt64Array(data, shape.size(), shape.data(), owner);
 }
 
+UInt8Array make_uint8_array(const std::vector<std::size_t> &shape) {
+    std::size_t size = 1;
+    for (const auto axis_size : shape) {
+        size *= axis_size;
+    }
+    auto *data = new std::uint8_t[size]();
+    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<std::uint8_t *>(p); });
+    return UInt8Array(data, shape.size(), shape.data(), owner);
+}
+
 Int64Array make_int64_array(const std::vector<std::size_t> &shape) {
     std::size_t size = 1;
     for (const auto axis_size : shape) {
@@ -88,10 +104,207 @@ DoubleArray make_double_array(const std::vector<std::size_t> &shape) {
     return DoubleArray(data, shape.size(), shape.data(), owner);
 }
 
+std::vector<std::ptrdiff_t> const_double_shape(ConstDoubleArray array) {
+    std::vector<std::ptrdiff_t> shape(array.ndim());
+    for (std::size_t axis = 0; axis < array.ndim(); ++axis) {
+        shape[axis] = static_cast<std::ptrdiff_t>(array.shape(axis));
+    }
+    return shape;
+}
+
 UInt64Array vector_to_uint64_array(const std::vector<std::uint64_t> &values) {
     auto result = make_uint64_array({values.size()});
     std::copy(values.begin(), values.end(), result.data());
     return result;
+}
+
+UInt8Array vector_to_uint8_array(const std::vector<std::uint8_t> &values) {
+    auto result = make_uint8_array({values.size()});
+    std::copy(values.begin(), values.end(), result.data());
+    return result;
+}
+
+DoubleArray vector_to_double_array(const std::vector<double> &values) {
+    auto result = make_double_array({values.size()});
+    std::copy(values.begin(), values.end(), result.data());
+    return result;
+}
+
+UInt64Array edges_to_uv_array(const std::vector<bioimage_cpp::detail::Edge> &edges) {
+    auto result = make_uint64_array({edges.size(), 2});
+    auto *data = result.data();
+    for (std::size_t index = 0; index < edges.size(); ++index) {
+        data[2 * index] = edges[index].first;
+        data[2 * index + 1] = edges[index].second;
+    }
+    return result;
+}
+
+template <std::size_t D>
+std::vector<std::uint64_t> coordinate_to_vector(
+    const typename graph::GridGraph<D>::Coordinate &coordinate
+) {
+    return std::vector<std::uint64_t>(coordinate.begin(), coordinate.end());
+}
+
+template <std::size_t D>
+typename graph::GridGraph<D>::Coordinate coordinate_from_array(
+    ConstUInt64Array coordinate,
+    const char *argument_name
+) {
+    if (coordinate.ndim() != 1 || coordinate.shape(0) != D) {
+        throw std::invalid_argument(
+            std::string(argument_name) + " must be a 1D uint64 array of length " +
+            std::to_string(D)
+        );
+    }
+    typename graph::GridGraph<D>::Coordinate result{};
+    std::copy(coordinate.data(), coordinate.data() + D, result.begin());
+    return result;
+}
+
+template <std::size_t D>
+std::array<std::int64_t, D> offset_from_array(
+    ConstInt64Array offset,
+    const char *argument_name
+) {
+    if (offset.ndim() != 1 || offset.shape(0) != D) {
+        throw std::invalid_argument(
+            std::string(argument_name) + " must be a 1D int64 array of length " +
+            std::to_string(D)
+        );
+    }
+    std::array<std::int64_t, D> result{};
+    std::copy(offset.data(), offset.data() + D, result.begin());
+    return result;
+}
+
+template <std::size_t D>
+std::uint64_t grid_node_id(
+    const graph::GridGraph<D> &graph,
+    ConstUInt64Array coordinate
+) {
+    return graph.node_id(coordinate_from_array<D>(coordinate, "coordinate"));
+}
+
+template <std::size_t D>
+UInt64Array grid_coordinates(const graph::GridGraph<D> &graph, const std::uint64_t node) {
+    return vector_to_uint64_array(coordinate_to_vector<D>(graph.coordinates(node)));
+}
+
+template <std::size_t D>
+std::vector<std::uint64_t> grid_shape(const graph::GridGraph<D> &graph) {
+    return coordinate_to_vector<D>(graph.shape());
+}
+
+template <std::size_t D>
+std::vector<std::uint64_t> grid_strides(const graph::GridGraph<D> &graph) {
+    return coordinate_to_vector<D>(graph.strides());
+}
+
+template <std::size_t D>
+UInt64Array grid_edge_coordinates(
+    const graph::GridGraph<D> &graph,
+    const std::uint64_t edge
+) {
+    return vector_to_uint64_array(coordinate_to_vector<D>(graph.edge_coordinates(edge).first));
+}
+
+template <std::size_t D>
+std::int64_t grid_offset_target(
+    const graph::GridGraph<D> &graph,
+    const std::uint64_t node,
+    ConstInt64Array offset
+) {
+    std::uint64_t target = 0;
+    if (!graph.valid_offset_target(node, offset_from_array<D>(offset, "offset"), target)) {
+        return -1;
+    }
+    return static_cast<std::int64_t>(target);
+}
+
+template <std::size_t D>
+DoubleArray grid_boundary_features_t(
+    const graph::GridGraph<D> &graph,
+    ConstDoubleArray boundary_map
+) {
+    auto result = make_double_array({static_cast<std::size_t>(graph.number_of_edges())});
+    ConstArrayView<double> boundary_view{
+        boundary_map.data(),
+        const_double_shape(boundary_map),
+        {},
+    };
+    ArrayView<double> out_view{
+        result.data(),
+        {static_cast<std::ptrdiff_t>(graph.number_of_edges())},
+        {},
+    };
+
+    nb::gil_scoped_release release;
+    graph::grid_boundary_features<D>(graph, boundary_view, out_view);
+    return result;
+}
+
+template <std::size_t D>
+nb::tuple grid_affinity_features_t(
+    const graph::GridGraph<D> &graph,
+    ConstDoubleArray affinities,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets
+) {
+    auto weights = make_double_array({static_cast<std::size_t>(graph.number_of_edges())});
+    auto valid_edges = make_uint8_array({static_cast<std::size_t>(graph.number_of_edges())});
+    ConstArrayView<double> affinities_view{
+        affinities.data(),
+        const_double_shape(affinities),
+        {},
+    };
+    ArrayView<double> weights_view{
+        weights.data(),
+        {static_cast<std::ptrdiff_t>(graph.number_of_edges())},
+        {},
+    };
+    ArrayView<std::uint8_t> valid_view{
+        valid_edges.data(),
+        {static_cast<std::ptrdiff_t>(graph.number_of_edges())},
+        {},
+    };
+
+    {
+        nb::gil_scoped_release release;
+        graph::grid_local_affinity_features<D>(
+            graph, affinities_view, offsets, weights_view, valid_view
+        );
+    }
+    return nb::make_tuple(weights, valid_edges);
+}
+
+template <std::size_t D>
+nb::tuple grid_affinity_features_with_lifted_t(
+    const graph::GridGraph<D> &graph,
+    ConstDoubleArray affinities,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets
+) {
+    ConstArrayView<double> affinities_view{
+        affinities.data(),
+        const_double_shape(affinities),
+        {},
+    };
+
+    graph::GridLiftedAffinityFeatures features;
+    {
+        nb::gil_scoped_release release;
+        features = graph::grid_affinity_features_with_lifted<D>(
+            graph, affinities_view, offsets
+        );
+    }
+
+    return nb::make_tuple(
+        vector_to_double_array(features.local_weights),
+        vector_to_uint8_array(features.valid_local_edges),
+        edges_to_uv_array(features.lifted_uvs),
+        vector_to_double_array(features.lifted_weights),
+        vector_to_uint64_array(features.lifted_offset_ids)
+    );
 }
 
 std::vector<double> double_array_to_vector(
@@ -908,8 +1121,81 @@ void bind_graph(nb::module_ &m) {
         )
         .def("edgesFromNodeList", &graph_edges_from_node_list, nb::arg("nodes"));
 
+    nb::class_<GridGraph2D, Graph>(m, "GridGraph2D")
+        .def(nb::init<const std::vector<std::uint64_t> &>(), nb::arg("shape"))
+        .def_prop_ro("shape", &grid_shape<2>)
+        .def_prop_ro("strides", &grid_strides<2>)
+        .def_prop_ro("ndim", &GridGraph2D::ndim)
+        .def("node_id", &grid_node_id<2>, nb::arg("coordinate"))
+        .def("coordinates", &grid_coordinates<2>, nb::arg("node"))
+        .def("edge_axis", &GridGraph2D::edge_axis, nb::arg("edge"))
+        .def("edge_coordinates", &grid_edge_coordinates<2>, nb::arg("edge"))
+        .def("offset_target", &grid_offset_target<2>, nb::arg("node"), nb::arg("offset"))
+        .def_prop_ro("numberOfDimensions", &GridGraph2D::ndim)
+        .def("nodeId", &grid_node_id<2>, nb::arg("coordinate"))
+        .def("edgeAxis", &GridGraph2D::edge_axis, nb::arg("edge"))
+        .def("edgeCoordinates", &grid_edge_coordinates<2>, nb::arg("edge"))
+        .def("offsetTarget", &grid_offset_target<2>, nb::arg("node"), nb::arg("offset"));
+
+    nb::class_<GridGraph3D, Graph>(m, "GridGraph3D")
+        .def(nb::init<const std::vector<std::uint64_t> &>(), nb::arg("shape"))
+        .def_prop_ro("shape", &grid_shape<3>)
+        .def_prop_ro("strides", &grid_strides<3>)
+        .def_prop_ro("ndim", &GridGraph3D::ndim)
+        .def("node_id", &grid_node_id<3>, nb::arg("coordinate"))
+        .def("coordinates", &grid_coordinates<3>, nb::arg("node"))
+        .def("edge_axis", &GridGraph3D::edge_axis, nb::arg("edge"))
+        .def("edge_coordinates", &grid_edge_coordinates<3>, nb::arg("edge"))
+        .def("offset_target", &grid_offset_target<3>, nb::arg("node"), nb::arg("offset"))
+        .def_prop_ro("numberOfDimensions", &GridGraph3D::ndim)
+        .def("nodeId", &grid_node_id<3>, nb::arg("coordinate"))
+        .def("edgeAxis", &GridGraph3D::edge_axis, nb::arg("edge"))
+        .def("edgeCoordinates", &grid_edge_coordinates<3>, nb::arg("edge"))
+        .def("offsetTarget", &grid_offset_target<3>, nb::arg("node"), nb::arg("offset"));
+
     nb::class_<Rag, Graph>(m, "RegionAdjacencyGraph")
         .def_prop_ro("shape", &Rag::shape);
+
+    m.def(
+        "_grid_boundary_features_2d",
+        &grid_boundary_features_t<2>,
+        nb::arg("graph"),
+        nb::arg("boundary_map")
+    );
+    m.def(
+        "_grid_boundary_features_3d",
+        &grid_boundary_features_t<3>,
+        nb::arg("graph"),
+        nb::arg("boundary_map")
+    );
+    m.def(
+        "_grid_affinity_features_2d",
+        &grid_affinity_features_t<2>,
+        nb::arg("graph"),
+        nb::arg("affinities"),
+        nb::arg("offsets")
+    );
+    m.def(
+        "_grid_affinity_features_3d",
+        &grid_affinity_features_t<3>,
+        nb::arg("graph"),
+        nb::arg("affinities"),
+        nb::arg("offsets")
+    );
+    m.def(
+        "_grid_affinity_features_with_lifted_2d",
+        &grid_affinity_features_with_lifted_t<2>,
+        nb::arg("graph"),
+        nb::arg("affinities"),
+        nb::arg("offsets")
+    );
+    m.def(
+        "_grid_affinity_features_with_lifted_3d",
+        &grid_affinity_features_with_lifted_t<3>,
+        nb::arg("graph"),
+        nb::arg("affinities"),
+        nb::arg("offsets")
+    );
 
     m.def(
         "_breadth_first_search",

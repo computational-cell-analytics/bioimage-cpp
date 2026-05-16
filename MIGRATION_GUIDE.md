@@ -126,6 +126,39 @@ Common method/property mapping:
 | `extractSubgraphFromNodes` | `extract_subgraph_from_nodes` |
 | `edgesFromNodeList` | `edges_from_node_list` |
 
+## Grid Graphs
+
+Nifty-style regular grid graphs map to explicit 2D or 3D grid graph classes:
+
+```python
+graph = bic.graph.GridGraph2D((height, width))
+graph = bic.graph.GridGraph3D((depth, height, width))
+graph = bic.graph.grid_graph((height, width))
+```
+
+Grid graph nodes use NumPy C-order ids. For a 2D shape `(y, x)`, node
+`(row, col)` has id `row * x + col`; for 3D `(z, y, x)`, ids follow the same
+row-major convention. `GridGraph2D` and `GridGraph3D` inherit the regular
+`UndirectedGraph` API, so solvers, connected components, breadth-first search,
+and `uv_ids()` work unchanged.
+
+Important differences:
+
+- Only nearest-neighbor 2D and 3D grids are exposed for now.
+- Edge ids are deterministic axis blocks: axis 0 edges first, then axis 1, and
+  axis 2 for 3D.
+- Scalar boundary maps can be converted to edge weights with
+  `grid_boundary_features(graph, boundary_map)`.
+- Local affinity channels can be converted to edge-aligned weights with
+  `grid_affinity_features(graph, affinities, offsets)`.
+- Mixed local and long-range affinity offsets can be converted with
+  `grid_affinity_features_with_lifted(...)`, which returns local graph weights
+  plus explicit long-range `uv_ids` and weights for lifted multicut or mutex
+  watershed style workflows.
+- Affogato-style masks and seed edges are not part of the public grid feature
+  API yet; the implementation is structured so these filters/extra edges can
+  be added later.
+
 ## Region Adjacency Graphs
 
 Nifty:

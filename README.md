@@ -45,6 +45,15 @@ segmentation = bic.segmentation.mutex_watershed(
 graph = bic.graph.UndirectedGraph.from_edges(4, [[0, 1], [1, 2], [2, 3]])
 graph.find_edge(2, 1)
 # 1
+
+grid = bic.graph.grid_graph((64, 64))
+grid.number_of_edges
+# 8064
+
+edge_weights = bic.graph.grid_boundary_features(grid, boundary_map)
+local_weights, valid_edges, lifted_uvs, lifted_weights, offset_ids = (
+    bic.graph.grid_affinity_features_with_lifted(grid, affinities, offsets)
+)
 ```
 
 ## Scope
