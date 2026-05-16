@@ -599,6 +599,99 @@ def edge_weighted_watershed(
     return run(graph, weight_array, seed_array)
 
 
+_MUTEX_WATERSHED_CLUSTERING_BY_DTYPE = {
+    np.dtype("float32"): _core._mutex_watershed_clustering_float32,
+    np.dtype("float64"): _core._mutex_watershed_clustering_float64,
+}
+
+
+def _resolve_weight_dtype(array, name: str) -> np.ndarray:
+    """Coerce a weights input to a supported floating dtype.
+
+    ``float32`` and ``float64`` pass through unchanged. Other floating
+    dtypes are cast to ``float32`` (matches the convention used by
+    :func:`edge_weighted_watershed`). Non-floating dtypes raise.
+    """
+    array = np.asarray(array)
+    if array.dtype in (np.dtype("float32"), np.dtype("float64")):
+        return array
+    if np.issubdtype(array.dtype, np.floating):
+        return array.astype(np.float32, copy=False)
+    raise TypeError(
+        f"{name} must have a floating dtype (float32 or float64), got "
+        f"dtype={array.dtype}"
+    )
+
+
+def mutex_watershed_clustering(
+    graph: UndirectedGraph | RegionAdjacencyGraph,
+    edge_costs,
+    mutex_uvs,
+    mutex_costs,
+) -> np.ndarray:
+    """Mutex watershed clustering on an undirected graph.
+
+    Attractive edges come from ``graph`` (one cost per edge in
+    ``edge_costs``); repulsive long-range edges are supplied separately as
+    ``mutex_uvs`` with weights ``mutex_costs``. All edges are jointly sorted
+    by descending weight and processed in a single pass: an attractive edge
+    merges its two components unless a mutex constraint already separates
+    them; a mutex edge installs a constraint between the two current
+    components.
+
+    The input format matches :class:`LiftedMulticutObjective` — the same
+    ``(graph, edge_costs, lifted_uvs, lifted_costs)`` arrays can be passed
+    here as ``(graph, edge_costs, mutex_uvs, mutex_costs)`` — though the
+    algorithms differ (mutex constraints are hard; lifted costs are soft).
+
+    Parameters
+    ----------
+    graph:
+        :class:`UndirectedGraph` or :class:`RegionAdjacencyGraph` defining
+        the attractive edges.
+    edge_costs:
+        1D array of length ``graph.number_of_edges``. Supported dtypes are
+        ``float32`` and ``float64``; other floating dtypes are cast to
+        ``float32``. Higher values are more attractive.
+    mutex_uvs:
+        ``(n_mutex, 2)`` uint64 array of (u, v) pairs for the mutex edges.
+    mutex_costs:
+        1D array of length ``n_mutex``. Same dtype rules as ``edge_costs``;
+        if the two dtypes differ both are promoted to ``float64``. Higher
+        values are stronger repulsions.
+
+    Returns
+    -------
+    np.ndarray
+        ``(graph.number_of_nodes,)`` uint64 array. Dense node labels in
+        ``[0, k)`` in first-occurrence order.
+    """
+    edge_cost_array = _resolve_weight_dtype(edge_costs, "edge_costs")
+    mutex_cost_array = _resolve_weight_dtype(mutex_costs, "mutex_costs")
+    # Use a single instantiation for both arrays. If the user supplied
+    # mismatched dtypes (one float32, one float64) we promote both to
+    # float64 — the wider type — rather than silently downcasting.
+    if edge_cost_array.dtype != mutex_cost_array.dtype:
+        edge_cost_array = edge_cost_array.astype(np.float64, copy=False)
+        mutex_cost_array = mutex_cost_array.astype(np.float64, copy=False)
+
+    edge_cost_array = _as_1d_array(
+        edge_cost_array,
+        edge_cost_array.dtype,
+        "edge_costs",
+        int(graph.number_of_edges),
+    )
+    mutex_uv_array = _as_uv_array(mutex_uvs, "mutex_uvs")
+    mutex_cost_array = _as_1d_array(
+        mutex_cost_array,
+        mutex_cost_array.dtype,
+        "mutex_costs",
+        int(mutex_uv_array.shape[0]),
+    )
+    run = _MUTEX_WATERSHED_CLUSTERING_BY_DTYPE[edge_cost_array.dtype]
+    return run(graph, edge_cost_array, mutex_uv_array, mutex_cost_array)
+
+
 class MulticutObjective:
     """Multicut objective for an undirected graph and edge costs."""
 
@@ -1818,6 +1911,7 @@ __all__ = [
     "load_multicut_problem",
     "load_multicut_problem_data",
     "multicut_problem_path",
+    "mutex_watershed_clustering",
     "project_node_labels_to_pixels",
     "region_adjacency_graph",
     "undirected_graph",
