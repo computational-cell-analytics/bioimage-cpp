@@ -11,10 +11,14 @@ Problem dimensions: 2462 nodes, 17 949 local edges, 21 444 lifted edges.
 | Solver | bic | nifty | Ratio | Status |
 |---|---|---|---|---|
 | Greedy additive | ~13 ms | ~14.7 ms | **0.88×** (faster) | Goal met |
-| Kernighan-Lin (greedy + 10 outer) | ~200 ms | ~102 ms | **1.95×** (slower) | Outside 30%-of-nifty target |
+| Kernighan-Lin (greedy + 10 outer) | ~195 ms | ~103 ms | **1.92×** (slower) | Outside 30%-of-nifty target |
 
-Energies match nifty to within numerical noise on both solvers (greedy diff
-~0.3, KL diff ~0.08).
+Energies match nifty to within numerical noise on both solvers: greedy diff
+~0.3, KL diff ~0.08.
+
+On the 2D ISBI lifted problem (756 nodes, 2 134 local + 3 541 lifted edges):
+bic KL runs in ~9 ms vs nifty's ~4.5 ms (2.0× — small-problem overhead
+dominates).
 
 ## What's done
 
@@ -38,78 +42,110 @@ floor for ~21 k heap operations.
 
 ### Kernighan-Lin
 
-One C++ optimization (~22% speedup, 245 → 200 ms):
+One C++ optimization landed (~22% speedup, 245 → 195 ms):
 
 1. **Pre-built per-node filtered adjacency** in
    `include/bioimage_cpp/graph/lifted_multicut/kernighan_lin.hxx`.
    `ChainScratch` gained `filtered_offset`, `filtered_count`, and
    `filtered_entries` (each entry caches `{node, weight, is_base}`).
-   `chain_gain_init` populates these alongside the gain accumulation; the
-   chain loop iterates only in-pair neighbors and skips the
-   `bufs.in_pair[u_key]` filter check. Also caches `was_in_heap` once per
-   iteration so the three subsequent heap operations don't each re-query
-   the locator.
+   The chain loop iterates only in-pair neighbors and caches `was_in_heap`
+   once per iteration so the three subsequent heap operations don't each
+   re-query the locator.
 
-## What remains — KL is the open item
+## Post-mortem: cluster-pair bucket optimization (2026-05-16, reverted)
 
-C++ KL takes ~200 ms; nifty ~102 ms. Profile breakdown
-(`BIOIMAGE_PROFILE=ON`, 1 repeat) — note the inner scopes inflate total by
-~80% so trust the relative shares:
+Tried the optimization the previous notes had ranked #1 — a per-outer-iter
+bucket index over all lifted-graph edges, grouped by their endpoint
+cluster-label pair, so `chain_gain_init` could read three buckets
+(`(A, A)`, `(B, B)`, `(A, B)`) per pair-chain instead of walking the full
+lifted adjacency of every in-pair node.
 
-```
-  cc_repartition           0.0033 s  (  0.7%)
-  energy_eval              0.0013 s  (  0.4%)
-  compute_pairs            0.0073 s  (  2.0%)
-  chain_init               0.0037 s  (  1.0%)
-  chain_gain_init          0.0812 s  ( 22.1%)   <-- ~36% of pair_chains
-  chain_loop               0.0880 s  ( 23.9%)   <-- ~63% of pair_chains
-  chain_cleanup            0.0017 s  (  0.5%)
-  pair_chains              0.1744 s  ( 47.4%)
-  cluster_splits           0.0083 s  (  2.3%)
-```
+**Wall-clock outcomes:**
 
-Workload statistics on the 3D problem after the greedy warm-start:
+| Variant | Time | 3D energy diff vs nifty | Notes |
+|---|---|---|---|
+| Pre-bucket (current) | 195 ms | 0.08 | Reference |
+| Simplified buckets, 1 rebuild / outer iter | 135 ms | 0.94 | Staleness during cluster_splits |
+| Simplified buckets, 2 rebuilds / outer iter | 139 ms | 0.17 | Mid-iter rebuild recovers most of the loss |
+| Incremental maintenance (relabel-on-commit) | 198 ms | 0.16 | Slower than pre-bucket, no energy win |
 
-- 643 clusters. Sizes: min 1, max 139, mean 3.8, median 2.
-- 4443 base cluster pairs per outer iter. Pair sizes: mean 20, median 7,
-  max 198 (long tail).
-- Average lifted node degree: 32.
+The simplified bucket version delivered the predicted time win on
+`chain_gain_init` (79 ms → 31 ms), but the 0.08 → 0.17 energy regression
+that came with it could not be closed. The incremental-maintenance
+follow-up — designed specifically to eliminate within-iter staleness —
+turned out to be both slower (memory-fragmentation regression in
+`chain_gain_init` and `chain_loop` from the `unordered_map<key,
+vector<Entry>>` layout) and unable to close the energy gap. We reverted
+the entire bucket experiment.
 
-## Ranked future optimizations
+**Why the energy gap didn't close.** I assumed the 0.08 → 0.17 regression
+was caused by buckets going stale between pair-chains, so incremental
+maintenance should restore it. The data says otherwise: simplified
+buckets with maximum staleness (1 rebuild/iter) and incremental
+buckets with zero staleness landed at 0.17 and 0.16 respectively —
+essentially identical. The gap is not from staleness; it's from a
+**different filtered-adjacency iteration order** that the bucket
+construction produces vs. the original direct-adjacency walk. KL is
+sensitive to tie-breaking when multiple candidate moves have near-equal
+gain, and the order in which `filtered_entries[v]` entries get pushed
+into the heap influences the local optimum the chain converges to.
+Floating-point summation order across many lifted edges also produces
+bit-level different `stash_gain` values, contributing tie-shifts.
 
-### 1. Pre-bucketed gain init (estimated landing point: ~150 ms total, −25%)
+The 2D problem stays at **exact** 0.000 diff because it has fewer ties
+and fewer summed edges. The 3D problem has more opportunity for
+divergence.
 
-**Idea.** For each outer iteration, bucket every lifted edge by its
-endpoint cluster pair (sorted `(min_label, max_label)`). For pair-chain
-`(A, B)` the gain init iterates only the three relevant buckets —
-`(A, A)`, `(B, B)`, `(A, B)` — instead of walking the full lifted
-adjacency of every node in the pair.
+**What this means for the bucket approach.** The bucket idea is sound
+in the abstract — `chain_gain_init`'s data-volume floor really is O(E)
+per outer iter, not O(pairs × pair_size × adjacency). But the
+implementation creates a different `filtered_entries` ordering than the
+adjacency-walk version, and that ordering difference is what produces
+the 0.09 energy gap on 3D. To get bucket-level speed *and* pre-bucket
+tie-breaking parity, you would need to either:
 
-**Why it would help.** Each edge currently contributes to `chain_gain_init`
-exactly once per pair-chain that touches one of its endpoint clusters.
-With buckets, each edge contributes O(1) per outer iter. The 80 ms
-`chain_gain_init` collapses to roughly O(E) = ~5 ms per outer iter, saving
-~70 ms.
+1. Build `filtered_entries[v]` by walking `lifted_graph.node_adjacency(v)`
+   *after* using buckets to compute `stash_gain`. Adds back most of the
+   adjacency walk cost (estimated +30–50 ms), undoing most of the bucket
+   win.
+2. Sort `filtered_entries[v]` by a canonical edge_id order after bucket
+   construction. Adds ~30 ms in per-pair sort cost; only partially
+   matches pre-bucket order because pre-bucket follows insertion order,
+   not edge_id order.
+3. Accept the 0.17 diff. It's 0.005% relative on the only problem
+   where it shows, doesn't violate any test bound, and is well below
+   downstream segmentation noise. The 60 ms time win on the 3D problem
+   is real.
 
-**The wrinkle.** Bucket membership goes stale as nodes move between
-clusters during the sequential pair-chains. The right fix is **incremental
-bucket maintenance** — every node move performs O(degree) bucket-membership
-updates (remove from old bucket, push into new). Bucket entries store
-their position via an `edge_id → bucket_pos` index so removal is
-`swap-with-back` in O(1). Total maintenance cost per outer iter:
-`O(num_moves × avg_degree)` ≈ 30 µs on our problem.
+I implemented option 3 (simplified buckets + mid-iter rebuild), and at
+the user's request escalated to incremental maintenance hoping it would
+also restore energy parity. It did not, and was slower besides. We are
+back at the pre-bucket baseline.
 
-**Complexity.** Substantial: ~200 lines, new `LiftedEdgeBuckets` struct in
-`detail_kl`, hooks in `chain_loop` to call `buckets.relabel(v, old, new)`
-on every committed move, careful invariant management.
+**Specific implementation lessons:**
 
-**Sanity check before implementing.** Try a quick prototype where buckets
-are rebuilt fresh at the start of each outer iter (O(E) per outer iter)
-and gain init uses buckets, accepting that within-outer-iter moves create
-stale entries. If the resulting energy is comparable to the exact version,
-the incremental maintenance is worthwhile.
+- `unordered_map<uint64_t, vector<Entry>>` for per-bucket storage caused
+  ~40 ms of cache-locality regression in `chain_gain_init` and
+  `chain_loop` vs the flat sorted vector. If revisiting buckets,
+  keep them in one contiguous flat array.
+- The `relabel_node` machinery itself is cheap (~4 ms total over 10
+  outer iters in the profile). Incremental maintenance is *not*
+  expensive in absolute terms; the slowdown came from the layout
+  switch.
+- Predicted bucket-rebuild cost (notes said "~5 ms per outer iter")
+  was 4× off — sort on 40 k 40-byte entries actually takes ~11 ms.
+  The cheap-path radix-sort optimization listed below would address
+  this, but only matters if buckets come back.
 
-### 2. CSR adjacency layout for lifted graph (estimated: 10–15% off)
+## Future optimizations (re-prioritised after the bucket post-mortem)
+
+The bucket approach is **not** the recommended next step. It changes
+algorithm output (different tie-breaking) which costs us energy parity
+on the 3D problem. If we revisit it, we'd want to invest first in
+verifying we can recover pre-bucket order (option 1 or 2 above) before
+committing to the layout work.
+
+### 1. CSR adjacency layout for lifted graph (estimated: 10–15% off)
 
 **Idea.** `UndirectedGraph` stores adjacency as `vector<vector<Adjacency>>`
 — one heap allocation per node. Walking adjacency for many distinct nodes
@@ -118,36 +154,63 @@ in a pair pays per-node pointer chasing. A flat CSR (`offsets[n+1]` +
 cache-friendly.
 
 **Caveat.** The actual access pattern in `chain_gain_init` walks
-adjacency for nodes in arbitrary order (whichever pair we're processing),
-so spatial locality across nodes is poor regardless of layout. The win is
-limited to per-node cache-line savings (one miss per node vs one per
-adjacency vector header). Estimate ~10% based on rough cycle counting.
+adjacency for nodes in arbitrary order (whichever pair we're
+processing), so spatial locality across nodes is poor regardless of
+layout. The win is limited to per-node cache-line savings (one miss per
+node vs one per adjacency vector header). Estimate ~10% based on rough
+cycle counting.
 
 **Complexity.** Localized: ~50 lines, build CSR in `kernighan_lin`,
-replace `lifted_graph.node_adjacency(v)` calls in `chain_gain_init` with
-CSR iteration.
+replace `lifted_graph.node_adjacency(v)` calls in `chain_gain_init` and
+`chain_loop` with CSR iteration. Doesn't change algorithm output —
+adjacency iteration order is preserved.
 
-**Worth combining** with optimization 1, since CSR walking is what bucket
-maintenance would need anyway.
+**Why now.** This is the most attractive remaining lever: localized,
+non-invasive, preserves tie-breaking, and the win is real cache
+savings rather than an algorithmic restructure with side effects.
 
-### 3. Inspect nifty's internals (estimated: unknown, possibly clarifying)
+### 2. Skip pair-chains where heap stays empty (estimated: <5 ms)
 
-The gap between our `chain_gain_init` and nifty's equivalent
-`computeDifferences` is suspiciously ~2× per adjacency entry given that
-both algorithms walk the same data. nifty's source is at:
+After `chain_gain_init`, if `heap.empty()` we already skip
+`chain_loop`. But we still pay for `chain_init` and the full
+`chain_gain_init` walk. For pair-chains where the cluster pair has
+only one alive node per side (post-staleness filtering of
+`cluster_to_nodes`), we could skip earlier. Need to maintain live
+cluster sizes.
+
+Low priority — only a few ms.
+
+### 3. Revisit bucket gain init *if* tie-breaking parity is acceptable
+
+If a future use-case is OK with the 0.17 energy diff on 3D (e.g., the
+bucket version's output is fed into a downstream solver that re-optimises
+anyway), the simplified flat-sorted-vector bucket implementation with
+mid-iter rebuild is a known ~60 ms win. See git history for the
+implementation; the key files were
+`include/bioimage_cpp/graph/lifted_multicut/kernighan_lin.hxx`
+(LiftedEdgeBuckets struct + chain_gain_init rewrite).
+
+Do not pursue incremental maintenance — it's a strict regression.
+
+### 4. Inspect nifty's internals — DONE 2026-05-16
+
+Read of `lifted_twocut_kernighan_lin.hxx` confirmed nifty has no
+algorithmic advantage over our pre-bucket version: same per-pair
+`O(pair_size × full_adjacency)` work, same NodeMap-based difference
+cache, no precomputed pair-bucket index. nifty's source is at:
 
 ```
 /home/pape/Work/software/src/nifty/include/nifty/graph/opt/lifted_multicut/detail/lifted_twocut_kernighan_lin.hxx
 ```
 
-Worth checking:
-- How nifty stores `liftedGraph_.adjacency(v)` — is it CSR-like?
-- Whether nifty's `referencedBy` array is `uint32` or larger (we use
-  `uint32`).
-- Whether nifty's `differences` (= our `stash_gain`) cache line layout
-  differs.
+Their per-entry constant factor is competitive (separate
+`graph_.adjacency(v)` and `liftedGraph_.adjacency(v)` walks, no per-entry
+`is_base` classification), but the algorithmic class is identical. The
+~2× gap on `chain_gain_init` per entry is most plausibly the
+adjacency-walk constants — which is what optimization #1 (CSR layout)
+would address.
 
-### 4. Linear-scan border instead of a heap
+### 5. Linear-scan border instead of a heap
 
 **Verdict: not worth pursuing for this problem.**
 
@@ -157,28 +220,33 @@ for pair size 7 (the median) that's ~2× faster than O(N) linear scan,
 and the gap widens for larger pairs.
 
 nifty uses linear scan, but that's not where its speed advantage comes
-from — likely it's the adjacency-walking constants (optimization 3).
+from — likely it's the adjacency-walking constants (optimization 1).
 
-### 5. Skip pair-chains where heap stays empty (estimated: <5 ms)
+## Workload statistics (3D problem, post greedy warm-start)
 
-After `chain_gain_init`, if `heap.empty()` we already skip
-`chain_loop`. But we still pay for `chain_init` and the full
-`chain_gain_init` walk. For pair-chains where the cluster pair has only
-one alive node per side (post-staleness filtering of `cluster_to_nodes`),
-we could skip earlier. Need to maintain live cluster sizes.
+Unchanged from before; useful for sanity-checking future estimates:
 
-Low priority — only a few ms.
+- 643 clusters. Sizes: min 1, max 139, mean 3.8, median 2.
+- 4443 base cluster pairs per outer iter. Pair sizes: mean 20,
+  median 7, max 198 (long tail).
+- Average lifted node degree: 32.
 
 ## Where to start next time
 
 1. Re-run `cd development/graph/lifted_multicut && python check_kernighan_lin.py --size 3d --repeats 5` to confirm the baseline hasn't drifted.
 2. Build with `pip install -e . --no-build-isolation -C cmake.define.BIOIMAGE_PROFILE=ON` to get the profile breakdown back.
-3. Prototype the rebuild-per-outer-iter bucket approach (optimization 1
-   simplified) to validate the energy quality before committing to the
-   incremental maintenance version.
-4. Targets:
-   - 30%-of-nifty: ≤132 ms.
-   - Match nifty: ≤102 ms.
+3. Try optimization 1 (CSR adjacency) — it's the safest remaining
+   lever, preserves tie-breaking, and addresses the per-entry
+   constant-factor gap we measured against nifty.
+4. Targets (downgraded from previous attempt — pre-bucket KL is at
+   195 ms, not 200 as the original notes said):
+   - 30%-of-nifty: ≤132 ms (currently 195 ms — 63 ms over).
+   - Match nifty: ≤103 ms.
+
+   The CSR change alone won't close 60+ ms. Closing the full gap
+   probably requires either (a) accepting the bucket tie-breaking
+   regression, or (b) finding an actually new algorithmic lever we
+   haven't identified.
 
 ## Files that matter
 
