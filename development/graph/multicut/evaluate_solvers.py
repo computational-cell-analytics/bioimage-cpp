@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
 from statistics import mean
@@ -142,39 +143,54 @@ def evaluate(problem_name: str, solver_name: str, config: SolverConfig, args):
     nifty_runtimes = []
 
     for _ in range(args.n_repeats):
-        bic_objective = bic.graph.MulticutObjective(bic_graph, costs)
-        start = perf_counter()
-        bic_labels = config.make_bic_solver(args.threads).optimize(bic_objective)
-        bic_runtimes.append(perf_counter() - start)
-        bic_energies.append(bic_energy(bic_graph, costs, bic_labels))
+        if args.backend in ("both", "bic"):
+            bic_objective = bic.graph.MulticutObjective(bic_graph, costs)
+            start = perf_counter()
+            bic_labels = config.make_bic_solver(args.threads).optimize(bic_objective)
+            bic_runtimes.append(perf_counter() - start)
+            bic_energies.append(bic_energy(bic_graph, costs, bic_labels))
 
-        nifty_objective = nmc.multicutObjective(nifty_graph, costs)
-        start = perf_counter()
-        nifty_labels = (
-            config.make_nifty_factory(nifty_objective, args.threads)
-            .create(nifty_objective)
-            .optimize()
-        )
-        nifty_runtimes.append(perf_counter() - start)
-        nifty_energies.append(nifty_energy(nifty_graph, costs, nifty_labels))
+        if args.backend in ("both", "nifty"):
+            nifty_objective = nmc.multicutObjective(nifty_graph, costs)
+            start = perf_counter()
+            nifty_labels = (
+                config.make_nifty_factory(nifty_objective, args.threads)
+                .create(nifty_objective)
+                .optimize()
+            )
+            nifty_runtimes.append(perf_counter() - start)
+            nifty_energies.append(nifty_energy(nifty_graph, costs, nifty_labels))
 
-    bic_runtime = mean(bic_runtimes)
-    nifty_runtime = mean(nifty_runtimes)
+    bic_runtime = mean(bic_runtimes) if bic_runtimes else None
+    nifty_runtime = mean(nifty_runtimes) if nifty_runtimes else None
+    bic_energy_value = mean(bic_energies) if bic_energies else None
+    nifty_energy_value = mean(nifty_energies) if nifty_energies else None
+    energy_diff = (
+        bic_energy_value - nifty_energy_value
+        if bic_energy_value is not None and nifty_energy_value is not None
+        else None
+    )
     return {
         "problem": problem_name,
         "solver": solver_name,
         "nodes": int(bic_graph.number_of_nodes),
         "edges": int(bic_graph.number_of_edges),
-        "bic_energy": mean(bic_energies),
-        "nifty_energy": mean(nifty_energies),
-        "energy_diff": mean(bic_energies) - mean(nifty_energies),
+        "bic_energy": bic_energy_value,
+        "nifty_energy": nifty_energy_value,
+        "energy_diff": energy_diff,
         "bic_runtime_s": bic_runtime,
         "nifty_runtime_s": nifty_runtime,
-        "runtime_ratio": nifty_runtime / bic_runtime if bic_runtime > 0 else float("inf"),
+        "runtime_ratio": (
+            nifty_runtime / bic_runtime
+            if bic_runtime is not None and nifty_runtime is not None and bic_runtime > 0
+            else None
+        ),
     }
 
 
 def format_float(value: float) -> str:
+    if value is None:
+        return ""
     return f"{value:.6g}"
 
 
@@ -192,6 +208,13 @@ def print_progress(row: dict) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+def append_jsonl(path: str, row: dict) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        json.dump(row, f, sort_keys=True)
+        f.write("\n")
+        f.flush()
 
 
 def print_markdown_table(rows: list[dict]) -> None:
@@ -250,6 +273,16 @@ def main() -> None:
     parser.add_argument("--n-repeats", type=int, default=1)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--backend",
+        choices=("both", "bic", "nifty"),
+        default="both",
+        help="Which implementation to run. Defaults to both.",
+    )
+    parser.add_argument(
+        "--results-jsonl",
+        help="Append each completed row to this JSONL file.",
+    )
     args = parser.parse_args()
 
     if args.n_repeats < 1:
@@ -263,6 +296,8 @@ def main() -> None:
             row = evaluate(problem_name, solver_name, configs[solver_name], args)
             rows.append(row)
             print_progress(row)
+            if args.results_jsonl is not None:
+                append_jsonl(args.results_jsonl, row)
     print_markdown_table(rows)
 
 
