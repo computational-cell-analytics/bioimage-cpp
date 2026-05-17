@@ -149,6 +149,353 @@ LoG paths along for free.
 - For raw per-(filter, library) timings (useful for plotting), pass
   `--csv path.csv`.
 
+## Tier 2 SIMD — design notes (deferred)
+
+**Status (2026-05-17): not pursued for now.** Tier 1 sits within ~2× of
+fastfilters' hand-AVX2 on the headline benchmark while being ~5× faster
+than `vigra` and `scipy.ndimage`. The marginal user value of closing that
+2× gap doesn't yet justify the extra build complexity and dual-path
+maintenance burden. This section captures the design so a future coding
+agent (or future-us) can pick it up without re-deriving the choices.
+
+### Trigger conditions — when to revisit
+
+Open this section again when **at least one** is true:
+
+1. Real users are hitting the Hessian-3D / structure-tensor-3D paths on
+   volumes large enough that ~300 ms vs ~150 ms per call materially
+   matters in their pipeline (typically batch feature extraction over
+   many large 3D blocks).
+2. "Performance parity with fastfilters" becomes a stated project goal
+   (e.g. for a migration story or comparison documentation).
+3. Profiling on a real downstream workflow shows `bioimage_cpp.filters`
+   is the bottleneck and the gap to fastfilters is the dominant slice.
+
+If none of those is true: stay on Tier 1.
+
+### Scope — what to ship, what to keep out
+
+**In scope** (the whole Tier 2 delivery):
+
+- Hand-written AVX2 + FMA implementations of exactly two inner kernels:
+  - `convolve_x_radius<R, Symmetric>` — the X (innermost contiguous) pass.
+  - `convolve_strided_radius<R, Symmetric>` — the Y/Z (strided) pass.
+  - Both currently live in
+    `include/bioimage_cpp/filters/convolve.hxx::detail`.
+- One-time CPUID dispatch at module load that picks scalar vs AVX2
+  function pointers for those two kernels.
+
+**Out of scope** (do NOT add any of these as part of Tier 2):
+
+- AVX-512 path. The win over AVX2 is small on memory-bound separable FIR
+  and doubles the kernel binary footprint; revisit only if a user with a
+  Sapphire Rapids / Zen 5 workload asks specifically.
+- NEON / arm64 hand-tuning. Tier 1 auto-vectorization on Apple Clang is
+  already competitive; this would be a separate project with its own
+  trigger conditions.
+- Replacing `std::acos` / `std::cos` in `eigenvalues.hxx` with a
+  vectorized math library (this is what `fastfilters` vendors as
+  `avx_mathfun.h`, 924 lines). The Tier-1 plan explicitly rejected
+  vendoring it; revisit only if eigenvalue profiling shows the trig
+  calls dominate the remaining gap. Don't bundle this into Tier 2.
+- Any change to `kernel.hxx`, `eigenvalues.hxx`, `gaussian.hxx`, the
+  binding layer, or the Python wrapper. Tier 2 is a *drop-in* speedup of
+  two leaf functions; if you find yourself changing anything else,
+  something is wrong.
+
+### File layout
+
+```
+include/bioimage_cpp/filters/
+    convolve.hxx                  # existing scalar; renamed entry points
+                                  # to point at function pointers (see below)
+    convolve_dispatch.hxx         # NEW — function-pointer table + CPUID
+
+src/cpp/filters/
+    convolve_avx2.cxx             # NEW — AVX2+FMA kernels (compiled with
+                                  # per-file -mavx2 -mfma / /arch:AVX2)
+    convolve_dispatch.cxx         # NEW — one-time init of the pointers
+```
+
+The existing `convolve_axis_x` / `convolve_axis_strided` entry points in
+`convolve.hxx` keep their signatures. Their bodies switch from "directly
+call `detail::convolve_x_radius<R, Sym>`" to "call
+`bioimage_cpp::filters::dispatch::convolve_x_table[R][Sym]`". Higher
+levels (`gaussian.hxx`, the six composite filters, the binding layer) are
+unchanged.
+
+### CMake wiring
+
+Add to the `nanobind_add_module(_core ...)` source list:
+
+```cmake
+src/cpp/filters/convolve_avx2.cxx
+src/cpp/filters/convolve_dispatch.cxx
+```
+
+Then attach per-file flags so only the AVX2 TU gets AVX2 instructions
+(the rest of the wheel stays at the manylinux SSE2 baseline):
+
+```cmake
+if(MSVC)
+    set_source_files_properties(
+        src/cpp/filters/convolve_avx2.cxx
+        PROPERTIES COMPILE_OPTIONS "/arch:AVX2"
+    )
+else()
+    set_source_files_properties(
+        src/cpp/filters/convolve_avx2.cxx
+        PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma"
+    )
+endif()
+```
+
+Do **not** add `-march=native` or change the global `-O3`. The wheel
+must keep installing on any pre-Haswell x86_64 machine that
+manylinux2014 supports; the AVX2 instructions only execute behind the
+CPUID check.
+
+### Runtime dispatch pattern
+
+In `convolve_dispatch.hxx`:
+
+```cpp
+namespace bioimage_cpp::filters::dispatch {
+
+using ConvolveXFn = void (*)(
+    const float*, float*, std::ptrdiff_t, std::ptrdiff_t, const float*
+);
+using ConvolveStridedFn = void (*)(
+    const float*, float*, std::ptrdiff_t, std::ptrdiff_t, std::ptrdiff_t,
+    const float*
+);
+
+// One entry per (radius R in 1..kMaxSpecialisedRadius, Symmetric in {0,1}).
+// Filled at module load by init().
+extern ConvolveXFn convolve_x_table[kMaxSpecialisedRadius + 1][2];
+extern ConvolveStridedFn convolve_strided_table[kMaxSpecialisedRadius + 1][2];
+
+void init();  // called once from bind_filters()
+
+}
+```
+
+In `convolve_dispatch.cxx`:
+
+```cpp
+namespace {
+bool detect_avx2_fma() {
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#elif defined(_MSC_VER)
+    int regs1[4]; __cpuid(regs1, 1);
+    const bool fma = (regs1[2] & (1 << 12)) != 0;
+    int regs7[4]; __cpuidex(regs7, 7, 0);
+    const bool avx2 = (regs7[1] & (1 << 5)) != 0;
+    // Also OSXSAVE + XGETBV to confirm OS-saved YMM state.
+    ...
+    return avx2 && fma;
+#else
+    return false;
+#endif
+}
+}
+
+void init() {
+    const bool use_avx2 = detect_avx2_fma();
+    // Macros generate the per-R table entries to avoid 24 hand-written
+    // lines (the same boost-preprocessor-style explosion fastfilters
+    // does, kept tiny with simple X-macros).
+    #define BIO_FILL(R) \
+        if (use_avx2) { \
+            convolve_x_table[R][0] = &avx2::convolve_x_radius_sym<R>; \
+            convolve_x_table[R][1] = &avx2::convolve_x_radius_anti<R>; \
+            convolve_strided_table[R][0] = &avx2::convolve_strided_radius_sym<R>; \
+            convolve_strided_table[R][1] = &avx2::convolve_strided_radius_anti<R>; \
+        } else { \
+            convolve_x_table[R][0] = &detail::convolve_x_radius_sym<R>; \
+            convolve_x_table[R][1] = &detail::convolve_x_radius_anti<R>; \
+            convolve_strided_table[R][0] = &detail::convolve_strided_radius_sym<R>; \
+            convolve_strided_table[R][1] = &detail::convolve_strided_radius_anti<R>; \
+        }
+    BIO_FILL(1) BIO_FILL(2) ... BIO_FILL(12)
+    #undef BIO_FILL
+}
+```
+
+(Internally split each existing `template <int R, bool Symmetric>` into
+two non-templated-on-`Symmetric` aliases — `_sym` and `_anti` — so the
+function-pointer types are concrete and the table is plain data.)
+
+Call `dispatch::init()` from `bind_filters()` in `src/bindings/filters.cxx`
+(once, before any kernel binding can be invoked). Use a
+`static std::once_flag` guard so re-imports don't double-initialise.
+
+### AVX2 kernel skeleton
+
+The X-pass kernel in `convolve_avx2.cxx` is essentially the scalar main
+loop with explicit `__m256` registers:
+
+```cpp
+namespace bioimage_cpp::filters::avx2 {
+
+template <int R>
+void convolve_x_radius_sym(
+    const float* __restrict in,
+    float* __restrict out,
+    std::ptrdiff_t n_rows,
+    std::ptrdiff_t n_cols,
+    const float* __restrict h
+) {
+    const std::ptrdiff_t prologue_end   = std::min<std::ptrdiff_t>(R, n_cols);
+    const std::ptrdiff_t epilogue_start = std::max<std::ptrdiff_t>(prologue_end, n_cols - R);
+
+    for (std::ptrdiff_t row = 0; row < n_rows; ++row) {
+        const float* __restrict in_row  = in  + row * n_cols;
+        float*       __restrict out_row = out + row * n_cols;
+
+        // --- border prologue: reuse scalar mirror code unchanged ---
+        scalar_border_sym<R>(in_row, out_row, 0, prologue_end, n_cols, h);
+
+        // --- main AVX2 loop ---
+        std::ptrdiff_t x = prologue_end;
+        const __m256 h0 = _mm256_set1_ps(h[0]);
+        for (; x + 8 <= epilogue_start; x += 8) {
+            __m256 acc = _mm256_mul_ps(_mm256_loadu_ps(in_row + x), h0);
+            for (int k = 1; k <= R; ++k) {
+                const __m256 hk  = _mm256_set1_ps(h[k]);
+                const __m256 sum = _mm256_add_ps(
+                    _mm256_loadu_ps(in_row + x + k),
+                    _mm256_loadu_ps(in_row + x - k)
+                );
+                acc = _mm256_fmadd_ps(hk, sum, acc);
+            }
+            _mm256_storeu_ps(out_row + x, acc);
+        }
+        // --- scalar tail (0..7 floats) ---
+        scalar_main_sym<R>(in_row, out_row, x, epilogue_start, h);
+
+        // --- border epilogue ---
+        scalar_border_sym<R>(in_row, out_row, epilogue_start, n_cols, n_cols, h);
+    }
+}
+
+template <int R>
+void convolve_x_radius_anti(...) { /* same shape, _mm256_sub_ps instead of _add_ps */ }
+
+}
+```
+
+The strided kernel follows the same pattern but loops over `kStripBlock`
+in steps of 8, using `__m256` for the accumulator strip. Crucially the
+strip stays at 64 floats (`kStripBlock` is already a multiple of 8), so
+no new tiling decision is needed.
+
+`scalar_border_sym` / `scalar_main_sym` are just the existing scalar
+loop bodies hoisted into small inline helpers callable from both the
+AVX2 and the scalar TU. **The mirror-boundary handling code must not be
+duplicated between the two TUs** — that's where divergence bugs would
+hide. Make the helpers `inline` in a shared header.
+
+### What stays byte-for-byte identical
+
+- Kernel-coefficient generation in `kernel.hxx`.
+- Eigenvalue solvers in `eigenvalues.hxx`.
+- Composite filters in `gaussian.hxx`.
+- Binding layer in `src/bindings/filters.cxx`.
+- Python wrapper in `src/bioimage_cpp/filters/_filters.py`.
+- The public `convolve_axis_x` / `convolve_axis_strided` signatures in
+  `convolve.hxx`.
+- The mirror-index function `detail::mirror_index` and the border
+  prologue/epilogue logic.
+
+If a Tier-2 change is touching any of these, stop and re-read the scope
+section — it's almost certainly not what Tier 2 is for.
+
+### Expected speedup
+
+Based on the gap to `fastfilters` in this benchmark
+(`bioimage_cpp / fastfilters` geomean = 2.00):
+
+- Simple filters (smoothing, derivative, gradient_magnitude, LoG):
+  realistic post-Tier-2 ratio **1.0 – 1.3×** fastfilters (essentially
+  tied to slightly behind).
+- 3D Hessian / structure-tensor eigenvalues: realistic post-Tier-2
+  ratio **1.4 – 1.7×** fastfilters. The remaining gap is in `acos`/`cos`
+  inside the 3×3 trig eigensolver, which intrinsics alone do not help
+  with.
+
+Do not expect to *match* fastfilters exactly without also vendoring a
+vectorized math library and per-radius file-copy specialisation — that's
+the next-tier-after-Tier-2 work, deliberately out of scope here.
+
+### Verification
+
+1. **Parity gate stays green**:
+   `python development/filters/check_parity.py` on a machine with AVX2
+   support must still PASS at the same tolerances. If it doesn't, the
+   AVX2 kernel disagrees with the scalar kernel — that's the most
+   likely failure mode and is almost always an off-by-one in the
+   prologue / main / epilogue boundary handling.
+2. **Scalar path stays green**: re-run with the AVX2 path forced off
+   (set the function-pointer table to the scalar entries unconditionally
+   in a debug build, or guard the dispatch decision with an environment
+   variable like `BIOIMAGE_FORCE_SCALAR=1`). The full pytest suite must
+   still pass; this catches scalar-only regressions introduced when
+   refactoring shared helpers.
+3. **Benchmark**:
+   `python development/filters/benchmark.py` should show the
+   `bioimage_cpp / fastfilters` geomean drop from ~2.00 toward ~1.2.
+   Update this file with the new numbers.
+4. **Pre-Haswell smoke**: the dispatch must take the scalar path on a
+   machine without AVX2. Easiest local check: temporarily make
+   `detect_avx2_fma()` return `false` and confirm correctness +
+   performance fall back to today's Tier-1 numbers.
+
+### Smallest first step
+
+Don't ship both kernels at once. The recommended sequence is:
+
+1. Land the dispatch scaffolding (`convolve_dispatch.hxx` /
+   `.cxx`, function-pointer tables, CMake wiring) **with both pointers
+   still pointing at the existing scalar kernels**. No behavior change.
+   Tests stay green. This isolates the build-system part of the work.
+2. Add `convolve_x_radius_avx2` only. Re-run parity + benchmark.
+   Expect the simple filters to move; the Y/Z-bound filters
+   (gradient_magnitude, LoG, Hessian) move proportionally less.
+3. Add `convolve_strided_radius_avx2`. Re-run parity + benchmark.
+   Expect the 3D filters to move significantly.
+
+If after step 2 the speedup is smaller than expected, stop and profile
+before continuing — it usually means the autovectorizer was already
+doing better than this section assumes, and the marginal value of
+step 3 is lower than it appears here.
+
+### Watch-outs
+
+- **Boundary-mode divergence** between scalar and AVX2 paths is the
+  single most likely correctness bug. Share the prologue/epilogue
+  helpers via an `inline` header; don't copy-paste.
+- **Unaligned loads only.** Use `_mm256_loadu_ps` / `_mm256_storeu_ps`,
+  not the aligned variants. The bench inputs are not guaranteed to be
+  32-byte aligned, and on modern Intel/AMD the unaligned-load
+  performance penalty is essentially zero. Trying to force alignment in
+  the binding layer is more complexity than the win.
+- **MSVC AVX2 detection.** `__builtin_cpu_supports` is GCC/Clang only.
+  Use raw `__cpuid` / `__cpuidex` + an `_xgetbv` check (the OS must
+  have saved the YMM state for AVX to be safe to use). There's example
+  code in `fastfilters/src/library/cpu_intel.c` if you need a
+  reference; do not vendor it, just write the small bit you need.
+- **Don't introduce OpenMP, std::thread, or any threading primitive in
+  this work.** Threading is a separate follow-up that should layer on
+  top of the dispatch scheme via `parallel_for_chunks` (see
+  `include/bioimage_cpp/detail/threading.hxx`). Mixing the two changes
+  is asking for trouble.
+- **Don't add AVX-512 "while we're here."** It is a separate trigger
+  decision with separate trade-offs (frequency throttling on older
+  Xeons, larger binary, marginal win on memory-bound separable FIR).
+
 ## Known caveats reflected in the adapters
 
 - `fastfilters.gaussianDerivative` only accepts a uniform per-axis order;
