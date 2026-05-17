@@ -16,23 +16,54 @@ is faster.
 
 | Problem | Solver | bic energy | nifty energy | Δenergy | bic runtime | nifty runtime | runtime ratio |
 |---|---|---|---|---|---|---|---|
-| 2D    | greedy           |    -1575.04 |    -1575.04 |  0.00    | 0.70 ms | 1.50 ms | 2.15× faster |
-| 2D    | KL (10 outer)    |    -1575.21 |    -1575.21 |  0.00    | 4.14 ms | 4.77 ms | 1.15× faster |
-| 2D    | fusion-move      |    -1575.43 |    -1575.43 |  0.00    | 8.31 ms | 12.3 ms | 1.48× faster |
-| 3D    | greedy           |   -15891.4  |   -15891.0  | −0.35    | 6.40 ms | 15.9 ms | 2.48× faster |
-| 3D    | KL (10 outer)    |   -15921.0  |   -15921.1  | +0.07    | 78.1 ms |  103 ms | 1.32× faster |
-| 3D    | fusion-move      |   -15915.1  |   -15915.1  |  0.00    |  128 ms |  196 ms | 1.53× faster |
-| grid  | greedy           |  -690 014   |  -690 050   | +35.9    | 16.4 s  | 20.6 s  | 1.25× faster |
-| grid  | fusion-move      |  -690 271   |  -690 356   | +84.7    | 51.8 s  | 60.2 s  | 1.16× faster |
+| 2D    | greedy           |    -1575.04 |    -1575.04 |   0.00   | 0.70 ms | 1.50 ms | 2.15× faster |
+| 2D    | KL (10 outer)    |    -1575.21 |    -1575.21 |   0.00   | 4.14 ms | 4.77 ms | 1.15× faster |
+| 2D    | fusion-move      |    -1575.43 |    -1575.43 |   0.00   | 8.31 ms | 12.3 ms | 1.48× faster |
+| 3D    | greedy           |   -15891.4  |   -15891.0  |  −0.35   | 6.40 ms | 15.9 ms | 2.48× faster |
+| 3D    | KL (10 outer)    |   -15921.0  |   -15921.1  |  +0.07   | 78.1 ms |  103 ms | 1.32× faster |
+| 3D    | fusion-move      |   -15915.1  |   -15915.1  |   0.00   |  128 ms |  196 ms | 1.53× faster |
+| grid  | greedy           |  -690 014   |  -690 050   |  +35.9   | 16.4 s  | 20.6 s  | 1.25× faster |
+| grid  | KL (10 outer)    |  -690 544   |  -690 599   |  +54.5   | 442 s   | 6 514 s | **14.7× faster** |
+| grid  | fusion-move      |  -690 271   |  -690 356   |  +84.7   | 51.8 s  | 60.2 s  | 1.16× faster |
 
 Δenergy = bic − nifty; negative means bic is better, positive means
 nifty is better. Energies are exact matches on 2D/3D fusion-move and
 within 0.05 % on the rest; bic is faster than nifty on every row.
 
-KL on the 262 k-node grid is omitted from the matrix — it is correct
-but takes several minutes (heavy chain-init work scales with cluster
-count). See the fusion-move post-script below for the grid-specific
-behavior.
+### Note on the grid-KL row
+
+The 14.7× speed gap and the 54.5-unit energy gap on this single row are
+much larger than on every other row (the 2D / 3D KL ratios are 1.15–1.32×
+with essentially exact energies). That points to nifty's KL doing more
+work per outer iter on grid — not a single algorithmic difference, but
+the most plausible drivers, given that no investigation has been done:
+
+- **Inner-loop epsilon.** Our two-cut driver runs with one `epsilon`
+  parameter, defaulted to `1e-6` from
+  `KernighanLinSolver` (header file `kernighan_lin.hxx`). nifty's outer
+  KL uses `epsilon=1e-7` and its inner `TwoCut` uses
+  `epsilon=1e-9`. A tighter epsilon admits smaller-gain moves, which
+  means longer chains per pair and more outer iters before the
+  no-improvement break. On a 262 k-node problem with millions of
+  candidate moves, the extra accepted moves multiply quickly.
+- **Inner iteration cap.** Both implementations effectively run the
+  two-cut chain until the heap empties; in nifty this is governed by
+  `numberOfInnerIterations` defaulting to
+  `std::numeric_limits<std::size_t>::max()`. Same effective contract
+  as bic, but if a different value is wired through the factory the
+  gap would shift.
+- **Per-pair adjacency cost.** Our `chain_gain_init` builds a filtered
+  per-node adjacency cache and the inner loop iterates only in-pair
+  neighbours. nifty walks the full lifted adjacency on every move and
+  re-classifies in/out-of-pair via label comparisons. At the scale of
+  grid (long-range lifted edges, dense pair adjacency), the constant
+  factor here adds up to multiple-× per chain — independent of
+  whether the algorithm visits the same number of moves.
+
+Two of the three (epsilon, adjacency walking) push energy and runtime
+in the same direction: nifty does strictly more inner work and lands at
+a slightly better energy. Closing the 54.5-unit gap on bic would mean
+tightening `epsilon` and accepting more runtime — not pursued here.
 
 ## What's done
 
