@@ -4,21 +4,35 @@ State of the lifted-multicut solvers vs nifty on the standard benchmark
 problems and notes on remaining optimization headroom. Read this before the
 next round of perf work.
 
-## Current benchmark (3D ISBI lifted problem)
+## Current benchmark matrix
 
-Problem dimensions: 2462 nodes, 17 949 local edges, 21 444 lifted edges.
+Produced by `python evaluate_solvers.py` (2026-05-17). All runs
+single-threaded; fusion-move uses `n_seeds_fraction=0.1`,
+`number_of_iterations=10`, `stop_if_no_improvement=4`. nifty side uses
+matched settings via the chained-solver factory (greedy warm-start +
+KL/fusion with the same iteration counts, `SEED_FROM_LOCAL`).
+`runtime ratio` is `nifty_runtime / bic_runtime` — values > 1 mean bic
+is faster.
 
-| Solver | bic | nifty | Ratio | Status |
-|---|---|---|---|---|
-| Greedy additive | ~13 ms | ~14.7 ms | **0.88×** (faster) | Goal met |
-| Kernighan-Lin (greedy + 10 outer) | ~195 ms | ~103 ms | **1.92×** (slower) | Outside 30%-of-nifty target |
+| Problem | Solver | bic energy | nifty energy | Δenergy | bic runtime | nifty runtime | runtime ratio |
+|---|---|---|---|---|---|---|---|
+| 2D    | greedy           |    -1575.04 |    -1575.04 |  0.00    | 0.70 ms | 1.50 ms | 2.15× faster |
+| 2D    | KL (10 outer)    |    -1575.21 |    -1575.21 |  0.00    | 4.14 ms | 4.77 ms | 1.15× faster |
+| 2D    | fusion-move      |    -1575.43 |    -1575.43 |  0.00    | 8.31 ms | 12.3 ms | 1.48× faster |
+| 3D    | greedy           |   -15891.4  |   -15891.0  | −0.35    | 6.40 ms | 15.9 ms | 2.48× faster |
+| 3D    | KL (10 outer)    |   -15921.0  |   -15921.1  | +0.07    | 78.1 ms |  103 ms | 1.32× faster |
+| 3D    | fusion-move      |   -15915.1  |   -15915.1  |  0.00    |  128 ms |  196 ms | 1.53× faster |
+| grid  | greedy           |  -690 014   |  -690 050   | +35.9    | 16.4 s  | 20.6 s  | 1.25× faster |
+| grid  | fusion-move      |  -690 271   |  -690 356   | +84.7    | 51.8 s  | 60.2 s  | 1.16× faster |
 
-Energies match nifty to within numerical noise on both solvers: greedy diff
-~0.3, KL diff ~0.08.
+Δenergy = bic − nifty; negative means bic is better, positive means
+nifty is better. Energies are exact matches on 2D/3D fusion-move and
+within 0.05 % on the rest; bic is faster than nifty on every row.
 
-On the 2D ISBI lifted problem (756 nodes, 2 134 local + 3 541 lifted edges):
-bic KL runs in ~9 ms vs nifty's ~4.5 ms (2.0× — small-problem overhead
-dominates).
+KL on the 262 k-node grid is omitted from the matrix — it is correct
+but takes several minutes (heavy chain-init work scales with cluster
+count). See the fusion-move post-script below for the grid-specific
+behavior.
 
 ## What's done
 
@@ -42,15 +56,98 @@ floor for ~21 k heap operations.
 
 ### Kernighan-Lin
 
-One C++ optimization landed (~22% speedup, 245 → 195 ms):
+Two C++ optimizations landed (cumulative 2.85× speedup, 245 → 86 ms):
 
-1. **Pre-built per-node filtered adjacency** in
+1. **Pre-built per-node filtered adjacency** (~22% speedup, 245 → 195 ms) in
    `include/bioimage_cpp/graph/lifted_multicut/kernighan_lin.hxx`.
    `ChainScratch` gained `filtered_offset`, `filtered_count`, and
    `filtered_entries` (each entry caches `{node, weight, is_base}`).
    The chain loop iterates only in-pair neighbors and caches `was_in_heap`
    once per iteration so the three subsequent heap operations don't each
    re-query the locator.
+
+2. **`changed_[]` cross-iteration pair-skip** (~2.27× speedup, 195 → 86 ms)
+   in the outer `kernighan_lin()` driver. Mirrors nifty's
+   `checkIfPartitonChanged()` / `changed_[piU] || changed_[piV]` gate. A
+   pair `(A, B)` whose endpoints' node-sets are identical to the previous
+   outer iter must produce the same result it did last time (zero gain —
+   otherwise A or B would have changed). After iter 1, this typically
+   skips >50% of pairs. New helper `detail_kl::compute_cluster_changed`
+   runs in <0.2 ms per outer iter. Tie-breaking is preserved (iter 0
+   processes every pair); only pairs whose runs would commit no moves are
+   skipped. Same gate also applied to `cluster_splits`.
+
+### Fusion-move
+
+No solver-level optimizations were needed — the driver, fuse step and
+sub-solver are already competitive with nifty's. The only change was a
+**proposal-generator parameter-semantics fix** in
+`include/bioimage_cpp/graph/proposal_generators/watershed.hxx`. Pre-fix
+`n_seeds_fraction=0.1` produced 2× nifty's seed density: the loop
+iterated `0.1 * N` times placing 2 seeds per iter (0.2 N total seeds),
+whereas nifty iterates `nSeeds / 2` times placing 2 each (`0.1 * N`
+total seeds). Effect on grid: -690099 → -690270 (closes 67 % of the
+256-unit energy gap), 2D becomes an exact energy match, 3D drops 1.5
+energy units (still matches nifty). Loop now runs `n_seeds / 2` times
+to match nifty exactly. Documented in the header and Python docstring.
+
+**Diagnosis of the grid energy gap (2026-05-17).** On grid, bic-fusion
+finishes 85 units worse than nifty-fusion, despite bic-greedy starting
+36 units *better* than nifty-greedy. The 121-unit reversal across the
+fusion-move step is the thing to explain.
+
+1. **Cross-feed test localizes 100 % of the final gap to the greedy
+   warm-start, not to the fusion-move code.** Feeding nifty-greedy
+   labels into bic-fusion produced -690 355.67, matching nifty-fusion's
+   -690 355.63 (within float noise). bic's fusion-move algorithm
+   reproduces nifty's result from the same starting state.
+
+2. **bic-greedy and nifty-greedy land in structurally different local
+   optima**, not in two equivalent tie-breaks of the same optimum. The
+   reversal (bic ahead by 36 after greedy, behind by 85 after fusion)
+   means bic-greedy converges to a *deeper* local minimum that the
+   watershed proposals cannot escape — agreement-contraction between
+   bic-greedy's labels and the proposals leaves the sub-solver no room
+   to commit improvements. nifty-greedy's higher-energy optimum has
+   partition boundaries that the same proposals *can* perturb, so its
+   fusion-move makes much more progress per iteration.
+
+3. **Tie density is the structural cause.** 47 % of grid base edges
+   (339 946 of 718 848) carry the same weight ~+0.1. With so many
+   identical priorities, greedy-additive's merge order can pick wildly
+   different partition topologies. 2D and 3D have far fewer ties, so
+   both sides land in similar optima and the fusion-move ratios stay
+   exact.
+
+4. **bic's existing merge direction is the right one on this problem.**
+   Swapping bic's union-by-adjacency-size for nifty's union-by-rank
+   regressed bic-greedy by 100 units. Reverted.
+
+To close the gap we have to escape bic-greedy's deeper-but-rigid
+optimum before invoking fusion. KL refinement does exactly this:
+
+| Variant on grid | Energy | Runtime | Δ vs nifty energy |
+|---|---|---|---|
+| current (greedy + fusion 10/4) | -690 270.93 | 52 s | +85   (worse) |
+| fusion 20/8 (more iters, no KL) | -690 341.37 | 87 s | +14 |
+| fusion 50/15                    | -690 357.68 | 193 s | -2 |
+| **greedy + KL(1) + fusion**     | **-690 392.90** | **82 s** | **-37 (better)** |
+| greedy + KL(2) + fusion         | -690 539.43 | 173 s | -184 |
+
+At equal runtime, one outer iter of KL between greedy and fusion buys
+~50 more energy units than the equivalent extra fusion iterations.
+KL(1) on 2D shifts the result by 0.02 units (still matches nifty
+within noise), 3D improves by ~5 units, runtime cost is 10–15 % per
+problem.
+
+**Not adopted as a default.** The current `FusionMoveLiftedMulticut`
+matches nifty exactly on 2D/3D and runs 1.16× faster than nifty on
+grid at 0.012 % worse energy; this is acceptable for downstream
+segmentation use. Users who need the better grid energy can chain
+greedy → KL → fusion explicitly via `LiftedChainedSolvers`. If that
+turns out to be the common workflow, a `kl_warm_refinement_iters`
+parameter on `FusionMoveLiftedMulticut` would make the opt-in
+self-contained.
 
 ## Post-mortem: cluster-pair bucket optimization (2026-05-16, reverted)
 
@@ -137,90 +234,97 @@ back at the pre-bucket baseline.
   The cheap-path radix-sort optimization listed below would address
   this, but only matters if buckets come back.
 
-## Future optimizations (re-prioritised after the bucket post-mortem)
+## Post-script: how the `changed_[]` flag closed the gap (2026-05-16)
 
-The bucket approach is **not** the recommended next step. It changes
-algorithm output (different tie-breaking) which costs us energy parity
-on the 3D problem. If we revisit it, we'd want to invest first in
-verifying we can recover pre-bucket order (option 1 or 2 above) before
-committing to the layout work.
+The bucket post-mortem (above) concluded with two recommended levers
+(CSR adjacency, accept bucket tie-breaking) and the note that "nifty has
+no algorithmic advantage" — both rooted in a careful read of
+`lifted_twocut_kernighan_lin.hxx` (the per-pair two-cut routine).
 
-### 1. CSR adjacency layout for lifted graph (estimated: 10–15% off)
+That read missed the outer driver. `lifted_multicut_kernighan_lin.hxx`
+maintains a `changed_[]` flag per partition and gates the inner two-cut
+on it:
 
-**Idea.** `UndirectedGraph` stores adjacency as `vector<vector<Adjacency>>`
-— one heap allocation per node. Walking adjacency for many distinct nodes
-in a pair pays per-node pointer chasing. A flat CSR (`offsets[n+1]` +
-`entries[2E]`) built once at the start of `kernighan_lin` would be more
-cache-friendly.
+```cpp
+if (!pV.empty() && (changed_[piU] || changed_[piV]))
+    twoCut_.optimizeTwoCut(pU, pV, twoCutBuffers_);
+```
 
-**Caveat.** The actual access pattern in `chain_gain_init` walks
-adjacency for nodes in arbitrary order (whichever pair we're
-processing), so spatial locality across nodes is poor regardless of
-layout. The win is limited to per-node cache-line savings (one miss per
-node vs one per adjacency vector header). Estimate ~10% based on rough
-cycle counting.
+The flag is refreshed each outer iter by `checkIfPartitonChanged()`, a
+linear-time CC-style walk over base adjacency that marks a new partition
+as "changed" iff its node-set differs from the previous iter's
+partition that contained it (split or merge). The same gate is applied
+to `introduceNewPartitions` (== our `cluster_splits`).
 
-**Complexity.** Localized: ~50 lines, build CSR in `kernighan_lin`,
-replace `lifted_graph.node_adjacency(v)` calls in `chain_gain_init` and
-`chain_loop` with CSR iteration. Doesn't change algorithm output —
-adjacency iteration order is preserved.
+We added the equivalent: `detail_kl::compute_cluster_changed` (~60 lines)
+plus gates in the `kernighan_lin()` driver. Result on 3D:
 
-**Why now.** This is the most attractive remaining lever: localized,
-non-invasive, preserves tie-breaking, and the win is real cache
-savings rather than an algorithmic restructure with side effects.
+| Phase | Pre-flag | Post-flag |
+|---|---|---|
+| `pair_chains` | 167 ms | 61 ms |
+| `chain_gain_init` | 78 ms | 28 ms |
+| `chain_loop` | 85 ms | 31 ms |
+| `cluster_splits` | 6.9 ms | 1.8 ms |
+| `compute_changed` | — | 0.2 ms |
+| total (profiled) | 354 ms | 135 ms |
+| total (wall) | 195 ms | 86 ms |
 
-### 2. Skip pair-chains where heap stays empty (estimated: <5 ms)
+Energy stayed at 0.07 diff (vs 0.08 pre-flag — within noise); 2D stayed
+at exact 0.000 diff. Tie-breaking is preserved by construction: iter 0
+has all partitions "changed" so it processes every pair (and every
+split) — identical to today's algorithm. From iter 1, the only pairs
+skipped are those where neither input changed since the previous iter,
+where the chain is mathematically guaranteed to commit zero moves.
 
-After `chain_gain_init`, if `heap.empty()` we already skip
-`chain_loop`. But we still pay for `chain_init` and the full
-`chain_gain_init` walk. For pair-chains where the cluster pair has
-only one alive node per side (post-staleness filtering of
-`cluster_to_nodes`), we could skip earlier. Need to maintain live
-cluster sizes.
+Why this works so well on the benchmark: the workload is 10 outer iters
+on a problem that essentially converges after ~3 iters. Late iterations
+were 80%+ wasted re-walking adjacency for partitions that hadn't moved.
 
-Low priority — only a few ms.
+## Future optimizations
 
-### 3. Revisit bucket gain init *if* tie-breaking parity is acceptable
+The KL solver now beats nifty by ~17% on 3D and matches it on 2D.
+Further optimization is not currently a priority. Sketched levers, in
+case the workload changes:
 
-If a future use-case is OK with the 0.17 energy diff on 3D (e.g., the
-bucket version's output is fed into a downstream solver that re-optimises
-anyway), the simplified flat-sorted-vector bucket implementation with
-mid-iter rebuild is a known ~60 ms win. See git history for the
-implementation; the key files were
-`include/bioimage_cpp/graph/lifted_multicut/kernighan_lin.hxx`
-(LiftedEdgeBuckets struct + chain_gain_init rewrite).
+### CSR adjacency layout (estimated: 10–15% off `pair_chains`)
 
-Do not pursue incremental maintenance — it's a strict regression.
+`UndirectedGraph` stores adjacency as `vector<vector<Adjacency>>` — one
+heap allocation per node. A flat CSR built once at the start of
+`kernighan_lin` would reduce per-node cache-line misses in
+`chain_gain_init` and `chain_loop`. Doesn't change algorithm output.
 
-### 4. Inspect nifty's internals — DONE 2026-05-16
+### Skip pair-chains where heap stays empty (estimated: <5 ms)
 
-Read of `lifted_twocut_kernighan_lin.hxx` confirmed nifty has no
-algorithmic advantage over our pre-bucket version: same per-pair
-`O(pair_size × full_adjacency)` work, same NodeMap-based difference
-cache, no precomputed pair-bucket index. nifty's source is at:
+Already implicitly handled by `heap.empty()` check, but `chain_init`
+and `chain_gain_init` still run. Track live cluster sizes incrementally
+to skip earlier when one side is empty/singleton.
+
+### Bucket gain init
+
+Documented in the post-mortem (above). Would give ~60 ms on the
+pre-flag baseline but only ~30 ms on the post-flag baseline (most of
+the `chain_gain_init` time is now in iter 0 work, which buckets would
+still cover). Same tie-breaking concern stands; not recommended without
+a use-case that tolerates the 0.17 energy diff.
+
+### Inspect nifty's internals — DONE 2026-05-16
+
+Read of `lifted_twocut_kernighan_lin.hxx` confirmed nifty's per-pair
+two-cut has no algorithmic advantage over ours. The outer-driver
+`changed_[]` flag (in `lifted_multicut_kernighan_lin.hxx`) was the
+missing piece — now implemented. Source at:
 
 ```
+/home/pape/Work/software/src/nifty/include/nifty/graph/opt/lifted_multicut/lifted_multicut_kernighan_lin.hxx
 /home/pape/Work/software/src/nifty/include/nifty/graph/opt/lifted_multicut/detail/lifted_twocut_kernighan_lin.hxx
 ```
 
-Their per-entry constant factor is competitive (separate
-`graph_.adjacency(v)` and `liftedGraph_.adjacency(v)` walks, no per-entry
-`is_base` classification), but the algorithmic class is identical. The
-~2× gap on `chain_gain_init` per entry is most plausibly the
-adjacency-walk constants — which is what optimization #1 (CSR layout)
-would address.
+### Linear-scan border instead of a heap
 
-### 5. Linear-scan border instead of a heap
-
-**Verdict: not worth pursuing for this problem.**
-
-I worked through it: heap is faster than linear scan for our pair-size
-distribution. The heap pop is O(log N) and heap.change is also O(log N);
-for pair size 7 (the median) that's ~2× faster than O(N) linear scan,
-and the gap widens for larger pairs.
-
-nifty uses linear scan, but that's not where its speed advantage comes
-from — likely it's the adjacency-walking constants (optimization 1).
+**Verdict: not worth pursuing.** Heap is faster than linear scan for
+our pair-size distribution; both `pop` and `change` are O(log N) on the
+addressable indexed heap, beating O(N) linear scan for the median pair
+size of 7.
 
 ## Workload statistics (3D problem, post greedy warm-start)
 
@@ -234,19 +338,9 @@ Unchanged from before; useful for sanity-checking future estimates:
 ## Where to start next time
 
 1. Re-run `cd development/graph/lifted_multicut && python check_kernighan_lin.py --size 3d --repeats 5` to confirm the baseline hasn't drifted.
-2. Build with `pip install -e . --no-build-isolation -C cmake.define.BIOIMAGE_PROFILE=ON` to get the profile breakdown back.
-3. Try optimization 1 (CSR adjacency) — it's the safest remaining
-   lever, preserves tie-breaking, and addresses the per-entry
-   constant-factor gap we measured against nifty.
-4. Targets (downgraded from previous attempt — pre-bucket KL is at
-   195 ms, not 200 as the original notes said):
-   - 30%-of-nifty: ≤132 ms (currently 195 ms — 63 ms over).
-   - Match nifty: ≤103 ms.
-
-   The CSR change alone won't close 60+ ms. Closing the full gap
-   probably requires either (a) accepting the bucket tie-breaking
-   regression, or (b) finding an actually new algorithmic lever we
-   haven't identified.
+2. Build with `pip install -e . --no-build-isolation -C cmake.define.BIOIMAGE_PROFILE=ON` for the profile breakdown.
+3. The next-most-attractive lever is CSR adjacency layout (10–15%),
+   but only worth doing if a heavier workload reveals the need.
 
 ## Files that matter
 

@@ -876,6 +876,12 @@ class WatershedProposalGenerator(ProposalGenerator):
 
     Per call: add Gaussian noise to edge costs, drop random seeds at the
     endpoints of negative-cost edges, run the edge-weighted watershed.
+
+    ``n_seeds_fraction`` is the target *total seed count*: ``<= 1.0`` is a
+    fraction of ``number_of_nodes``, otherwise an absolute count. The
+    seeding loop places two seeds per iteration and runs ``n_seeds / 2``
+    times, matching nifty's ``WatershedProposalGenerator`` so the same
+    parameter value yields the same proposal density on both sides.
     """
 
     def __init__(
