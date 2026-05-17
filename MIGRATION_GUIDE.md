@@ -946,6 +946,88 @@ Notes:
 - Every value in the input must be present in the mapping.
 - Non-contiguous inputs are copied before entering C++.
 
+## Image Filters
+
+`bioimage-cpp` ships a small Gaussian-derivative filter set under
+`bic.filters`. The scope is the "ilastik filter set" exposed by
+`fastfilters`, which is also the most-used subset of `vigra.filters`.
+
+Vigra / fastfilters:
+
+```python
+import vigra.filters as vf
+out = vf.gaussianSmoothing(img, sigma=1.5)
+ev = vf.hessianOfGaussianEigenvalues(img, scale=1.5)
+
+import fastfilters as ff
+out = ff.gaussianSmoothing(img, sigma=1.5)
+ev = ff.hessianOfGaussianEigenvalues(img, scale=1.5)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+out = bic.filters.gaussian_smoothing(img, sigma=1.5)
+ev = bic.filters.hessian_of_gaussian_eigenvalues(img, sigma=1.5)
+```
+
+Name mapping:
+
+| vigra / fastfilters name | bioimage-cpp name |
+| --- | --- |
+| `gaussianSmoothing` | `gaussian_smoothing` |
+| `gaussianDerivative` | `gaussian_derivative` |
+| `gaussianGradientMagnitude` | `gaussian_gradient_magnitude` |
+| `laplacianOfGaussian` | `laplacian_of_gaussian` |
+| `hessianOfGaussianEigenvalues` | `hessian_of_gaussian_eigenvalues` |
+| `structureTensorEigenvalues` | `structure_tensor_eigenvalues` |
+
+Common parameters:
+
+- `sigma` is a positive scalar or a per-axis sequence of length
+  `image.ndim`. Anisotropic sigma is supported on every filter.
+- `gaussian_derivative` takes an `order` argument that is a scalar or a
+  per-axis sequence of ints in `{0, 1, 2}`.
+- `structure_tensor_eigenvalues` takes positional `inner_sigma` and
+  `outer_sigma` (vigra calls them `innerScale` / `outerScale`).
+- `window_size` controls the kernel radius:
+  `radius = ceil(window_size * sigma)`. `0.0` (the default) selects the
+  vigra-style default `3 + 0.5 * order`. Matches the same-named parameter
+  in vigra/fastfilters.
+
+Important differences from vigra and fastfilters:
+
+- Only 2D and 3D scalar (single-channel) inputs are supported in v1.
+  Channels and leading batch axes should be looped externally — matches
+  fastfilters' convention. Vigra's `taggedView`/`AxisInfo` machinery is
+  not reproduced.
+- C++ kernels operate on `float32`. `float64` inputs are accepted and the
+  output is cast back to `float64`. `uint8` and `uint16` are accepted with
+  a `float32` output (the typical ML-feature use case).
+- Boundary handling is `mirror` (matches scipy `mode="mirror"` —
+  reflection without edge-pixel repeat). Other boundary modes are not
+  exposed yet; the C++ layer carries an enum for future tiled processing.
+- Eigenvalue outputs have a trailing axis of size `image.ndim`, sorted
+  largest → smallest. This matches `fastfilters`. To get vigra's
+  ascending order, reverse with `result[..., ::-1]`.
+- No IIR / recursive Gaussian, no `convolve` / `recursiveFilter2D`, no
+  morphology, no distance transforms, no nonlinear diffusion, and no
+  non-local means in v1. Use `scipy.ndimage`, `skimage`, or the original
+  vigra/fastfilters bindings if you need those.
+
+Implementation notes:
+
+- All six filters are written as portable C++20 scalar code that the
+  compiler auto-vectorizes. No SIMD intrinsics, no per-file ISA flags, no
+  runtime CPU dispatch, no vendored SIMD library. This keeps the build
+  light enough to ship as portable PyPI wheels across Linux/macOS/Windows
+  and x86_64/arm64.
+- Single-threaded for now. Threading can be added later via
+  `detail/threading.hxx::parallel_for_chunks` without changing the
+  public API.
+
 ## I/O and Build Dependencies
 
 `bioimage-cpp` intentionally does not replace nifty or affogato I/O helpers.
