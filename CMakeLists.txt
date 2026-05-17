@@ -11,6 +11,7 @@ find_package(nanobind CONFIG REQUIRED)
 
 nanobind_add_module(_core
     NB_STATIC
+    src/bindings/affinities.cxx
     src/bindings/blocking.cxx
     src/bindings/module.cxx
     src/bindings/filters.cxx
