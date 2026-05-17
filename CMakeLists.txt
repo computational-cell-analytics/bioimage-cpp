@@ -19,6 +19,7 @@ nanobind_add_module(_core
     src/bindings/segmentation.cxx
     src/bindings/utils.cxx
     src/cpp/segmentation/mutex_watershed.cxx
+    src/cpp/segmentation/semantic_mutex_watershed.cxx
     src/cpp/take_dict.cxx
 )
 

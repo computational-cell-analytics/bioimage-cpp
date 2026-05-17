@@ -13,6 +13,11 @@ _MUTEX_WATERSHED_BY_DTYPE = {
     np.dtype("float64"): _core._mutex_watershed_grid_float64,
 }
 
+_SEMANTIC_MUTEX_WATERSHED_BY_DTYPE = {
+    np.dtype("float32"): _core._semantic_mutex_watershed_grid_float32,
+    np.dtype("float64"): _core._semantic_mutex_watershed_grid_float64,
+}
+
 
 def mutex_watershed(
     affinities: np.ndarray,
@@ -108,6 +113,132 @@ def mutex_watershed(
     if mask is not None:
         labels[np.logical_not(np.asarray(mask))] = 0
     return labels
+
+
+def semantic_mutex_watershed(
+    affinities: np.ndarray,
+    offsets: Sequence[Sequence[int]],
+    number_of_attractive_channels: int,
+    *,
+    strides: Sequence[int] | None = None,
+    randomized_strides: bool = False,
+    mask: np.ndarray | None = None,
+    mask_label: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Run semantic mutex watershed on a 2D or 3D image-derived grid graph.
+
+    The affinity array stacks three groups of channels along axis 0:
+
+    1. ``[0, number_of_attractive_channels)`` — attractive grid edges.
+    2. ``[number_of_attractive_channels, len(offsets))`` — mutex grid edges.
+    3. ``[len(offsets), affinities.shape[0])`` — one channel per semantic
+       class, scoring how likely each pixel belongs to that class.
+
+    The first two groups are the regular mutex watershed input; the third
+    extends it: clusters can be tagged with the strongest semantic class
+    seen for any of their pixels and two clusters carrying different
+    semantic tags are forbidden from merging.
+
+    Parameters
+    ----------
+    affinities:
+        Array with shape ``(channels, y, x)`` or ``(channels, z, y, x)``.
+        ``channels`` must be strictly greater than ``len(offsets)`` so that
+        at least one semantic class is present; otherwise use
+        :func:`mutex_watershed`. Supported dtypes are ``float32`` and
+        ``float64``; non-contiguous arrays are copied.
+    offsets:
+        One offset per spatial channel (attractive + mutex), in NumPy axis
+        order. Length must equal ``number_of_attractive_channels +
+        number_of_mutex_channels``.
+    number_of_attractive_channels:
+        The first this many spatial channels are attractive; the remaining
+        ``len(offsets) - number_of_attractive_channels`` channels are mutex.
+    strides, randomized_strides:
+        Same semantics as :func:`mutex_watershed`. Apply to mutex channels
+        only.
+    mask:
+        Optional boolean foreground mask with shape ``affinities.shape[1:]``.
+        Spatial edges touching ``False`` pixels are skipped, ``False`` pixels
+        are labelled as background ``0`` in ``labels`` and as ``mask_label``
+        in ``semantic_labels``.
+    mask_label:
+        Value written to ``semantic_labels`` for masked-out pixels. Defaults
+        to ``0``.
+
+    Returns
+    -------
+    labels:
+        ``uint64`` array with shape ``affinities.shape[1:]``. Consecutive
+        1-based segmentation labels.
+    semantic_labels:
+        ``int64`` array with the same shape. Per-pixel semantic class id, or
+        ``-1`` for clusters that received no semantic assignment.
+    """
+    array = np.asarray(affinities)
+    if array.ndim not in (3, 4):
+        raise ValueError(
+            "affinities must have shape (channels, y, x) or "
+            f"(channels, z, y, x), got ndim={array.ndim}"
+        )
+
+    dtype = array.dtype
+    try:
+        run = _SEMANTIC_MUTEX_WATERSHED_BY_DTYPE[dtype]
+    except KeyError as error:
+        supported = ", ".join(str(dtype) for dtype in _SEMANTIC_MUTEX_WATERSHED_BY_DTYPE)
+        raise TypeError(
+            f"affinities must have one of dtypes ({supported}), got dtype={dtype}"
+        ) from error
+
+    normalized_offsets = [tuple(int(value) for value in offset) for offset in offsets]
+    number_of_offsets = len(normalized_offsets)
+    number_of_channels = int(array.shape[0])
+    spatial_ndim = array.ndim - 1
+    if number_of_offsets == 0:
+        raise ValueError("offsets must not be empty")
+    if number_of_channels <= number_of_offsets:
+        raise ValueError(
+            "semantic_mutex_watershed requires at least one semantic-class channel, "
+            f"got channels={number_of_channels}, len(offsets)={number_of_offsets}; "
+            "use mutex_watershed for the non-semantic case"
+        )
+    if any(len(offset) != spatial_ndim for offset in normalized_offsets):
+        raise ValueError(
+            "each offset must have length matching the spatial ndim, got "
+            f"spatial ndim={spatial_ndim}"
+        )
+    if number_of_attractive_channels < 0:
+        raise ValueError("number_of_attractive_channels must be non-negative")
+    if number_of_attractive_channels > number_of_offsets:
+        raise ValueError(
+            "number_of_attractive_channels must be <= len(offsets)"
+        )
+
+    normalized_strides = _normalize_strides(strides, spatial_ndim, randomized_strides)
+    contiguous = np.ascontiguousarray(array)
+    valid_edges = _compute_valid_edges_semantic(
+        contiguous,
+        normalized_offsets,
+        number_of_attractive_channels,
+        number_of_offsets,
+        normalized_strides,
+        randomized_strides,
+        mask,
+    )
+
+    labels, semantic_labels = run(
+        contiguous,
+        valid_edges,
+        normalized_offsets,
+        number_of_attractive_channels,
+        number_of_offsets,
+    )
+    if mask is not None:
+        invalid = np.logical_not(np.asarray(mask))
+        labels[invalid] = 0
+        semantic_labels[invalid] = mask_label
+    return labels, semantic_labels
 
 
 def _normalize_strides(
@@ -223,5 +354,41 @@ def _compute_valid_edges(
             channel_valid = valid_edges[(channel,) + source_slices]
             channel_valid[touches_invalid] = False
             valid_edges[(channel,) + source_slices] = channel_valid
+
+    return np.ascontiguousarray(valid_edges, dtype=np.uint8)
+
+
+def _compute_valid_edges_semantic(
+    affinities: np.ndarray,
+    offsets: Sequence[tuple[int, ...]],
+    number_of_attractive_channels: int,
+    number_of_offsets: int,
+    strides: tuple[int, ...] | None,
+    randomized_strides: bool,
+    mask: np.ndarray | None,
+) -> np.ndarray:
+    # Reuse the spatial-edge logic, then extend the mask to cover the extra
+    # semantic-class channels. The spatial helper allocates the full
+    # ``affinities.shape`` mask but only writes into the first
+    # ``number_of_offsets`` channels, which is exactly what we want here —
+    # everything beyond is initialised to ``False`` and managed below.
+    valid_edges_uint = _compute_valid_edges(
+        tuple(affinities.shape),
+        offsets,
+        number_of_attractive_channels,
+        strides,
+        randomized_strides,
+        mask,
+    )
+    valid_edges = valid_edges_uint.astype(bool, copy=True)
+
+    semantic_channels = affinities[number_of_offsets:]
+    if semantic_channels.shape[0] > 0:
+        per_pixel_max = semantic_channels.max(axis=0, keepdims=True)
+        valid_edges[number_of_offsets:] = semantic_channels == per_pixel_max
+
+    if mask is not None:
+        invalid = np.logical_not(np.asarray(mask))
+        valid_edges[number_of_offsets:, invalid] = False
 
     return np.ascontiguousarray(valid_edges, dtype=np.uint8)
