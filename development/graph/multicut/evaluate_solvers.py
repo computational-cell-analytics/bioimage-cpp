@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from statistics import mean
 from time import perf_counter
@@ -177,6 +178,22 @@ def format_float(value: float) -> str:
     return f"{value:.6g}"
 
 
+def print_progress(row: dict) -> None:
+    print(
+        (
+            f"[done] {row['problem']} / {row['solver']}: "
+            f"bic_energy={format_float(row['bic_energy'])}, "
+            f"nifty_energy={format_float(row['nifty_energy'])}, "
+            f"delta={format_float(row['energy_diff'])}, "
+            f"bic_runtime={format_float(row['bic_runtime_s'])}s, "
+            f"nifty_runtime={format_float(row['nifty_runtime_s'])}s, "
+            f"ratio={format_float(row['runtime_ratio'])}"
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def print_markdown_table(rows: list[dict]) -> None:
     headers = [
         "problem",
@@ -243,7 +260,9 @@ def main() -> None:
     rows = []
     for problem_name in args.problems:
         for solver_name in args.solvers:
-            rows.append(evaluate(problem_name, solver_name, configs[solver_name], args))
+            row = evaluate(problem_name, solver_name, configs[solver_name], args)
+            rows.append(row)
+            print_progress(row)
     print_markdown_table(rows)
 
 
