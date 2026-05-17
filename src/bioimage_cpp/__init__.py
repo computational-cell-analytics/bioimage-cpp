@@ -2,6 +2,7 @@
 
 from ._version import __version__
 from ._core import Block, Blocking, BlockWithHalo
+from . import affinities
 from . import graph
 from . import ground_truth
 from . import segmentation
@@ -12,6 +13,7 @@ __all__ = [
     "Block",
     "Blocking",
     "BlockWithHalo",
+    "affinities",
     "graph",
     "ground_truth",
     "segmentation",
