@@ -214,3 +214,26 @@ def load_isbi_raw(
     with h5py.File(affinity_path(timeout=timeout), "r") as f:
         raw = f["raw"][:]
     return np.ascontiguousarray(raw)
+
+
+def load_isbi_gt_segmentation(
+    *,
+    timeout: Optional[float] = None,
+) -> np.ndarray:
+    """Load the registered ISBI ground-truth segmentation volume.
+
+    The labels are stored in the same HDF5 file as the affinities under key
+    ``labels/gt_segmentation``. Returned as a C-contiguous ``uint64`` array
+    with shape ``(30, 512, 512)`` (~7.9 M voxels).
+    """
+    try:
+        import h5py
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "h5py is required to load the registered ISBI segmentation file. "
+            "Install it with `pip install h5py`."
+        ) from error
+
+    with h5py.File(affinity_path(timeout=timeout), "r") as f:
+        labels = f["labels/gt_segmentation"][:]
+    return np.ascontiguousarray(labels)

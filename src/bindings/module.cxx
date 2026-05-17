@@ -1,3 +1,4 @@
+#include "affinities.hxx"
 #include "blocking.hxx"
 #include "filters.hxx"
 #include "graph.hxx"
@@ -11,6 +12,7 @@ namespace nb = nanobind;
 
 NB_MODULE(_core, m) {
     m.doc() = "C++ extension module for bioimage_cpp.";
+    bioimage_cpp::bindings::bind_affinities(m);
     bioimage_cpp::bindings::bind_blocking(m);
     bioimage_cpp::bindings::bind_filters(m);
     bioimage_cpp::bindings::bind_graph(m);
