@@ -21,6 +21,12 @@ class SolverConfig:
 def solver_configs():
     import bioimage_cpp as bic
 
+    # Fair single-threaded comparison: nifty's lifted fusion-move backend is
+    # single-threaded, so we pin the bic side to threads=1 and one parallel
+    # proposal per iteration (matching nifty's "generate one, fuse" loop) and
+    # chain greedy-additive in front of nifty to mirror bic's auto warm-start.
+    # Watershed seeding strategy is forced to SEED_FROM_LOCAL on the nifty
+    # side because the bic proposal generator only sees the base graph.
     return {
         "lifted_greedy_additive": SolverConfig(
             make_bic_solver=lambda: bic.graph.LiftedGreedyAdditiveMulticut(),
@@ -35,6 +41,28 @@ def solver_configs():
                     objective.liftedMulticutGreedyAdditiveFactory(),
                     objective.liftedMulticutKernighanLinFactory(
                         numberOfOuterIterations=10
+                    ),
+                ]
+            ),
+        ),
+        "lifted_fusion_move": SolverConfig(
+            make_bic_solver=lambda: bic.graph.FusionMoveLiftedMulticut(
+                proposal_generator=bic.graph.WatershedProposalGenerator(),
+                number_of_iterations=10,
+                stop_if_no_improvement=4,
+                number_of_threads=1,
+                number_of_parallel_proposals=1,
+            ),
+            make_nifty_factory=lambda objective: objective.chainedSolversFactory(
+                [
+                    objective.liftedMulticutGreedyAdditiveFactory(),
+                    objective.fusionMoveBasedFactory(
+                        proposalGenerator=objective.watershedProposalGenerator(
+                            seedingStrategy="SEED_FROM_LOCAL",
+                        ),
+                        numberOfIterations=10,
+                        stopIfNoImprovement=4,
+                        numberOfThreads=1,
                     ),
                 ]
             ),

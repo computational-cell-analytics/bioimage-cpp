@@ -876,6 +876,12 @@ class WatershedProposalGenerator(ProposalGenerator):
 
     Per call: add Gaussian noise to edge costs, drop random seeds at the
     endpoints of negative-cost edges, run the edge-weighted watershed.
+
+    ``n_seeds_fraction`` is the target *total seed count*: ``<= 1.0`` is a
+    fraction of ``number_of_nodes``, otherwise an absolute count. The
+    seeding loop places two seeds per iteration and runs ``n_seeds / 2``
+    times, matching nifty's ``WatershedProposalGenerator`` so the same
+    parameter value yields the same proposal density on both sides.
     """
 
     def __init__(
@@ -1457,6 +1463,101 @@ class LiftedKernighanLinMulticut(LiftedMulticutSolver):
         )
 
 
+class FusionMoveLiftedMulticut(LiftedMulticutSolver):
+    """Fusion-move lifted multicut solver.
+
+    Iteratively generates proposals via ``proposal_generator`` (which sees the
+    *base* graph and base edge costs), fuses them with the current best
+    labeling, and accepts improvements. Each fuse contracts the base graph by
+    agreement across the proposals, aggregates base + lifted weights onto the
+    contracted lifted-multicut subproblem, and dispatches to ``sub_solver``.
+    If ``sub_solver`` is omitted, the default sub-solver is
+    :class:`LiftedGreedyAdditiveMulticut`.
+
+    If the objective's current labels are the trivial singleton labeling, the
+    driver warm-starts with one lifted greedy-additive pass before the proposal
+    loop. The best-of safety net guarantees energy never increases across
+    iterations.
+
+    Threading: ``number_of_threads > 1`` runs ``number_of_parallel_proposals``
+    proposal generators in parallel within each iteration. Each parallel slot
+    uses an independent proposal generator with seed ``proposal_generator.seed
+    + slot_index``. By default ``number_of_parallel_proposals`` is ``2`` when
+    ``number_of_threads == 1`` and ``number_of_threads`` otherwise; pass it
+    explicitly to override.
+    """
+
+    def __init__(
+        self,
+        *,
+        proposal_generator: ProposalGenerator,
+        sub_solver: LiftedMulticutSolver | None = None,
+        number_of_iterations: int = 10,
+        stop_if_no_improvement: int = 4,
+        number_of_threads: int = 1,
+        number_of_parallel_proposals: int | None = None,
+    ):
+        if not isinstance(proposal_generator, ProposalGenerator):
+            raise TypeError("proposal_generator must inherit from ProposalGenerator")
+        if sub_solver is not None and not isinstance(sub_solver, LiftedMulticutSolver):
+            raise TypeError("sub_solver must inherit from LiftedMulticutSolver")
+        if sub_solver is not None and not hasattr(sub_solver, "_build_cpp_sub_solver"):
+            raise TypeError(
+                "sub_solver must be a built-in lifted multicut solver "
+                "(custom Python solvers are not supported as fusion-move sub-solvers)"
+            )
+        n_threads = int(number_of_threads)
+        if n_threads < 1:
+            raise ValueError("number_of_threads must be >= 1")
+        if number_of_parallel_proposals is None:
+            n_parallel = 2 if n_threads == 1 else n_threads
+        else:
+            n_parallel = int(number_of_parallel_proposals)
+        if n_parallel < 1:
+            raise ValueError("number_of_parallel_proposals must be >= 1")
+
+        self.proposal_generator = proposal_generator
+        self.sub_solver = sub_solver
+        self.number_of_iterations = int(number_of_iterations)
+        self.stop_if_no_improvement = int(stop_if_no_improvement)
+        self.number_of_threads = n_threads
+        self.number_of_parallel_proposals = n_parallel
+        if self.number_of_iterations < 0:
+            raise ValueError("number_of_iterations must be non-negative")
+        if self.stop_if_no_improvement < 1:
+            raise ValueError("stop_if_no_improvement must be >= 1")
+
+    def optimize(self, objective: LiftedMulticutObjective) -> np.ndarray:
+        n_base = objective.number_of_base_edges
+        # The base costs back the proposal generators (the lifted weights
+        # cannot drive base-graph contraction or watershed segmentation).
+        base_costs = np.ascontiguousarray(objective.weights[:n_base])
+        cpp_pgens = [
+            self.proposal_generator._build_for_thread(
+                objective.graph, base_costs, slot
+            )
+            for slot in range(self.number_of_parallel_proposals)
+        ]
+        cpp_sub_solver = (
+            None if self.sub_solver is None else self.sub_solver._build_cpp_sub_solver()
+        )
+        labels = _core._lifted_multicut_fusion_move(
+            objective.graph,
+            objective.lifted_graph,
+            objective.weights,
+            n_base,
+            objective.labels,
+            cpp_pgens,
+            cpp_sub_solver,
+            self.number_of_iterations,
+            self.stop_if_no_improvement,
+            self.number_of_threads,
+            self.number_of_parallel_proposals,
+        )
+        objective.labels = labels
+        return objective.labels
+
+
 class LiftedChainedSolvers(LiftedMulticutSolver):
     """Chain of lifted multicut solvers run in sequence on the same objective.
 
@@ -1868,6 +1969,7 @@ __all__ = [
     "COMPLEX_EDGE_FEATURE_NAMES",
     "DEFAULT_EXTERNAL_MULTICUT_PROBLEM_PATH",
     "EXTERNAL_MULTICUT_PROBLEM_URL",
+    "FusionMoveLiftedMulticut",
     "FusionMoveMulticut",
     "GreedyAdditiveMulticut",
     "GreedyAdditiveProposalGenerator",
