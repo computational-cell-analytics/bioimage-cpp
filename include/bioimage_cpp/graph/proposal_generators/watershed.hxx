@@ -18,8 +18,12 @@ namespace bioimage_cpp::graph {
 // of negative-cost edges, then `edge_weighted_watershed`. Mirrors the workhorse
 // generator used by nifty's multicut fusion moves.
 //
-// `n_seeds_fraction` is interpreted as a fraction of `number_of_nodes` when
-// <= 1.0 and as an absolute seed-pair count otherwise.
+// `n_seeds_fraction` is the target *total seed count* (not pair count): when
+// <= 1.0 it is interpreted as a fraction of `number_of_nodes`, otherwise as
+// an absolute count. Each iteration of the seeding loop places two seeds at
+// the endpoints of one random negative-cost base edge, so the loop runs
+// `n_seeds / 2` times. Matches nifty's `WatershedProposalGenerator` so that
+// `n_seeds_fraction=0.1` produces the same proposal density on both sides.
 //
 // Scratch buffers (noisy costs, seeds, watershed sort buffer) are held as
 // members and reused across `generate` calls.
@@ -69,21 +73,26 @@ public:
             noisy_costs_[edge] = static_cast<float>(edge_costs_[edge] + noise_(generator_));
         }
 
-        std::size_t n_seed_pairs;
+        std::size_t n_seeds_target;
         if (n_seeds_fraction_ <= 1.0) {
-            n_seed_pairs = static_cast<std::size_t>(
+            n_seeds_target = static_cast<std::size_t>(
                 static_cast<double>(number_of_nodes) * n_seeds_fraction_ + 0.5
             );
         } else {
-            n_seed_pairs = static_cast<std::size_t>(n_seeds_fraction_ + 0.5);
+            n_seeds_target = static_cast<std::size_t>(n_seeds_fraction_ + 0.5);
         }
-        n_seed_pairs = std::max(std::size_t{1}, n_seed_pairs);
-        n_seed_pairs = std::min(negative_edges_.size(), n_seed_pairs);
+        n_seeds_target = std::max(std::size_t{1}, n_seeds_target);
+        // Each loop iteration places two seeds, so the iteration count is
+        // half the target. Bottom of 1 keeps degenerate fractions usable.
+        const std::size_t n_seed_pair_iters = std::min(
+            negative_edges_.size(),
+            n_seeds_target == 1 ? std::size_t{1} : n_seeds_target / 2
+        );
 
         std::fill(seeds_buffer_.begin(), seeds_buffer_.end(), std::uint64_t{0});
         std::uniform_int_distribution<std::size_t> edge_dist(0, negative_edges_.size() - 1);
         std::uint64_t next_label = 1;
-        for (std::size_t i = 0; i < n_seed_pairs; ++i) {
+        for (std::size_t i = 0; i < n_seed_pair_iters; ++i) {
             const auto edge = negative_edges_[edge_dist(generator_)];
             const auto uv = graph_.uv(edge);
             seeds_buffer_[static_cast<std::size_t>(uv.first)] = next_label++;

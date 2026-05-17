@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -339,6 +340,70 @@ inline double run_chain(
     return 0.0;
 }
 
+// Mark which clusters in ``labels`` differ in node-set from any cluster in
+// ``previous_labels``. A new cluster c is "unchanged" iff every node in c
+// shares the same previous label c_old AND ``|c| == |c_old|`` — i.e. the
+// partition was neither split nor merged during the last outer iter.
+//
+// Used to gate pair-chains and cluster-splits: a pair (A, B) whose inputs
+// are identical to the last iteration's must produce the same chain result
+// (which was "no improvement" — otherwise the partitions would have changed).
+// Skipping such pairs is the only major algorithmic optimization in nifty's
+// outer KL driver that we previously lacked.
+inline std::vector<std::uint8_t> compute_cluster_changed(
+    const std::vector<std::uint64_t> &labels,
+    const std::vector<std::uint64_t> &previous_labels,
+    const std::uint64_t number_of_clusters
+) {
+    std::vector<std::uint8_t> changed(static_cast<std::size_t>(number_of_clusters), 0);
+    if (number_of_clusters == 0) {
+        return changed;
+    }
+    if (previous_labels.size() != labels.size()) {
+        // First iter or shape change — treat everything as changed.
+        std::fill(changed.begin(), changed.end(), 1);
+        return changed;
+    }
+
+    const auto max_prev = *std::max_element(previous_labels.begin(), previous_labels.end());
+    std::vector<std::uint64_t> prev_size(static_cast<std::size_t>(max_prev) + 1, 0);
+    for (const auto p : previous_labels) {
+        ++prev_size[static_cast<std::size_t>(p)];
+    }
+
+    constexpr auto SENTINEL = std::numeric_limits<std::uint64_t>::max();
+    std::vector<std::uint64_t> map_new_to_old(
+        static_cast<std::size_t>(number_of_clusters), SENTINEL
+    );
+    std::vector<std::uint64_t> new_size(static_cast<std::size_t>(number_of_clusters), 0);
+
+    for (std::size_t v = 0; v < labels.size(); ++v) {
+        const auto c_new = static_cast<std::size_t>(labels[v]);
+        const auto c_old = previous_labels[v];
+        ++new_size[c_new];
+        if (changed[c_new]) {
+            continue;
+        }
+        if (map_new_to_old[c_new] == SENTINEL) {
+            map_new_to_old[c_new] = c_old;
+        } else if (map_new_to_old[c_new] != c_old) {
+            changed[c_new] = 1;
+        }
+    }
+
+    for (std::size_t c = 0; c < changed.size(); ++c) {
+        if (changed[c]) {
+            continue;
+        }
+        const auto c_old = map_new_to_old[c];
+        if (c_old == SENTINEL
+            || prev_size[static_cast<std::size_t>(c_old)] != new_size[c]) {
+            changed[c] = 1;
+        }
+    }
+    return changed;
+}
+
 // Re-split labels so that every cluster is connected in the base graph.
 // Returns the new labeling (dense relabeled).
 inline std::vector<std::uint64_t> enforce_base_connectivity(
@@ -392,6 +457,14 @@ inline std::vector<std::uint64_t> kernighan_lin(
     detail_kl::ChainBuffers bufs(n_nodes);
     detail_kl::ChainScratch scratch(n_nodes);
 
+    // Per-cluster "changed since last outer iter" flag. Iter 0 processes
+    // every pair (no prior state); from iter 1 onward we skip (A, B) when
+    // neither side's node-set changed during the previous iter — the chain
+    // is a pure function of its inputs, so unchanged inputs replay the
+    // previous iter's zero-gain result.
+    std::vector<std::uint8_t> changed;
+    std::vector<std::uint64_t> prev_iter_labels = labels;
+
     for (std::uint64_t iteration = 0; iteration < number_of_outer_iterations; ++iteration) {
         bool improved = false;
 
@@ -407,9 +480,22 @@ inline std::vector<std::uint64_t> kernighan_lin(
             cluster_to_nodes = detail_kl::build_cluster_to_nodes(labels, number_of_clusters);
         }
 
+        // Iter 0: all changed (no prior state). Iter k > 0: compare current
+        // labels (== end of iter k-1) against ``prev_iter_labels`` (== end of
+        // iter k-2). ``changed[c]`` answers "did partition c change during
+        // iter k-1?"; pairs/splits involving only stable partitions can be
+        // skipped.
+        if (iteration == 0) {
+            changed.assign(static_cast<std::size_t>(number_of_clusters), 1);
+        }
+
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "pair_chains");
             for (const auto &pair : pairs) {
+                if (!changed[static_cast<std::size_t>(pair.a)]
+                    && !changed[static_cast<std::size_t>(pair.b)]) {
+                    continue;
+                }
                 const auto delta = detail_kl::run_chain(
                     base_graph,
                     lifted_graph,
@@ -434,6 +520,9 @@ inline std::vector<std::uint64_t> kernighan_lin(
             BIOIMAGE_PROFILE_SCOPE(profile, "cluster_splits");
             std::uint64_t next_label = number_of_clusters;
             for (std::uint64_t cluster = 0; cluster < number_of_clusters; ++cluster) {
+                if (!changed[static_cast<std::size_t>(cluster)]) {
+                    continue;
+                }
                 while (true) {
                     if (next_label >= cluster_to_nodes.size()) {
                         cluster_to_nodes.resize(static_cast<std::size_t>(next_label) + 1);
@@ -465,6 +554,20 @@ inline std::vector<std::uint64_t> kernighan_lin(
             BIOIMAGE_PROFILE_SCOPE(profile, "cc_repartition");
             labels = detail_kl::enforce_base_connectivity(base_graph, labels);
             labels = dense_relabel(labels);
+        }
+
+        // Recompute changed[] for use in the next outer iter, comparing the
+        // post-cc_repartition labels (end of this iter) against the labels
+        // at the start of this iter (``prev_iter_labels``).
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "compute_changed");
+            const auto new_n_clusters = labels.empty()
+                ? std::uint64_t{0}
+                : (*std::max_element(labels.begin(), labels.end()) + 1);
+            changed = detail_kl::compute_cluster_changed(
+                labels, prev_iter_labels, new_n_clusters
+            );
+            prev_iter_labels = labels;
         }
 
         double new_energy;
