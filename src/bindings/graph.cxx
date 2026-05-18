@@ -1031,7 +1031,8 @@ DoubleArray accumulate_edge_map_features_t(
     const bool compute_complex_features,
     const std::size_t number_of_threads
 ) {
-    const auto number_of_features = compute_complex_features ? 12 : 2;
+    const std::size_t number_of_features =
+        compute_complex_features ? std::size_t{12} : std::size_t{2};
     auto result = make_double_array({
         static_cast<std::size_t>(rag.number_of_edges()),
         number_of_features
@@ -1077,7 +1078,8 @@ DoubleArray accumulate_affinity_features_t(
     const bool compute_complex_features,
     const std::size_t number_of_threads
 ) {
-    const auto number_of_features = compute_complex_features ? 12 : 2;
+    const std::size_t number_of_features =
+        compute_complex_features ? std::size_t{12} : std::size_t{2};
     auto result = make_double_array({
         static_cast<std::size_t>(rag.number_of_edges()),
         number_of_features
@@ -1157,7 +1159,8 @@ DoubleArray accumulate_lifted_affinity_features_t(
         throw std::invalid_argument("lifted_uvs must have shape (n_lifted, 2)");
     }
     const auto n_lifted = lifted_uvs.shape(0);
-    const auto number_of_features = compute_complex_features ? 12 : 2;
+    const std::size_t number_of_features =
+        compute_complex_features ? std::size_t{12} : std::size_t{2};
     auto result = make_double_array({n_lifted, number_of_features});
 
     std::vector<bioimage_cpp::detail::Edge> lifted_edges(n_lifted);
