@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <algorithm>
@@ -49,7 +49,7 @@ inline void edge_weighted_watershed_kernel(
         [](const auto &a, const auto &b) { return a.first < b.first; }
     );
 
-    bioimage_cpp::detail::UnionFind sets(static_cast<std::size_t>(number_of_nodes));
+    bioimage_cpp::util::UnionFind sets(static_cast<std::size_t>(number_of_nodes));
 
     constexpr SeedT zero{0};
     for (const auto &item : scratch.sort_buffer) {

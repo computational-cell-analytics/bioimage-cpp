@@ -2,7 +2,7 @@
 
 #include "bioimage_cpp/detail/mutex_storage.hxx"
 #include "bioimage_cpp/detail/relabel.hxx"
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <algorithm>
@@ -97,7 +97,7 @@ std::vector<std::uint64_t> mutex_watershed_clustering(
         return first.index < second.index;
     });
 
-    bioimage_cpp::detail::UnionFind sets(number_of_nodes);
+    bioimage_cpp::util::UnionFind sets(number_of_nodes);
     MutexStorage mutexes(number_of_nodes);
 
     for (const auto &edge : edge_order) {

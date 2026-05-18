@@ -13,7 +13,7 @@ namespace bioimage_cpp::graph::lifted_multicut {
 // Reusable scratch state for `lifted_greedy_additive`.
 struct GreedyAdditiveWorkspace {
     detail::DynamicGraph dynamic_graph;
-    bioimage_cpp::detail::UnionFind union_find{0};
+    bioimage_cpp::util::UnionFind union_find{0};
     detail::EdgeHeap heap;
 
     void reset(const UndirectedGraph &lifted_graph) {
