@@ -239,6 +239,87 @@ nb::ndarray<nb::numpy, LabelT, nb::c_contig> watershed_t(
     );
 }
 
+template <class AffT, class LabelT>
+nb::ndarray<nb::numpy, LabelT, nb::c_contig> watershed_from_affinities_t(
+    nb::ndarray<nb::numpy, const AffT, nb::c_contig> affinities,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets,
+    nb::ndarray<nb::numpy, const LabelT, nb::c_contig> markers,
+    std::optional<nb::ndarray<nb::numpy, const std::uint8_t, nb::c_contig>> mask
+) {
+    if (affinities.ndim() != 3 && affinities.ndim() != 4) {
+        throw std::invalid_argument(
+            "affinities must have ndim 3 or 4, got ndim=" +
+            std::to_string(affinities.ndim())
+        );
+    }
+    std::vector<std::ptrdiff_t> affinity_shape(affinities.ndim());
+    for (std::size_t axis = 0; axis < affinities.ndim(); ++axis) {
+        affinity_shape[axis] = static_cast<std::ptrdiff_t>(affinities.shape(axis));
+    }
+
+    const std::size_t spatial_ndim = affinities.ndim() - 1;
+    std::vector<std::ptrdiff_t> spatial_shape(spatial_ndim);
+    std::vector<std::size_t> out_shape(spatial_ndim);
+    for (std::size_t axis = 0; axis < spatial_ndim; ++axis) {
+        spatial_shape[axis] =
+            static_cast<std::ptrdiff_t>(affinities.shape(axis + 1));
+        out_shape[axis] = affinities.shape(axis + 1);
+    }
+
+    if (markers.ndim() != spatial_ndim) {
+        throw std::invalid_argument("markers shape must match affinities spatial shape");
+    }
+    for (std::size_t axis = 0; axis < spatial_ndim; ++axis) {
+        if (markers.shape(axis) != affinities.shape(axis + 1)) {
+            throw std::invalid_argument("markers shape must match affinities spatial shape");
+        }
+    }
+
+    std::vector<std::ptrdiff_t> mask_shape;
+    const std::uint8_t *mask_data = nullptr;
+    if (mask.has_value()) {
+        if (mask->ndim() != spatial_ndim) {
+            throw std::invalid_argument("mask shape must match affinities spatial shape");
+        }
+        mask_shape.resize(mask->ndim());
+        for (std::size_t axis = 0; axis < spatial_ndim; ++axis) {
+            mask_shape[axis] = static_cast<std::ptrdiff_t>(mask->shape(axis));
+            if (mask->shape(axis) != affinities.shape(axis + 1)) {
+                throw std::invalid_argument("mask shape must match affinities spatial shape");
+            }
+        }
+        mask_data = mask->data();
+    }
+
+    const auto number_of_nodes = std::accumulate(
+        spatial_shape.begin(),
+        spatial_shape.end(),
+        std::ptrdiff_t{1},
+        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
+    );
+    auto *data = new LabelT[static_cast<std::size_t>(number_of_nodes)]();
+    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<LabelT *>(p); });
+
+    ConstArrayView<AffT> affinities_view{affinities.data(), affinity_shape, {}};
+    ConstArrayView<LabelT> markers_view{markers.data(), spatial_shape, {}};
+    ConstArrayView<std::uint8_t> mask_view{mask_data, mask_shape, {}};
+    ArrayView<LabelT> out_view{data, spatial_shape, {}};
+
+    {
+        nb::gil_scoped_release release;
+        watershed_from_affinities<AffT, LabelT>(
+            affinities_view, offsets, markers_view, mask_view, out_view
+        );
+    }
+
+    return nb::ndarray<nb::numpy, LabelT, nb::c_contig>(
+        data,
+        out_shape.size(),
+        out_shape.data(),
+        owner
+    );
+}
+
 } // namespace
 
 void bind_segmentation(nb::module_ &m) {
@@ -344,6 +425,79 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("markers"),
         nb::arg("mask") = nb::none(),
         "Marker-controlled watershed on a 2D or 3D float64 image with int64 markers."
+    );
+
+    m.def(
+        "_watershed_from_affinities_float32_uint32",
+        &watershed_from_affinities_t<float, std::uint32_t>,
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Affinity-based watershed on 2D or 3D nearest-neighbour float32 affinities with uint32 markers."
+    );
+    m.def(
+        "_watershed_from_affinities_float32_uint64",
+        &watershed_from_affinities_t<float, std::uint64_t>,
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Affinity-based watershed on 2D or 3D nearest-neighbour float32 affinities with uint64 markers."
+    );
+    m.def(
+        "_watershed_from_affinities_float32_int32",
+        &watershed_from_affinities_t<float, std::int32_t>,
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Affinity-based watershed on 2D or 3D nearest-neighbour float32 affinities with int32 markers."
+    );
+    m.def(
+        "_watershed_from_affinities_float32_int64",
+        &watershed_from_affinities_t<float, std::int64_t>,
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Affinity-based watershed on 2D or 3D nearest-neighbour float32 affinities with int64 markers."
+    );
+    m.def(
+        "_watershed_from_affinities_float64_uint32",
+        &watershed_from_affinities_t<double, std::uint32_t>,
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Affinity-based watershed on 2D or 3D nearest-neighbour float64 affinities with uint32 markers."
+    );
+    m.def(
+        "_watershed_from_affinities_float64_uint64",
+        &watershed_from_affinities_t<double, std::uint64_t>,
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Affinity-based watershed on 2D or 3D nearest-neighbour float64 affinities with uint64 markers."
+    );
+    m.def(
+        "_watershed_from_affinities_float64_int32",
+        &watershed_from_affinities_t<double, std::int32_t>,
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Affinity-based watershed on 2D or 3D nearest-neighbour float64 affinities with int32 markers."
+    );
+    m.def(
+        "_watershed_from_affinities_float64_int64",
+        &watershed_from_affinities_t<double, std::int64_t>,
+        nb::arg("affinities"),
+        nb::arg("offsets"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Affinity-based watershed on 2D or 3D nearest-neighbour float64 affinities with int64 markers."
     );
 }
 

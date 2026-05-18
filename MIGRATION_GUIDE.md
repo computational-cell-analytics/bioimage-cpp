@@ -841,6 +841,44 @@ Notes:
 - Signed integer inputs must not contain negative labels.
 - Inputs are converted to contiguous `uint64` arrays before entering C++.
 
+## Marker-controlled Watershed
+
+`bioimage-cpp` ships two marker-controlled watershed entry points: one that
+consumes a node-valued heightmap and one that consumes an edge-valued
+nearest-neighbour affinity map. Both share the same flooding scaffolding
+internally — a 65536-bucket Meyer-style monotone queue — and have the same
+public-facing semantics: markers are mandatory, connectivity is 1
+(4-neighbour in 2D, 6-neighbour in 3D), an optional foreground mask is
+supported, and tie-breaking on equal heights / equal affinities is
+unspecified.
+
+```python
+# Heightmap-driven (analogous to skimage.segmentation.watershed)
+labels = bic.segmentation.watershed(image, markers, mask=optional_mask)
+
+# Affinity-driven: edge priorities, no heightmap derivation needed
+labels = bic.segmentation.watershed_from_affinities(
+    affinities,                       # (C, *spatial), C == spatial_ndim
+    offsets=[(-1, 0), (0, -1)],       # one NN offset per channel, same sign
+    markers=markers,
+    mask=optional_mask,
+)
+```
+
+Notes for `watershed_from_affinities`:
+
+- Each channel must encode a single nearest-neighbour edge (exactly one
+  ±1 entry, the rest zero). All offsets must have the same sign — mixing
+  positive and negative directions is rejected. The function dispatches
+  to a positive-direction or negative-direction specialisation at the C++
+  layer so the inner loop has no per-channel sign branches.
+- Offsets may be passed in any axis order; the channel ↔ axis mapping is
+  rebuilt internally.
+- Higher affinity is processed first (high affinity = strong bond).
+- Compared to `affogato.segmentation.compute_mws_segmentation`, there are
+  no mutex (repulsive) channels and no long-range offsets — use
+  `bic.segmentation.mutex_watershed` for that.
+
 ## Mutex Watershed
 
 `bioimage-cpp` ships two mutex-watershed entry points, mirroring the two
