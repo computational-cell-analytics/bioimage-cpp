@@ -604,6 +604,11 @@ _MUTEX_WATERSHED_CLUSTERING_BY_DTYPE = {
     np.dtype("float64"): _core._mutex_watershed_clustering_float64,
 }
 
+_SEMANTIC_MUTEX_WATERSHED_CLUSTERING_BY_DTYPE = {
+    np.dtype("float32"): _core._semantic_mutex_watershed_clustering_float32,
+    np.dtype("float64"): _core._semantic_mutex_watershed_clustering_float64,
+}
+
 
 def _resolve_weight_dtype(array, name: str) -> np.ndarray:
     """Coerce a weights input to a supported floating dtype.
@@ -690,6 +695,95 @@ def mutex_watershed_clustering(
     )
     run = _MUTEX_WATERSHED_CLUSTERING_BY_DTYPE[edge_cost_array.dtype]
     return run(graph, edge_cost_array, mutex_uv_array, mutex_cost_array)
+
+
+def semantic_mutex_watershed_clustering(
+    graph: UndirectedGraph | RegionAdjacencyGraph,
+    edge_costs,
+    mutex_uvs,
+    mutex_costs,
+    semantic_node_classes,
+    semantic_costs,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Semantic mutex watershed clustering on an undirected graph.
+
+    Extends :func:`mutex_watershed_clustering` with a third group of edges
+    that attach semantic class labels to clusters. Two clusters carrying
+    different semantic class labels are forbidden from merging; otherwise
+    the algorithm proceeds as in the non-semantic case (attractive edges
+    merge; mutex edges block).
+
+    Parameters
+    ----------
+    graph:
+        :class:`UndirectedGraph` or :class:`RegionAdjacencyGraph` defining
+        the attractive edges.
+    edge_costs:
+        1D array of length ``graph.number_of_edges``. Same dtype rules as
+        :func:`mutex_watershed_clustering`.
+    mutex_uvs:
+        ``(n_mutex, 2)`` uint64 array of (u, v) pairs for the mutex edges.
+    mutex_costs:
+        1D array of length ``n_mutex``.
+    semantic_node_classes:
+        ``(n_semantic, 2)`` uint64 array. Column 0 is a node id; column 1
+        is the semantic class id (non-negative integer). The semantic class
+        id is interpreted as a signed integer when reported back, so values
+        above ``np.iinfo(np.int64).max`` are out of range.
+    semantic_costs:
+        1D array of length ``n_semantic``. Same dtype rules as
+        ``edge_costs``; if the floating dtypes of the three weight arrays
+        do not all agree, all three are promoted to ``float64``.
+
+    Returns
+    -------
+    node_labels:
+        ``(graph.number_of_nodes,)`` uint64 array. Dense node labels in
+        ``[0, k)`` in first-occurrence order.
+    semantic_labels:
+        ``(graph.number_of_nodes,)`` int64 array. Per-node semantic class
+        id, or ``-1`` for clusters that received no semantic assignment.
+    """
+    edge_cost_array = _resolve_weight_dtype(edge_costs, "edge_costs")
+    mutex_cost_array = _resolve_weight_dtype(mutex_costs, "mutex_costs")
+    semantic_cost_array = _resolve_weight_dtype(semantic_costs, "semantic_costs")
+
+    dtypes = {edge_cost_array.dtype, mutex_cost_array.dtype, semantic_cost_array.dtype}
+    if len(dtypes) > 1:
+        edge_cost_array = edge_cost_array.astype(np.float64, copy=False)
+        mutex_cost_array = mutex_cost_array.astype(np.float64, copy=False)
+        semantic_cost_array = semantic_cost_array.astype(np.float64, copy=False)
+
+    edge_cost_array = _as_1d_array(
+        edge_cost_array,
+        edge_cost_array.dtype,
+        "edge_costs",
+        int(graph.number_of_edges),
+    )
+    mutex_uv_array = _as_uv_array(mutex_uvs, "mutex_uvs")
+    mutex_cost_array = _as_1d_array(
+        mutex_cost_array,
+        mutex_cost_array.dtype,
+        "mutex_costs",
+        int(mutex_uv_array.shape[0]),
+    )
+    semantic_uv_array = _as_uv_array(semantic_node_classes, "semantic_node_classes")
+    semantic_cost_array = _as_1d_array(
+        semantic_cost_array,
+        semantic_cost_array.dtype,
+        "semantic_costs",
+        int(semantic_uv_array.shape[0]),
+    )
+
+    run = _SEMANTIC_MUTEX_WATERSHED_CLUSTERING_BY_DTYPE[edge_cost_array.dtype]
+    return run(
+        graph,
+        edge_cost_array,
+        mutex_uv_array,
+        mutex_cost_array,
+        semantic_uv_array,
+        semantic_cost_array,
+    )
 
 
 class MulticutObjective:
@@ -2016,5 +2110,6 @@ __all__ = [
     "mutex_watershed_clustering",
     "project_node_labels_to_pixels",
     "region_adjacency_graph",
+    "semantic_mutex_watershed_clustering",
     "undirected_graph",
 ]

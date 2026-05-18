@@ -823,6 +823,64 @@ UInt64Array mutex_watershed_clustering_t(
     return vector_to_uint64_array(labels);
 }
 
+template <class WeightT>
+std::pair<UInt64Array, Int64Array> semantic_mutex_watershed_clustering_t(
+    const Graph &graph,
+    ConstArray1D<WeightT> edge_costs,
+    ConstUInt64Array mutex_uvs,
+    ConstArray1D<WeightT> mutex_costs,
+    ConstUInt64Array semantic_node_classes,
+    ConstArray1D<WeightT> semantic_costs
+) {
+    const auto edge_cost_vector =
+        array_1d_to_vector<WeightT>(edge_costs, "edge_costs", graph.number_of_edges());
+    require_uv_array(mutex_uvs, "mutex_uvs");
+    const auto n_mutex = mutex_uvs.shape(0);
+    const auto mutex_cost_vector =
+        array_1d_to_vector<WeightT>(mutex_costs, "mutex_costs", static_cast<std::uint64_t>(n_mutex));
+    require_uv_array(semantic_node_classes, "semantic_node_classes");
+    const auto n_semantic = semantic_node_classes.shape(0);
+    const auto semantic_cost_vector = array_1d_to_vector<WeightT>(
+        semantic_costs,
+        "semantic_costs",
+        static_cast<std::uint64_t>(n_semantic)
+    );
+
+    std::vector<std::array<std::uint64_t, 2>> mutex_uv_vector(n_mutex);
+    {
+        const auto *uv_data = mutex_uvs.data();
+        for (std::size_t index = 0; index < n_mutex; ++index) {
+            mutex_uv_vector[index][0] = uv_data[2 * index];
+            mutex_uv_vector[index][1] = uv_data[2 * index + 1];
+        }
+    }
+    std::vector<std::array<std::uint64_t, 2>> semantic_uv_vector(n_semantic);
+    {
+        const auto *uv_data = semantic_node_classes.data();
+        for (std::size_t index = 0; index < n_semantic; ++index) {
+            semantic_uv_vector[index][0] = uv_data[2 * index];
+            semantic_uv_vector[index][1] = uv_data[2 * index + 1];
+        }
+    }
+
+    graph::SemanticMutexWatershedResult result;
+    {
+        nb::gil_scoped_release release;
+        result = graph::semantic_mutex_watershed_clustering<WeightT>(
+            graph,
+            edge_cost_vector,
+            mutex_uv_vector,
+            mutex_cost_vector,
+            semantic_uv_vector,
+            semantic_cost_vector
+        );
+    }
+    return std::make_pair(
+        vector_to_uint64_array(result.node_labels),
+        vector_to_array_1d<std::int64_t>(result.semantic_labels)
+    );
+}
+
 UInt64Array multicut_fusion_move(
     const Graph &graph,
     ConstDoubleArray costs,
@@ -1543,6 +1601,24 @@ void bind_graph(nb::module_ &m) {
     };
     register_mutex_watershed_clustering.operator()<float>("_mutex_watershed_clustering_float32");
     register_mutex_watershed_clustering.operator()<double>("_mutex_watershed_clustering_float64");
+
+    const auto register_semantic_mutex_watershed_clustering =
+        [&m]<class WeightT>(const char *name) {
+            m.def(
+                name,
+                &semantic_mutex_watershed_clustering_t<WeightT>,
+                nb::arg("graph"),
+                nb::arg("edge_costs"),
+                nb::arg("mutex_uvs"),
+                nb::arg("mutex_costs"),
+                nb::arg("semantic_node_classes"),
+                nb::arg("semantic_costs")
+            );
+        };
+    register_semantic_mutex_watershed_clustering
+        .operator()<float>("_semantic_mutex_watershed_clustering_float32");
+    register_semantic_mutex_watershed_clustering
+        .operator()<double>("_semantic_mutex_watershed_clustering_float64");
 
     // Lifted multicut sub-solver hierarchy. Same shape as the multicut sub-
     // solver bindings — opaque to Python, used by future fusion-move drivers.

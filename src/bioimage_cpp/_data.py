@@ -23,6 +23,14 @@ Lifted multicut problems (``.npz`` files written by
 Affinities:
 - ``affinities`` — HDF5 file with sample affinities from the ISBI volume.
   Contains affinities under key ``affinities``.
+
+Semantic labels:
+- ``semantic_labels`` — HDF5 file with paired instance and semantic ground
+  truth on a single 3D volume. Contains ``labels/instances``,
+  ``labels/semantic`` and ``raw``. The on-disk arrays are padded with ``-1``
+  outside the labelled region; loaders crop to the labelled content slab.
+  Used by the semantic-mutex-watershed comparison scripts under
+  ``development/``.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ import numpy as np
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "bioimage-cpp"
 CACHE_ENV_VAR = "BIOIMAGE_CPP_CACHE"
 ISBI_AFFINITY_FILENAME = "affinities"
+SEMANTIC_LABELS_FILENAME = "semantic_labels"
 ISBI_AFFINITY_OFFSETS = (
     (-1, 0, 0),
     (0, -1, 0),
@@ -100,6 +109,10 @@ _REGISTRY: dict[str, tuple[str, Optional[str]]] = {
     "affinities": (
         "https://owncloud.gwdg.de/index.php/s/aAyF2ekzsW7DFJo/download",
         "6472ad0fcf3c57a4ae345fda68c3cbb6072ee3e8db67b423502746b46d8cd5e5",
+    ),
+    "semantic_labels": (
+        "https://owncloud.gwdg.de/index.php/s/Ah7IGuYH7uuomQV/download",
+        "6232fe2fd58fdbd3def978798143fdcc65a2af118b4d9ee177b5c942173ece26",
     ),
 }
 
@@ -237,3 +250,69 @@ def load_isbi_gt_segmentation(
     with h5py.File(affinity_path(timeout=timeout), "r") as f:
         labels = f["labels/gt_segmentation"][:]
     return np.ascontiguousarray(labels)
+
+
+def semantic_labels_path(*, timeout: Optional[float] = None) -> Path:
+    """Return the cached path to the registered semantic-labels HDF5 file."""
+    return fetch(SEMANTIC_LABELS_FILENAME, timeout=timeout)
+
+
+# Bounding box of the labelled content in the on-disk volume. Outside this
+# slab both label volumes are uniformly ``-1``; cropping here keeps callers
+# from having to special-case the padding.
+SEMANTIC_LABELS_CROP = (slice(16, 32), slice(64, 512), slice(64, 512))
+
+
+def load_semantic_labels(
+    *,
+    timeout: Optional[float] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load the registered (instance, semantic) ground-truth volumes.
+
+    Both volumes share the same spatial shape and live in a single HDF5 file
+    under keys ``labels/instances`` and ``labels/semantic``. The on-disk
+    arrays are padded with ``-1`` outside the labelled slab; this loader
+    returns the cropped labelled region (``(16, 448, 448)``).
+
+    Returns
+    -------
+    instance_labels:
+        Integer instance-segmentation volume.
+    semantic_labels:
+        Integer semantic-class volume (one class id per voxel).
+    """
+    try:
+        import h5py
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "h5py is required to load the registered semantic-labels file. "
+            "Install it with `pip install h5py`."
+        ) from error
+
+    with h5py.File(semantic_labels_path(timeout=timeout), "r") as f:
+        instance = f["labels/instances"][SEMANTIC_LABELS_CROP]
+        semantic = f["labels/semantic"][SEMANTIC_LABELS_CROP]
+    return np.ascontiguousarray(instance), np.ascontiguousarray(semantic)
+
+
+def load_semantic_raw(
+    *,
+    timeout: Optional[float] = None,
+) -> np.ndarray:
+    """Load the raw volume paired with the registered semantic labels.
+
+    Stored alongside ``labels/instances`` / ``labels/semantic`` in the same
+    HDF5 file under key ``raw``. Cropped consistently with
+    :func:`load_semantic_labels`.
+    """
+    try:
+        import h5py
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "h5py is required to load the registered semantic-raw file. "
+            "Install it with `pip install h5py`."
+        ) from error
+
+    with h5py.File(semantic_labels_path(timeout=timeout), "r") as f:
+        raw = f["raw"][SEMANTIC_LABELS_CROP]
+    return np.ascontiguousarray(raw)

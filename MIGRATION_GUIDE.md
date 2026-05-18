@@ -958,6 +958,142 @@ Notes:
   partitions. See `development/graph/check_mutex_clustering.py` for a
   comparison harness.
 
+### Semantic mutex watershed
+
+`bioimage-cpp` mirrors affogato's two semantic-mutex-watershed entry points
+— `compute_semantic_mws_segmentation` for affinity volumes and
+`compute_semantic_mws_clustering` for an arbitrary graph. Both extend the
+regular mutex watershed with a third edge type: per-pixel (or per-node)
+"semantic edges" that tag each cluster with a class id. Two clusters that
+have been tagged with different class ids cannot subsequently merge.
+
+#### Grid-based semantic mutex watershed (affinity volumes)
+
+Affogato:
+
+```python
+from affogato.segmentation import compute_semantic_mws_segmentation
+
+labels, semantic_labels = compute_semantic_mws_segmentation(
+    weights,
+    offsets,
+    number_of_attractive_channels=3,
+    strides=[1, 1, 1],
+)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+labels, semantic_labels = bic.segmentation.semantic_mutex_watershed(
+    weights,
+    offsets,
+    number_of_attractive_channels=3,
+    strides=[1, 1, 1],
+)
+```
+
+Channel layout (identical to affogato):
+
+- Channels `[0, number_of_attractive_channels)` are attractive grid edges.
+- Channels `[number_of_attractive_channels, len(offsets))` are mutex grid
+  edges.
+- Channels `[len(offsets), affinities.shape[0])` are per-semantic-class
+  affinities; channel `len(offsets) + c` scores how strongly each pixel
+  belongs to class `c`.
+
+Important migration notes:
+
+- Inputs must represent 2D or 3D grids with shapes `(channels, y, x)` or
+  `(channels, z, y, x)` and `channels > len(offsets)` (use
+  `bic.segmentation.mutex_watershed` if there are no semantic channels).
+- Supported affinity dtypes are `float32` and `float64`.
+- Returned `labels` are `uint64`, consecutive, and 1-based for foreground
+  pixels (matching the regular grid-based mutex watershed). `semantic_labels`
+  is `int64` with `-1` reserved for clusters that received no class
+  assignment.
+- A boolean `mask` may be passed. Edges touching `False` pixels are
+  ignored. Masked pixels are set to label `0` in `labels` and to the
+  `mask_label` parameter (default `0`) in `semantic_labels`.
+- `strides` and `randomized_strides` follow the same convention as the
+  regular grid mutex watershed (mutex channels only; attractive channels
+  are always kept).
+
+#### Graph-based semantic mutex watershed
+
+Affogato:
+
+```python
+from affogato.segmentation import compute_semantic_mws_clustering
+
+labels, semantic_labels = compute_semantic_mws_clustering(
+    number_of_nodes,
+    uvs.astype(np.uint64),
+    mutex_uvs.astype(np.uint64),
+    semantic_node_classes.astype(np.uint64),
+    weights.astype(np.float32),
+    mutex_weights.astype(np.float32),
+    semantic_weights.astype(np.float32),
+)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+graph = bic.graph.UndirectedGraph.from_edges(number_of_nodes, uvs)
+labels, semantic_labels = bic.graph.semantic_mutex_watershed_clustering(
+    graph,
+    weights,
+    mutex_uvs,
+    mutex_weights,
+    semantic_node_classes,
+    semantic_weights,
+)
+```
+
+Input format mirrors `mutex_watershed_clustering` plus two extra arrays:
+
+- `semantic_node_classes` is an `(n_semantic, 2)` `uint64` table. Column 0
+  is a node id and column 1 is the semantic class id (a non-negative
+  integer interpreted as `int64` internally).
+- `semantic_weights` is a 1D `float32`/`float64` array of length
+  `n_semantic` giving one weight per `(node, class)` candidate.
+
+Notes:
+
+- All three weight arrays (`weights`, `mutex_weights`, `semantic_weights`)
+  must have the same floating dtype, or all three are promoted to
+  `float64`.
+- Output `labels` are dense `uint64` ids in `0 .. number_of_clusters - 1`
+  (first-occurrence order, matching the regular graph mutex watershed —
+  *not* the 1-based foreground labels produced by the grid variant).
+  `semantic_labels` is `int64` with `-1` for unassigned clusters.
+- Accepts both `UndirectedGraph` and `RegionAdjacencyGraph`.
+
+#### Divergence from affogato
+
+The bioimage-cpp port fixes a missing `merge_semantic_labels` call on
+attractive merges in affogato's graph kernel (`compute_semantic_mws_clustering`):
+without that call, a node that has been tagged with a class can have its
+tag dropped when it later becomes the non-root of a merge. Affogato's
+array kernel additionally invokes `boost::disjoint_sets::link(u, v)` on
+raw node ids rather than their roots, which corrupts the union-find tree
+on multi-class inputs and over-fragments the result. The unit-test
+problems shipped with affogato do not exercise these paths heavily, so
+this only shows up on realistic multi-class data.
+
+For most inputs the two implementations agree. On dense multi-class
+inputs they may not; the development scripts under
+`development/segmentation/check_semantic_mutex_watershed_{2d,3d}.py` and
+`development/graph/check_semantic_mutex_clustering.py` print VI/ARI
+partition metrics and a semantic-label match fraction so the deviation is
+measurable. The bioimage-cpp partitions match an independent Python
+reference implementation of the algorithm.
+
 ## Dictionary-Based Relabeling
 
 If you used a small helper to apply a dictionary to an integer label array, use
