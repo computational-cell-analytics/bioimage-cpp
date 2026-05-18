@@ -27,12 +27,12 @@ This library provides the following functionality:
 - `graph`: graph creation and graph (partitioning) algorithms.
 - `segmentation`: image segmentation functionality.
 - `transformation`: affine transformations.
-- `util`: misc utility functionality.
+- `utils`: misc utility functionality.
 
 ## Example
 
 Below is a simple example for creating and partitioning a graph with this library.
-For more realistic use-cases check out [the migration guide](migration-guide).
+For more realistic use-cases check out [the migration guide](#migration-guide).
 
 ```python
 import numpy as np
