@@ -1,13 +1,13 @@
 #include "transformation.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/transformation/affine.hxx"
 
 #include <nanobind/ndarray.h>
 
 #include <cstddef>
 #include <cstdint>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,49 +35,12 @@ std::vector<std::ptrdiff_t> shape_of(const Array &array) {
     return shape;
 }
 
-std::vector<std::ptrdiff_t> c_order_strides(const std::vector<std::ptrdiff_t> &shape) {
-    std::vector<std::ptrdiff_t> strides(shape.size(), 1);
-    for (std::size_t axis = shape.size(); axis-- > 1;) {
-        strides[axis - 1] = strides[axis] * shape[axis];
-    }
-    return strides;
-}
-
-std::size_t number_of_elements(const std::vector<std::ptrdiff_t> &shape) {
-    return static_cast<std::size_t>(std::accumulate(
-        shape.begin(),
-        shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    ));
-}
-
-std::vector<std::size_t> ndarray_shape(const std::vector<std::ptrdiff_t> &shape) {
-    std::vector<std::size_t> result(shape.size());
-    for (std::size_t axis = 0; axis < shape.size(); ++axis) {
-        if (shape[axis] < 0) {
-            throw std::invalid_argument("output_shape values must be non-negative");
-        }
-        result[axis] = static_cast<std::size_t>(shape[axis]);
-    }
-    return result;
-}
-
-template <class T>
-OutputArray<T> make_output(const std::vector<std::ptrdiff_t> &shape) {
-    const auto out_shape = ndarray_shape(shape);
-    const std::size_t size = number_of_elements(shape);
-    auto *data = new T[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
-    return OutputArray<T>(data, out_shape.size(), out_shape.data(), owner);
-}
-
 template <std::size_t D, class T>
 OutputArray<T> affine_transform_t(
     ConstArray<T> input,
     MatrixArray matrix,
     StartsArray starts,
-    StartsArray output_shape,
+    OutputArray<T> output,
     const int order,
     const T fill_value
 ) {
@@ -87,53 +50,38 @@ OutputArray<T> affine_transform_t(
             ", got ndim=" + std::to_string(input.ndim())
         );
     }
-
-    const auto input_shape = shape_of(input);
-    const auto input_strides = c_order_strides(input_shape);
-    const auto matrix_shape = shape_of(matrix);
-    const auto matrix_strides = c_order_strides(matrix_shape);
-    const auto starts_shape = shape_of(starts);
-    const auto starts_strides = c_order_strides(starts_shape);
-
-    if (output_shape.ndim() != 1 || output_shape.shape(0) != D) {
+    if (output.ndim() != D) {
         throw std::invalid_argument(
-            "output_shape must have shape (" + std::to_string(D) + ",)"
+            "output must have ndim=" + std::to_string(D) +
+            ", got ndim=" + std::to_string(output.ndim())
         );
     }
 
-    std::vector<std::ptrdiff_t> out_shape(D);
-    for (std::size_t axis = 0; axis < D; ++axis) {
-        out_shape[axis] = output_shape.data()[axis];
-    }
-    auto output = make_output<T>(out_shape);
-    const auto output_strides = c_order_strides(out_shape);
+    const auto input_shape = shape_of(input);
+    const auto input_strides = detail::c_order_strides(input_shape);
+    const auto matrix_shape = shape_of(matrix);
+    const auto matrix_strides = detail::c_order_strides(matrix_shape);
+    const auto starts_shape = shape_of(starts);
+    const auto starts_strides = detail::c_order_strides(starts_shape);
+    const auto output_shape = shape_of(output);
+    const auto output_strides = detail::c_order_strides(output_shape);
 
-    ConstArrayView<T> input_view{
-        input.data(),
-        input_shape,
-        input_strides,
-    };
-    ArrayView<T> output_view{
-        output.data(),
-        out_shape,
-        output_strides,
-    };
-    ConstArrayView<double> matrix_view{
-        matrix.data(),
-        matrix_shape,
-        matrix_strides,
-    };
-    ConstArrayView<std::ptrdiff_t> starts_view{
-        starts.data(),
-        starts_shape,
-        starts_strides,
-    };
+    ConstArrayView<T> input_view{input.data(), input_shape, input_strides};
+    ArrayView<T> output_view{output.data(), output_shape, output_strides};
+    ConstArrayView<double> matrix_view{matrix.data(), matrix_shape, matrix_strides};
+    ConstArrayView<std::ptrdiff_t> starts_view{starts.data(), starts_shape, starts_strides};
 
     {
         nb::gil_scoped_release release;
-        transformation::affine_transform<D, T>(
-            input_view, output_view, matrix_view, starts_view, order, fill_value
-        );
+        if constexpr (D == 2) {
+            transformation::affine_transform_2d<T>(
+                input_view, output_view, matrix_view, starts_view, order, fill_value
+            );
+        } else {
+            transformation::affine_transform_3d<T>(
+                input_view, output_view, matrix_view, starts_view, order, fill_value
+            );
+        }
     }
 
     return output;
@@ -147,10 +95,10 @@ void bind_affine_for_dtype(nb::module_ &m, const char *name_2d, const char *name
         nb::arg("input"),
         nb::arg("matrix"),
         nb::arg("starts"),
-        nb::arg("output_shape"),
+        nb::arg("output"),
         nb::arg("order"),
         nb::arg("fill_value"),
-        "Apply a 2D affine transformation to a contiguous NumPy array."
+        "Apply a 2D affine transformation into a pre-allocated NumPy array."
     );
     m.def(
         name_3d,
@@ -158,10 +106,10 @@ void bind_affine_for_dtype(nb::module_ &m, const char *name_2d, const char *name
         nb::arg("input"),
         nb::arg("matrix"),
         nb::arg("starts"),
-        nb::arg("output_shape"),
+        nb::arg("output"),
         nb::arg("order"),
         nb::arg("fill_value"),
-        "Apply a 3D affine transformation to a contiguous NumPy array."
+        "Apply a 3D affine transformation into a pre-allocated NumPy array."
     );
 }
 

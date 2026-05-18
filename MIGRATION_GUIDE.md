@@ -1300,14 +1300,183 @@ Important differences from nifty:
   accepted.
 - `bounding_box=None` transforms `slice(0, data.shape[d])` for every axis.
   Custom bounding boxes are one slice per axis and cannot use a step.
-- Supported interpolation orders are nearest (`0`), linear (`1`), and local
-  cubic convolution (`3`). Cubic is computed on the fly with a Catmull-Rom /
-  Keys kernel, not scipy's spline-prefiltered order 3.
-- Border handling uses corrected constant-fill semantics: exact in-bounds
-  coordinates, including the last row/column/slice, are valid. Nifty's older
-  NumPy affine path treats the last index as invalid.
-- Output dtype is preserved for all supported input dtypes, including integer
-  inputs with linear or cubic interpolation.
+- Supported interpolation orders are `0` (nearest), `1` (linear),
+  `2`/`4`/`5` (quadratic / quartic / quintic B-spline), and `3` (Keys cubic
+  convolution, `a = -0.5`). The order set matches `scipy.ndimage`.
+- Order `3` is *interpolating* (reproduces input samples at integer
+  coordinates). Orders `2`, `4`, `5` are *smoothing* B-spline kernels: they
+  exactly match `scipy.ndimage.affine_transform(..., prefilter=False,
+  mode='grid-constant')`, which is **not** scipy's default. We do not run
+  the cubic-spline IIR prefilter that scipy applies when `prefilter=True`,
+  so `bic.transformation.affine_transform(..., order=3)` is **not**
+  numerically equivalent to scipy's default `order=3`. See
+  `development/transformation/PERFORMANCE_NOTES.md` for the prefilter cost
+  analysis and the sketch of how we would add it. Practical guidance:
+    - For nifty parity, use `order=0` or `order=1`.
+    - For OpenCV-style "smooth cubic that hits the samples", use `order=3`.
+    - For scipy `prefilter=False` parity, use `order=2/4/5`.
+    - For scipy `prefilter=True` parity, you currently have to prefilter
+      the input yourself with `scipy.ndimage.spline_filter` before calling
+      our `affine_transform`.
+- Border handling for orders 0, 1, and 3 follows
+  `scipy.ndimage.affine_transform(..., mode='constant')`: any output
+  coordinate that maps to an input coordinate inside `[0, shape - 1]`
+  along every axis is interpolated; coordinates fully outside are replaced
+  with `fill_value`. In particular the last row/column/slice is sampled
+  (nifty's older NumPy affine path treats the last index as out-of-bounds).
+  Orders `2/4/5` use `mode='grid-constant'` semantics: each kernel tap
+  independently picks up `fill_value` when it is out of bounds, with no
+  outer cliff at the input border.
+- Output dtype is preserved for all supported input dtypes, including
+  integer inputs with linear, cubic, or spline interpolation. Integer
+  outputs round to the nearest integer and clamp to the dtype range, so
+  cubic / spline overshoots are well defined for `uint8`/`int8`/etc.
+- An optional `out=` keyword writes the result into a pre-allocated
+  C-contiguous NumPy array of matching shape and dtype.
+
+### Anti-aliased resampling
+
+`affine_transform` itself never pre-smooths the input; downsampling without
+prior low-pass filtering aliases. `bic.transformation.resample` is a thin
+Python wrapper that computes a per-input-axis Gaussian sigma from the
+matrix's linear part and pre-smooths via `bic.filters.gaussian_smoothing`
+before sampling:
+
+```python
+import bioimage_cpp as bic
+
+# Downsample by 2x on each axis, anti-aliased:
+matrix = [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]
+small = bic.transformation.resample(
+    image, matrix,
+    bounding_box=(slice(0, h // 2), slice(0, w // 2)),
+    order=1,                # any supported order
+    anti_aliasing=True,     # default; uses the heuristic sigma
+)
+
+# Explicit sigma (skips the heuristic):
+small = bic.transformation.resample(image, matrix, anti_aliasing_sigma=[1.0, 1.0])
+
+# Inspect what the heuristic would pick without resampling:
+sigma = bic.transformation.compute_anti_aliasing_sigma(matrix, image.ndim)
+```
+
+The heuristic mirrors `skimage.transform.resize`: per input axis,
+`sigma = max(0, (||row_of_linear_part|| - 1) / 2)`. Pure rotations
+produce all-zero sigma (no smoothing); a uniform 2× downsample produces
+`sigma = 0.5` per axis.
+
+### Re-creating nifty's HDF5/zarr affine in Python
+
+`bioimage-cpp` deliberately stops at NumPy; format-specific entry points
+(`affineTransformationH5`, `affineTransformationZ5`) are out of scope for
+the C++ core. For a downstream library that wants to recreate them, the
+NumPy primitives compose naturally — chunk the **output** frame, read
+just the input bounding box needed for each output chunk, transform with
+`bic.transformation.affine_transform`, write the result back:
+
+```python
+import numpy as np
+import bioimage_cpp as bic
+
+def affine_transform_chunked(in_dataset, out_dataset, matrix, *,
+                             output_shape, order=1, fill_value=0,
+                             out_block_shape=(64, 256, 256), halo=None):
+    """Apply an affine to a large array, one output block at a time.
+
+    `in_dataset` and `out_dataset` are array-like (numpy / h5py.Dataset /
+    zarr.Array / tensorstore / ...). `matrix` maps output coordinates to
+    input coordinates in NumPy axis order (the same convention as
+    `bic.transformation.affine_transform`).
+    """
+    ndim = len(output_shape)
+    linear = np.asarray(matrix, dtype=np.float64)[:ndim, :ndim]
+    translation = np.asarray(matrix, dtype=np.float64)[:ndim, ndim]
+    # Default halo: kernel half-width per axis (order/2 rounded up) plus a
+    # safety margin for floating-point coordinate drift.
+    if halo is None:
+        halo = tuple([order + 2] * ndim)
+
+    in_shape = np.asarray(in_dataset.shape)
+    out_block = np.asarray(out_block_shape)
+
+    # Walk the output frame block by block.
+    block_starts = [
+        range(0, output_shape[k], out_block[k]) for k in range(ndim)
+    ]
+    for corner in np.ndindex(*(len(b) for b in block_starts)):
+        out_start = np.array([block_starts[k][corner[k]] for k in range(ndim)])
+        out_stop = np.minimum(out_start + out_block, output_shape)
+
+        # 1. Find the input bounding box that all output voxels in this
+        #    block could possibly sample. The 8 (2D: 4) corners of the
+        #    output block are mapped through `matrix`; the axis-aligned
+        #    bounding box of those mapped points (plus a halo) is what we
+        #    need from the input array.
+        corners = np.stack(np.meshgrid(*[
+            [out_start[k], out_stop[k] - 1] for k in range(ndim)
+        ], indexing="ij"), axis=-1).reshape(-1, ndim).astype(np.float64)
+        in_corners = corners @ linear.T + translation
+        in_lo = np.floor(in_corners.min(axis=0)).astype(np.int64) - np.asarray(halo)
+        in_hi = np.ceil(in_corners.max(axis=0)).astype(np.int64) + np.asarray(halo)
+
+        # 2. Clip to the input array. Anything outside becomes fill_value
+        #    via the affine_transform's border handling.
+        in_lo_clipped = np.maximum(in_lo, 0)
+        in_hi_clipped = np.minimum(in_hi, in_shape)
+        if np.any(in_hi_clipped <= in_lo_clipped):
+            # Output block lies entirely outside the input frame.
+            out_block_data = np.full(
+                tuple((out_stop - out_start).tolist()),
+                fill_value, dtype=out_dataset.dtype,
+            )
+        else:
+            slicer = tuple(slice(int(lo), int(hi))
+                           for lo, hi in zip(in_lo_clipped, in_hi_clipped))
+            in_block = np.ascontiguousarray(in_dataset[slicer])
+
+            # 3. Translate `matrix` into the input-block-local frame.
+            #    Our convention: input = linear @ output + translation.
+            #    For the local block, input_local = input - in_lo_clipped.
+            local_matrix = np.hstack([linear, (translation - in_lo_clipped)[:, None]])
+
+            # 4. Run the affine on the in-memory block. We pass the local
+            #    bounding box in **output** coordinates: this block of the
+            #    output spans (out_start, out_stop).
+            out_block_data = bic.transformation.affine_transform(
+                in_block,
+                local_matrix,
+                bounding_box=tuple(slice(int(a), int(b))
+                                   for a, b in zip(out_start, out_stop)),
+                order=order,
+                fill_value=fill_value,
+            )
+
+        out_dataset[tuple(slice(int(a), int(b))
+                          for a, b in zip(out_start, out_stop))] = out_block_data
+```
+
+Notes:
+
+- The halo accounts for the kernel's tap reach; the safety margin handles
+  floating-point drift in the corner mapping. `order + 2` is conservative
+  for orders ≤ 5.
+- This pattern works for `h5py.Dataset`, `zarr.Array`, `tensorstore`, or
+  any other lazy-array library that supports NumPy-style indexing — there
+  is nothing format-specific in the body.
+- For best throughput, choose `out_block_shape` to match the on-disk
+  chunking of `out_dataset` (one block = one chunk write) and large enough
+  in each axis that the input-side read is also full chunks.
+- Anti-aliasing for downsampling pipelines: replace
+  `bic.transformation.affine_transform(...)` in step 4 with
+  `bic.transformation.resample(...)`. The Gaussian sigma is derived from
+  `matrix` and is identical for every block, so the per-block smoothing
+  cost is constant.
+- For random-access transformations (large rotations, perspective warps)
+  the per-block input bounding box can be much larger than the output
+  block. A real implementation should either cap the read size and skip
+  obviously-empty output blocks, or partition the output into a finer grid
+  for those cases.
 
 ## I/O and Build Dependencies
 

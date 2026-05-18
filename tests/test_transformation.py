@@ -30,6 +30,8 @@ def _sample(data, coord, fill_value):
 
 
 def _interp_nearest(data, coord, fill_value):
+    if any(value < 0.0 or value > shape - 1 for value, shape in zip(coord, data.shape)):
+        return fill_value
     sampled = tuple(int(np.floor(value + 0.5)) for value in coord)
     return _sample(data, sampled, fill_value)
 
@@ -75,7 +77,11 @@ def _reference(data, matrix, bounding_box, order, fill_value):
     for local in np.ndindex(shape):
         output_coord = np.asarray([start + co for start, co in zip(starts, local)])
         input_coord = matrix[:, :-1] @ output_coord + matrix[:, -1]
-        out[local] = interpolator(data, input_coord, fill_value)
+        value = interpolator(data, input_coord, fill_value)
+        if np.issubdtype(data.dtype, np.integer):
+            info = np.iinfo(data.dtype)
+            value = np.clip(np.round(value), info.min, info.max)
+        out[local] = value
     return out
 
 
@@ -111,6 +117,44 @@ def test_3d_bounding_box_matches_reference(order):
     np.testing.assert_allclose(got, ref, atol=1e-6)
 
 
+@pytest.mark.parametrize("order", [0, 1, 3])
+def test_2d_rotation_matches_reference(order):
+    rng = np.random.default_rng(0)
+    data = rng.random((8, 9)).astype(np.float32)
+    angle = 0.3
+    c, s = np.cos(angle), np.sin(angle)
+    matrix = np.array([[c, -s, 1.0], [s, c, 0.5]], dtype=np.float64)
+    bounding_box = (slice(0, 6), slice(0, 7))
+    got = bic.transformation.affine_transform(
+        data, matrix, bounding_box=bounding_box, order=order, fill_value=-1.0
+    )
+    ref = _reference(data, matrix, bounding_box, order, np.float32(-1.0))
+    np.testing.assert_allclose(got, ref, atol=1e-5)
+
+
+@pytest.mark.parametrize("order", [0, 1, 3])
+def test_3d_rotation_matches_reference(order):
+    rng = np.random.default_rng(1)
+    data = rng.random((5, 6, 7)).astype(np.float32)
+    # Rotation around the z-axis combined with a small translation.
+    angle = 0.2
+    c, s = np.cos(angle), np.sin(angle)
+    matrix = np.array(
+        [
+            [1.0, 0.0, 0.0, 0.3],
+            [0.0, c, -s, 0.7],
+            [0.0, s, c, -0.4],
+        ],
+        dtype=np.float64,
+    )
+    bounding_box = (slice(0, 5), slice(0, 5), slice(0, 5))
+    got = bic.transformation.affine_transform(
+        data, matrix, bounding_box=bounding_box, order=order, fill_value=-2.0
+    )
+    ref = _reference(data, matrix, bounding_box, order, np.float32(-2.0))
+    np.testing.assert_allclose(got, ref, atol=1e-5)
+
+
 def test_homogeneous_matrix_is_accepted():
     data = np.arange(12, dtype=np.float32).reshape(3, 4)
     matrix = np.eye(3)
@@ -139,16 +183,215 @@ def test_dtype_is_preserved(dtype):
     assert got.dtype == data.dtype
 
 
-def test_integer_linear_casts_back_to_input_dtype():
+def test_integer_linear_rounds_to_nearest():
+    # data[0,0]=0, data[1,0]=3; linear interp at (0.5, 0) = 1.5; rounds to 2.
     data = np.arange(9, dtype=np.uint8).reshape(3, 3)
     got = bic.transformation.affine_transform(data, _matrix(2, [0.5, 0.0]), order=1)
-    assert got[0, 0] == np.uint8(1)
+    assert got[0, 0] == np.uint8(2)
+
+
+def test_integer_cubic_clamps_to_dtype_range():
+    # A sharp step in uint8 makes the Keys cubic kernel overshoot below 0 and
+    # above 255 near the discontinuity; the cast must clamp to [0, 255].
+    data = np.zeros((6, 6), dtype=np.uint8)
+    data[:, 3:] = 255
+    matrix = _matrix(2, [0.0, 0.5])
+    got = bic.transformation.affine_transform(data, matrix, order=3, fill_value=0)
+    assert got.dtype == np.uint8
+    assert int(got.min()) >= 0
+    assert int(got.max()) <= 255
+
+
+def test_signed_integer_cubic_clamps_to_dtype_range():
+    data = np.zeros((6, 6), dtype=np.int8)
+    data[:, 3:] = 127
+    matrix = _matrix(2, [0.0, 0.5])
+    got = bic.transformation.affine_transform(data, matrix, order=3, fill_value=0)
+    assert got.dtype == np.int8
+    assert int(got.min()) >= -128
+    assert int(got.max()) <= 127
+
+
+def test_output_entirely_outside_input_yields_fill_value():
+    data = np.arange(16, dtype=np.float32).reshape(4, 4)
+    matrix = _matrix(2, translation=[100.0, 100.0])
+    got = bic.transformation.affine_transform(data, matrix, order=1, fill_value=-5)
+    assert got.shape == data.shape
+    assert np.all(got == np.float32(-5))
 
 
 def test_non_contiguous_input_is_handled():
+    # The Python wrapper copies non-contiguous input to a C-contiguous buffer
+    # before handing it to the C++ kernel; the kernel itself requires C-contig.
     data = np.arange(100, dtype=np.float32).reshape(10, 10)[::2, ::2]
     got = bic.transformation.affine_transform(data, _matrix(2), order=1)
     np.testing.assert_array_equal(got, data)
+
+
+def test_out_parameter_writes_in_place():
+    data = np.arange(16, dtype=np.float32).reshape(4, 4)
+    out = np.full((4, 4), 99.0, dtype=np.float32)
+    returned = bic.transformation.affine_transform(data, _matrix(2), order=1, out=out)
+    assert returned is out
+    np.testing.assert_array_equal(out, data)
+
+
+def test_out_parameter_with_bounding_box():
+    data = np.arange(25, dtype=np.float32).reshape(5, 5)
+    out = np.zeros((3, 3), dtype=np.float32)
+    bbox = (slice(0, 3), slice(0, 3))
+    returned = bic.transformation.affine_transform(
+        data, _matrix(2), bounding_box=bbox, order=1, out=out
+    )
+    assert returned is out
+    np.testing.assert_array_equal(out, data[:3, :3])
+
+
+def test_out_validates_shape_and_dtype():
+    data = np.arange(16, dtype=np.float32).reshape(4, 4)
+    with pytest.raises(ValueError, match="shape"):
+        bic.transformation.affine_transform(
+            data, _matrix(2), order=1, out=np.zeros((3, 3), dtype=np.float32)
+        )
+    with pytest.raises(TypeError, match="dtype"):
+        bic.transformation.affine_transform(
+            data, _matrix(2), order=1, out=np.zeros((4, 4), dtype=np.float64)
+        )
+    with pytest.raises(ValueError, match="C-contiguous"):
+        not_contig = np.zeros((4, 8), dtype=np.float32)[:, ::2]
+        bic.transformation.affine_transform(data, _matrix(2), order=1, out=not_contig)
+    with pytest.raises(ValueError, match="writable"):
+        readonly = np.zeros((4, 4), dtype=np.float32)
+        readonly.flags.writeable = False
+        bic.transformation.affine_transform(data, _matrix(2), order=1, out=readonly)
+
+
+def test_negative_bounding_box_start_rejected():
+    data = np.zeros((4, 4), dtype=np.float32)
+    with pytest.raises(ValueError, match="start"):
+        bic.transformation.affine_transform(
+            data, _matrix(2), bounding_box=(slice(-1, 3), slice(0, 4))
+        )
+
+
+def test_compute_anti_aliasing_sigma_rotation():
+    # Pure rotation: unit row norms → no smoothing.
+    angle = 0.4
+    c, s = np.cos(angle), np.sin(angle)
+    matrix = np.array([[c, -s, 1.0], [s, c, 0.5]])
+    sigma = bic.transformation.compute_anti_aliasing_sigma(matrix, 2)
+    np.testing.assert_allclose(sigma, [0.0, 0.0], atol=1e-12)
+
+
+def test_compute_anti_aliasing_sigma_isotropic_downsample():
+    # 2x downsample on both axes: sigma = (2 - 1) / 2 = 0.5.
+    matrix = np.array([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+    sigma = bic.transformation.compute_anti_aliasing_sigma(matrix, 2)
+    np.testing.assert_allclose(sigma, [0.5, 0.5])
+
+
+def test_compute_anti_aliasing_sigma_anisotropic():
+    # 3x along axis 0, 1x along axis 1.
+    matrix = np.array([[3.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    sigma = bic.transformation.compute_anti_aliasing_sigma(matrix, 2)
+    np.testing.assert_allclose(sigma, [1.0, 0.0])
+
+
+def test_compute_anti_aliasing_sigma_accepts_homogeneous():
+    M = np.eye(3)
+    M[0, 0] = 4.0
+    sigma = bic.transformation.compute_anti_aliasing_sigma(M, 2)
+    np.testing.assert_allclose(sigma, [1.5, 0.0])
+
+
+def test_compute_anti_aliasing_sigma_rejects_bad_shape():
+    with pytest.raises(ValueError, match="matrix"):
+        bic.transformation.compute_anti_aliasing_sigma(np.zeros((4, 4)), 2)
+
+
+def test_resample_no_aliasing_matches_affine_transform():
+    # For an upsample / identity, no smoothing should be applied and resample
+    # should agree with affine_transform exactly.
+    data = np.arange(64, dtype=np.float32).reshape(8, 8)
+    matrix = _matrix(2, translation=[0.0, 0.0])
+    direct = bic.transformation.affine_transform(data, matrix, order=1)
+    via_resample = bic.transformation.resample(data, matrix, order=1)
+    np.testing.assert_array_equal(direct, via_resample)
+
+
+def test_resample_downsample_low_passes_input():
+    # 2x downsampling on random data: direct affine_transform samples every
+    # other input pixel and inherits the input's variance; resample first
+    # low-passes the input so the output variance is reduced.
+    rng = np.random.default_rng(0)
+    h = w = 64
+    data = rng.random((h, w)).astype(np.float32)
+    matrix = np.array([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+    bbox = (slice(0, h // 2), slice(0, w // 2))
+    direct = bic.transformation.affine_transform(data, matrix, bounding_box=bbox, order=1)
+    smoothed = bic.transformation.resample(data, matrix, bounding_box=bbox, order=1)
+    # Sanity: both outputs are non-trivial.
+    assert direct.var() > 0.05
+    # Smoothing must materially reduce variance vs. direct sampling.
+    assert smoothed.var() < direct.var() * 0.75
+
+
+def test_resample_with_explicit_sigma_runs_filter():
+    data = np.arange(64, dtype=np.float32).reshape(8, 8)
+    matrix = _matrix(2)
+    out = bic.transformation.resample(
+        data, matrix, anti_aliasing_sigma=1.0, order=1
+    )
+    # Output should differ from identity (smoothing was applied).
+    assert not np.allclose(out, data)
+
+
+def test_resample_explicit_sigma_zero_skips_smoothing():
+    data = np.arange(64, dtype=np.float32).reshape(8, 8)
+    matrix = _matrix(2)
+    out = bic.transformation.resample(
+        data, matrix, anti_aliasing_sigma=0.0, order=1
+    )
+    np.testing.assert_array_equal(out, data)
+
+
+def test_resample_rejects_negative_sigma():
+    data = np.zeros((4, 4), dtype=np.float32)
+    with pytest.raises(ValueError, match="non-negative"):
+        bic.transformation.resample(
+            data, _matrix(2), anti_aliasing_sigma=[-1.0, 1.0]
+        )
+
+
+@pytest.mark.parametrize("order", [2, 4, 5])
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_bspline_orders_match_scipy_prefilter_false(order, ndim):
+    pytest.importorskip("scipy")
+    from scipy.ndimage import affine_transform as sp_affine
+    rng = np.random.default_rng(0)
+    if ndim == 2:
+        shape = (12, 13)
+        translation = [0.37, -1.13]
+    else:
+        shape = (7, 8, 9)
+        translation = [0.25, -0.7, 0.9]
+    data = rng.random(shape).astype(np.float32)
+    matrix = _matrix(ndim, translation=translation)
+    bbox = tuple(slice(0, s) for s in shape)
+    got = bic.transformation.affine_transform(data, matrix, bounding_box=bbox, order=order, fill_value=0)
+    lin = matrix[:, :ndim]
+    offset = matrix[:, ndim]
+    # 'grid-constant' is true constant-fill for out-of-bounds taps; scipy's
+    # 'constant' mode implicitly extends the input for B-spline orders.
+    ref = sp_affine(data, lin, offset=offset, output_shape=shape,
+                    order=order, mode="grid-constant", cval=0, prefilter=False)
+    # Drop a border to avoid boundary handling differences in the kernel tap
+    # extension (we use `fill_value` for out-of-bounds taps; scipy uses
+    # `mode="constant"` with the same `cval`, so they agree, but float noise
+    # can creep in at the very edge).
+    border = order
+    interior = tuple(slice(border, s - border) for s in shape)
+    np.testing.assert_allclose(got[interior], ref[interior], atol=1e-5)
 
 
 def test_invalid_inputs_raise():
@@ -158,7 +401,9 @@ def test_invalid_inputs_raise():
     with pytest.raises(ValueError, match="matrix"):
         bic.transformation.affine_transform(data, np.eye(4))
     with pytest.raises(ValueError, match="order"):
-        bic.transformation.affine_transform(data, _matrix(2), order=2)
+        bic.transformation.affine_transform(data, _matrix(2), order=6)
+    with pytest.raises(ValueError, match="order"):
+        bic.transformation.affine_transform(data, _matrix(2), order=-1)
     with pytest.raises(ValueError, match="step"):
         bic.transformation.affine_transform(data, _matrix(2), bounding_box=(slice(None, None, 2), slice(None)))
     with pytest.raises(TypeError, match="dtype"):
