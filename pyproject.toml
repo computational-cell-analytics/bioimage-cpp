@@ -16,12 +16,23 @@ authors = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: C++",
     "Programming Language :: C++ :: 20",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
+
+[project.urls]
+Homepage = "https://github.com/computational-cell-analytics/bioimage-cpp"
+Repository = "https://github.com/computational-cell-analytics/bioimage-cpp"
+Issues = "https://github.com/computational-cell-analytics/bioimage-cpp/issues"
 
 [project.optional-dependencies]
 test = ["pytest", "pooch", "scipy"]
@@ -31,6 +42,16 @@ data = ["pooch"]
 cmake.version = ">=3.21"
 cmake.build-type = "Release"
 wheel.packages = ["src/bioimage_cpp"]
+sdist.exclude = [
+    "pypi-release.txt",
+    "dist/",
+    "wheelhouse/",
+    "_skbuild/",
+    "build/",
+    "*.egg-info/",
+    ".pytest_cache/",
+    "__pycache__/",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

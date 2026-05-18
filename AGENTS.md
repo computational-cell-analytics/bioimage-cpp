@@ -192,9 +192,9 @@ Don't add `std::chrono` snippets ad hoc; use the existing macros so future profi
 
 ## Documentation
 
-`README.md` covers: what `bioimage-cpp` is and isn't, install/build, minimal examples, design philosophy. Public functions need concise docstrings documenting input shapes, supported dtypes, output shapes/dtypes, copy behavior, background-label behavior (if relevant), and axis/coordinate conventions.
-
 Update `MIGRATION_GUIDE.md` whenever public functionality changes, so users migrating from `nifty`/`affogato` see the corresponding `bioimage-cpp` API, behavioral differences, and intentional improvements.
+
+The documentation is build via pdoc, see `.github/workflow/docs.yaml`.
 
 ## Checklist when modifying code
 
