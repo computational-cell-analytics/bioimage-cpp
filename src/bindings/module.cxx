@@ -4,6 +4,7 @@
 #include "graph.hxx"
 #include "ground_truth.hxx"
 #include "segmentation.hxx"
+#include "transformation.hxx"
 #include "util.hxx"
 #include "utils.hxx"
 
@@ -19,6 +20,7 @@ NB_MODULE(_core, m) {
     bioimage_cpp::bindings::bind_graph(m);
     bioimage_cpp::bindings::bind_ground_truth(m);
     bioimage_cpp::bindings::bind_segmentation(m);
+    bioimage_cpp::bindings::bind_transformation(m);
     bioimage_cpp::bindings::bind_util(m);
     bioimage_cpp::bindings::bind_utils(m);
 }

@@ -18,6 +18,7 @@ nanobind_add_module(_core
     src/bindings/graph.cxx
     src/bindings/ground_truth.cxx
     src/bindings/segmentation.cxx
+    src/bindings/transformation.cxx
     src/bindings/util.cxx
     src/bindings/utils.cxx
     src/cpp/segmentation/mutex_watershed.cxx

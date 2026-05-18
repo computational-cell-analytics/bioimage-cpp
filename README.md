@@ -42,6 +42,18 @@ segmentation = bic.segmentation.mutex_watershed(
 ```
 
 ```python
+image = np.arange(64, dtype=np.float32).reshape(8, 8)
+matrix = np.array([[1.0, 0.0, 0.5], [0.0, 1.0, -1.0]])
+
+transformed = bic.transformation.affine_transform(
+    image,
+    matrix,
+    order=3,
+    fill_value=0,
+)
+```
+
+```python
 graph = bic.graph.UndirectedGraph.from_edges(4, [[0, 1], [1, 2], [2, 3]])
 graph.find_edge(2, 1)
 # 1
