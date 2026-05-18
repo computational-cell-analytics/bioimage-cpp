@@ -8,7 +8,6 @@ from . import graph
 from . import ground_truth
 from . import segmentation
 from . import transformation
-from . import util
 from . import utils
 
 __all__ = [
@@ -22,6 +21,5 @@ __all__ = [
     "ground_truth",
     "segmentation",
     "transformation",
-    "util",
     "utils",
 ]

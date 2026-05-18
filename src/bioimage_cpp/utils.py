@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from . import _core
+from ._core.util import UnionFind
 
 _TAKE_DICT_BY_DTYPE = {
     np.dtype("uint32"): _core._take_dict_uint32,
@@ -67,3 +68,6 @@ def take_dict(relabeling: Mapping[Any, Any], to_relabel: np.ndarray) -> np.ndarr
         if "missing key" in str(error):
             raise IndexError(str(error)) from error
         raise
+
+
+__all__ = ["UnionFind", "take_dict"]

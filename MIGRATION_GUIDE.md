@@ -17,8 +17,8 @@ import bioimage_cpp as bic
 
 Graph functionality is under `bic.graph`, segmentation functionality is under
 `bic.segmentation`, ground-truth comparison functionality is under
-`bic.ground_truth`, small utility functions are under `bic.utils`, and
-reusable data structures (e.g. union-find) are under `bic.util`.
+`bic.ground_truth`, small utility functions and reusable data structures
+(e.g. union-find) are under `bic.utils`.
 
 ## Affogato
 
@@ -342,36 +342,6 @@ Notes for `watershed_from_affinities`:
 
 ## Nifty
 
-### Region Adjacency Graphs
-
-Nifty:
-
-```python
-import nifty.graph.rag as nrag
-
-rag = nrag.gridRag(labels)
-uvs = rag.uvIds()
-```
-
-bioimage-cpp:
-
-```python
-import bioimage_cpp as bic
-
-rag = bic.graph.region_adjacency_graph(labels)
-uvs = rag.uv_ids()
-```
-
-Notes:
-
-- Supported label dtypes are `uint32`, `uint64`, `int32`, and `int64`.
-- Labels must be 2D or 3D.
-- Negative signed labels are rejected.
-- Nodes correspond to label ids from `0` to `labels.max()`.
-- Edge ids are deterministic; RAG edges are sorted lexicographically by
-  endpoint ids.
-- Non-contiguous labels are copied to contiguous memory before entering C++.
-
 ### Undirected Graphs
 
 Nifty:
@@ -433,6 +403,36 @@ Common method/property mapping:
 | `serializationSize` | `serialization_size` |
 | `extractSubgraphFromNodes` | `extract_subgraph_from_nodes` |
 | `edgesFromNodeList` | `edges_from_node_list` |
+
+### Region Adjacency Graphs
+
+Nifty:
+
+```python
+import nifty.graph.rag as nrag
+
+rag = nrag.gridRag(labels)
+uvs = rag.uvIds()
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+rag = bic.graph.region_adjacency_graph(labels)
+uvs = rag.uv_ids()
+```
+
+Notes:
+
+- Supported label dtypes are `uint32`, `uint64`, `int32`, and `int64`.
+- Labels must be 2D or 3D.
+- Negative signed labels are rejected.
+- Nodes correspond to label ids from `0` to `labels.max()`.
+- Edge ids are deterministic; RAG edges are sorted lexicographically by
+  endpoint ids.
+- Non-contiguous labels are copied to contiguous memory before entering C++.
 
 ### Breadth-First Search
 
@@ -1376,7 +1376,7 @@ Notes:
 ### Union-Find
 
 Nifty exposes a disjoint-set / union-find structure as `nifty.ufd.ufd`.
-`bioimage-cpp` provides the same primitive under `bic.util`.
+`bioimage-cpp` provides the same primitive under `bic.utils`.
 
 Nifty:
 
@@ -1397,7 +1397,7 @@ bioimage-cpp:
 import bioimage_cpp as bic
 import numpy as np
 
-uf = bic.util.UnionFind(5)
+uf = bic.utils.UnionFind(5)
 uf.merge(0, 1)
 uf.merge(np.array([[2, 3], [3, 4]], dtype=np.uint64))
 roots = uf.find(np.array([0, 1, 2, 3, 4], dtype=np.uint64))
