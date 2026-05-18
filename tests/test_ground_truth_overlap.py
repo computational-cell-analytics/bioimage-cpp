@@ -4,11 +4,18 @@ import pytest
 import bioimage_cpp as bic
 
 
+def test_overlap_is_exposed_from_utils_namespace():
+    assert not hasattr(bic, "ground_truth")
+    assert hasattr(bic.utils, "BestOverlap")
+    assert hasattr(bic.utils, "SegmentationOverlap")
+    assert hasattr(bic.utils, "segmentation_overlap")
+
+
 def test_segmentation_overlap_tables_and_counts():
     labels_a = np.array([[1, 1, 2], [1, 3, 2]], dtype=np.uint64)
     labels_b = np.array([[5, 5, 5], [6, 6, 7]], dtype=np.uint32)
 
-    overlap = bic.ground_truth.segmentation_overlap(labels_a, labels_b)
+    overlap = bic.utils.segmentation_overlap(labels_a, labels_b)
 
     assert overlap.total_count == 6
     np.testing.assert_array_equal(overlap.labels_a, np.array([1, 2, 3], dtype=np.uint64))
@@ -33,7 +40,7 @@ def test_segmentation_overlap_tables_and_counts():
 def test_segmentation_overlap_normalized_tables():
     labels_a = np.array([[1, 1, 2], [1, 3, 2]], dtype=np.uint64)
     labels_b = np.array([[5, 5, 5], [6, 6, 7]], dtype=np.uint64)
-    overlap = bic.ground_truth.segmentation_overlap(labels_a, labels_b)
+    overlap = bic.utils.segmentation_overlap(labels_a, labels_b)
 
     by_a = overlap.overlap_table(normalize_by="a")
     assert by_a.dtype.names == ("label_a", "label_b", "count", "fraction")
@@ -52,7 +59,7 @@ def test_segmentation_overlap_normalized_tables():
 def test_per_label_overlaps_and_best_overlap_are_clear():
     labels_a = np.array([[1, 1, 2], [1, 3, 2]], dtype=np.uint64)
     labels_b = np.array([[5, 5, 5], [6, 6, 7]], dtype=np.uint64)
-    overlap = bic.ground_truth.segmentation_overlap(labels_a, labels_b)
+    overlap = bic.utils.segmentation_overlap(labels_a, labels_b)
 
     overlaps_a = overlap.overlaps_for_label_a(1, normalize=True)
     assert overlaps_a.dtype.names == ("label", "count", "fraction")
@@ -78,13 +85,13 @@ def test_per_label_overlaps_and_best_overlap_are_clear():
     assert best_b.found
 
     missing = overlap.best_overlap_for_label_a(99)
-    assert missing == bic.ground_truth.BestOverlap(label=0, count=0, fraction=0.0, found=False)
+    assert missing == bic.utils.BestOverlap(label=0, count=0, fraction=0.0, found=False)
 
 
 def test_zero_label_handling_and_different_overlap():
     labels_a = np.array([1, 1, 2, 2, 3], dtype=np.uint64)
     labels_b = np.array([0, 5, 0, 6, 6], dtype=np.uint64)
-    overlap = bic.ground_truth.segmentation_overlap(labels_a, labels_b)
+    overlap = bic.utils.segmentation_overlap(labels_a, labels_b)
 
     assert overlap.is_label_a_overlapping_with_zero(1)
     assert overlap.is_label_b_overlapping_with_zero(0) is False
@@ -104,7 +111,7 @@ def test_sparse_large_labels_do_not_require_dense_max_label_storage():
     labels_a = np.array([1, 1_000_000_000_000], dtype=np.uint64)
     labels_b = np.array([7, 8], dtype=np.uint64)
 
-    overlap = bic.ground_truth.segmentation_overlap(labels_a, labels_b)
+    overlap = bic.utils.segmentation_overlap(labels_a, labels_b)
 
     np.testing.assert_array_equal(
         overlap.labels_a,
@@ -115,25 +122,25 @@ def test_sparse_large_labels_do_not_require_dense_max_label_storage():
 
 def test_overlap_rejects_invalid_inputs():
     with pytest.raises(ValueError, match="same shape"):
-        bic.ground_truth.segmentation_overlap(
+        bic.utils.segmentation_overlap(
             np.ones((2, 2), dtype=np.uint64),
             np.ones((2, 3), dtype=np.uint64),
         )
 
     with pytest.raises(TypeError, match="integer dtype"):
-        bic.ground_truth.segmentation_overlap(
+        bic.utils.segmentation_overlap(
             np.ones((2,), dtype=np.float32),
             np.ones((2,), dtype=np.uint64),
         )
 
     with pytest.raises(ValueError, match="negative labels"):
-        bic.ground_truth.segmentation_overlap(
+        bic.utils.segmentation_overlap(
             np.array([-1, 2], dtype=np.int64),
             np.ones((2,), dtype=np.uint64),
         )
 
     with pytest.raises(ValueError, match="at least one dimension"):
-        bic.ground_truth.segmentation_overlap(
+        bic.utils.segmentation_overlap(
             np.array(1, dtype=np.uint64),
             np.array(1, dtype=np.uint64),
         )

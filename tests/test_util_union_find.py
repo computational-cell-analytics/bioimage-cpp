@@ -4,15 +4,20 @@ import pytest
 import bioimage_cpp as bic
 
 
+def test_union_find_is_exposed_from_utils_namespace():
+    assert not hasattr(bic, "util")
+    assert bic.utils.UnionFind(1).size == 1
+
+
 def test_initial_state_is_all_singletons():
-    uf = bic.util.UnionFind(5)
+    uf = bic.utils.UnionFind(5)
     assert uf.size == 5
     for i in range(5):
         assert uf.find(i) == i
 
 
 def test_size_zero():
-    uf = bic.util.UnionFind(0)
+    uf = bic.utils.UnionFind(0)
     assert uf.size == 0
     labels = uf.element_labeling()
     assert labels.shape == (0,)
@@ -20,7 +25,7 @@ def test_size_zero():
 
 
 def test_scalar_merge_joins_two_elements():
-    uf = bic.util.UnionFind(4)
+    uf = bic.utils.UnionFind(4)
     root = uf.merge(0, 1)
     assert uf.find(0) == root
     assert uf.find(1) == root
@@ -29,7 +34,7 @@ def test_scalar_merge_joins_two_elements():
 
 
 def test_scalar_merge_is_transitive():
-    uf = bic.util.UnionFind(5)
+    uf = bic.utils.UnionFind(5)
     uf.merge(0, 1)
     uf.merge(2, 3)
     uf.merge(1, 2)
@@ -38,7 +43,7 @@ def test_scalar_merge_is_transitive():
 
 
 def test_merge_to_forces_stable_root():
-    uf = bic.util.UnionFind(4)
+    uf = bic.utils.UnionFind(4)
     root = uf.merge_to(0, 1)
     assert root == 0
     assert uf.find(0) == 0
@@ -46,7 +51,7 @@ def test_merge_to_forces_stable_root():
 
 
 def test_bulk_merge_from_edges():
-    uf = bic.util.UnionFind(6)
+    uf = bic.utils.UnionFind(6)
     edges = np.array([[0, 1], [1, 2], [3, 4]], dtype=np.uint64)
     uf.merge(edges)
     assert uf.find(0) == uf.find(1) == uf.find(2)
@@ -56,7 +61,7 @@ def test_bulk_merge_from_edges():
 
 
 def test_bulk_merge_empty_edges():
-    uf = bic.util.UnionFind(3)
+    uf = bic.utils.UnionFind(3)
     edges = np.empty((0, 2), dtype=np.uint64)
     uf.merge(edges)
     assert uf.find(0) == 0
@@ -65,7 +70,7 @@ def test_bulk_merge_empty_edges():
 
 
 def test_bulk_find_returns_array_of_roots():
-    uf = bic.util.UnionFind(5)
+    uf = bic.utils.UnionFind(5)
     uf.merge(0, 1)
     uf.merge(2, 3)
 
@@ -82,14 +87,14 @@ def test_bulk_find_returns_array_of_roots():
 
 
 def test_bulk_find_empty_array():
-    uf = bic.util.UnionFind(3)
+    uf = bic.utils.UnionFind(3)
     roots = uf.find(np.empty((0,), dtype=np.uint64))
     assert roots.shape == (0,)
     assert roots.dtype == np.uint64
 
 
 def test_element_labeling_matches_scalar_find():
-    uf = bic.util.UnionFind(6)
+    uf = bic.utils.UnionFind(6)
     edges = np.array([[0, 1], [2, 3], [3, 4]], dtype=np.uint64)
     uf.merge(edges)
 
@@ -102,7 +107,7 @@ def test_element_labeling_matches_scalar_find():
 
 
 def test_element_labeling_equivalence_classes():
-    uf = bic.util.UnionFind(5)
+    uf = bic.utils.UnionFind(5)
     uf.merge(np.array([[0, 2], [1, 3]], dtype=np.uint64))
 
     labels = uf.element_labeling()
@@ -115,7 +120,7 @@ def test_element_labeling_equivalence_classes():
 
 
 def test_reset_reinitialises_to_singletons():
-    uf = bic.util.UnionFind(3)
+    uf = bic.utils.UnionFind(3)
     uf.merge(0, 1)
     uf.merge(1, 2)
 
@@ -127,12 +132,12 @@ def test_reset_reinitialises_to_singletons():
 
 
 def test_bulk_merge_rejects_wrong_shape():
-    uf = bic.util.UnionFind(3)
+    uf = bic.utils.UnionFind(3)
     with pytest.raises(Exception, match=r"\(N, 2\)"):
         uf.merge(np.zeros((4,), dtype=np.uint64))
 
 
 def test_bulk_merge_rejects_three_columns():
-    uf = bic.util.UnionFind(3)
+    uf = bic.utils.UnionFind(3)
     with pytest.raises(Exception, match=r"\(N, 2\)"):
         uf.merge(np.zeros((2, 3), dtype=np.uint64))
