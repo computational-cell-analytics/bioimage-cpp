@@ -1255,6 +1255,60 @@ Implementation notes:
   `detail/threading.hxx::parallel_for_chunks` without changing the
   public API.
 
+## Affine Transformations
+
+`bioimage-cpp` exposes NumPy-only affine transformations under
+`bic.transformation`. HDF5, zarr, N5, and OME-NGFF loading stays in Python;
+load the desired chunk or subvolume first, then pass the NumPy array here.
+
+Nifty:
+
+```python
+import nifty.transformation as nt
+
+out = nt.affineTransformation(
+    data,
+    matrix,
+    order=1,
+    bounding_box=(slice(0, 64), slice(0, 64)),
+    fill_value=0,
+)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+out = bic.transformation.affine_transform(
+    data,
+    matrix,
+    bounding_box=(slice(0, 64), slice(0, 64)),
+    order=1,
+    fill_value=0,
+)
+```
+
+Important differences from nifty:
+
+- Only NumPy arrays are accepted. `affineTransformationH5`,
+  `affineTransformationZ5`, and coordinate-file transformations are not
+  reproduced.
+- The API is snake_case only: `affine_transform`.
+- `matrix` maps output coordinates to input coordinates in NumPy axis order.
+  Matrix shapes `(ndim, ndim + 1)` and homogeneous `(ndim + 1, ndim + 1)` are
+  accepted.
+- `bounding_box=None` transforms `slice(0, data.shape[d])` for every axis.
+  Custom bounding boxes are one slice per axis and cannot use a step.
+- Supported interpolation orders are nearest (`0`), linear (`1`), and local
+  cubic convolution (`3`). Cubic is computed on the fly with a Catmull-Rom /
+  Keys kernel, not scipy's spline-prefiltered order 3.
+- Border handling uses corrected constant-fill semantics: exact in-bounds
+  coordinates, including the last row/column/slice, are valid. Nifty's older
+  NumPy affine path treats the last index as invalid.
+- Output dtype is preserved for all supported input dtypes, including integer
+  inputs with linear or cubic interpolation.
+
 ## I/O and Build Dependencies
 
 `bioimage-cpp` intentionally does not replace nifty or affogato I/O helpers.
