@@ -3,15 +3,22 @@ import pytest
 import bioimage_cpp as bic
 
 
+def test_blocking_is_exposed_from_utils_namespace():
+    assert not hasattr(bic, "Block")
+    assert not hasattr(bic, "BlockWithHalo")
+    assert not hasattr(bic, "Blocking")
+    assert bic.utils.Block([0], [1]).shape == [1]
+
+
 def test_block_shape_and_halo_local_coordinates():
-    block = bic.Block([2, 3], [7, 11])
+    block = bic.utils.Block([2, 3], [7, 11])
 
     assert block.begin == [2, 3]
     assert block.end == [7, 11]
     assert block.shape == [5, 8]
     assert block.ndim == 2
 
-    with_halo = bic.BlockWithHalo(bic.Block([0, 1], [9, 12]), block)
+    with_halo = bic.utils.BlockWithHalo(bic.utils.Block([0, 1], [9, 12]), block)
     assert with_halo.outer_block.begin == [0, 1]
     assert with_halo.outer_block.end == [9, 12]
     assert with_halo.inner_block.begin == [2, 3]
@@ -20,7 +27,7 @@ def test_block_shape_and_halo_local_coordinates():
 
 
 def test_blocking_grid_and_blocks_match_nifty_layout():
-    blocking = bic.Blocking([0, 0], [10, 7], [4, 3])
+    blocking = bic.utils.Blocking([0, 0], [10, 7], [4, 3])
 
     assert blocking.roi_begin == [0, 0]
     assert blocking.roi_end == [10, 7]
@@ -41,7 +48,7 @@ def test_blocking_grid_and_blocks_match_nifty_layout():
 
 
 def test_neighbor_ids():
-    blocking = bic.Blocking([0, 0], [10, 7], [4, 3])
+    blocking = bic.utils.Blocking([0, 0], [10, 7], [4, 3])
 
     assert blocking.get_neighbor_id(4, axis=0, lower=True) == 1
     assert blocking.get_neighbor_id(4, axis=0, lower=False) == 7
@@ -54,7 +61,7 @@ def test_neighbor_ids():
 
 
 def test_shifted_roi_coordinates_to_block_id_and_overlapping_box():
-    blocking = bic.Blocking([10, 20], [20, 31], [4, 5], [2, 1])
+    blocking = bic.utils.Blocking([10, 20], [20, 31], [4, 5], [2, 1])
 
     assert blocking.blocks_per_axis == [3, 3]
     assert blocking.get_block(0).begin == [10, 20]
@@ -72,14 +79,14 @@ def test_shifted_roi_coordinates_to_block_id_and_overlapping_box():
 
 
 def test_block_ids_in_bounding_box_requires_full_enclosure():
-    blocking = bic.Blocking([0, 0], [10, 10], [4, 4])
+    blocking = bic.utils.Blocking([0, 0], [10, 10], [4, 4])
 
     assert blocking.get_block_ids_in_bounding_box([4, 4], [10, 10]) == [4, 5, 7, 8]
     assert blocking.get_block_ids_in_bounding_box([5, 5], [10, 10]) == [8]
 
 
 def test_overlapping_bounding_box_is_dimension_independent():
-    blocking = bic.Blocking([0, 0, 0, 0], [6, 6, 6, 6], [3, 3, 3, 3])
+    blocking = bic.utils.Blocking([0, 0, 0, 0], [6, 6, 6, 6], [3, 3, 3, 3])
 
     assert blocking.blocks_per_axis == [2, 2, 2, 2]
     assert blocking.get_block_ids_overlapping_bounding_box(
@@ -91,7 +98,7 @@ def test_overlapping_bounding_box_is_dimension_independent():
 
 
 def test_block_with_halo_and_add_halo_clip_to_roi():
-    blocking = bic.Blocking([0, 0], [10, 10], [4, 4])
+    blocking = bic.utils.Blocking([0, 0], [10, 10], [4, 4])
 
     block = blocking.get_block_with_halo(0, [2, 1])
     assert block.inner_block.begin == [0, 0]
@@ -109,7 +116,7 @@ def test_block_with_halo_and_add_halo_clip_to_roi():
 
 
 def test_local_overlaps_return_local_coordinates_or_none():
-    blocking = bic.Blocking([0, 0], [10, 10], [5, 5])
+    blocking = bic.utils.Blocking([0, 0], [10, 10], [5, 5])
 
     overlaps = blocking.get_local_overlaps(0, 1, [1, 1])
     assert overlaps == ([0, 4], [6, 6], [0, 0], [6, 2])
@@ -118,7 +125,7 @@ def test_local_overlaps_return_local_coordinates_or_none():
 
 
 def test_block_ids_in_slice_uses_first_axis_and_halo():
-    blocking = bic.Blocking([0, 0, 0], [6, 4, 4], [3, 2, 2])
+    blocking = bic.utils.Blocking([0, 0, 0], [6, 4, 4], [3, 2, 2])
 
     assert blocking.get_block_ids_in_slice(3, [0, 0, 0]) == list(range(4, 8))
     assert blocking.get_block_ids_in_slice(3, [1, 0, 0]) == list(range(8))
@@ -126,9 +133,9 @@ def test_block_ids_in_slice_uses_first_axis_and_halo():
 
 def test_invalid_inputs_raise_clear_errors():
     with pytest.raises(ValueError, match="block_shape values must be positive"):
-        bic.Blocking([0, 0], [10, 10], [4, 0])
+        bic.utils.Blocking([0, 0], [10, 10], [4, 0])
 
-    blocking = bic.Blocking([0, 0], [10, 10], [4, 4])
+    blocking = bic.utils.Blocking([0, 0], [10, 10], [4, 4])
     with pytest.raises(IndexError, match="block_id is out of range"):
         blocking.get_block(9)
     with pytest.raises(IndexError, match="coordinates must lie inside"):

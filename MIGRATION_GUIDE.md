@@ -16,9 +16,8 @@ import bioimage_cpp as bic
 ```
 
 Graph functionality is under `bic.graph`, segmentation functionality is under
-`bic.segmentation`, ground-truth comparison functionality is under
-`bic.ground_truth`, small utility functions and reusable data structures
-(e.g. union-find) are under `bic.utils`.
+`bic.segmentation`, and utility functionality (blocking, relabeling, overlap
+measurement, union-find, etc.) is under `bic.utils`.
 
 ## Affogato
 
@@ -660,7 +659,7 @@ bioimage-cpp:
 ```python
 import bioimage_cpp as bic
 
-blocking = bic.Blocking([0, 0], [100, 80], [32, 32])
+blocking = bic.utils.Blocking([0, 0], [100, 80], [32, 32])
 block = blocking.get_block(0)
 block_with_halo = blocking.get_block_with_halo(0, [8, 8])
 ```
@@ -1320,7 +1319,7 @@ bioimage-cpp:
 ```python
 import bioimage_cpp as bic
 
-overlap = bic.ground_truth.segmentation_overlap(segmentation, ground_truth)
+overlap = bic.utils.segmentation_overlap(segmentation, ground_truth)
 ```
 
 The first input is called `labels_a` and the second input is called `labels_b`
