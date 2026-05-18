@@ -17,7 +17,7 @@ inline std::vector<std::uint64_t> greedy_fixation(
 ) {
     validate_costs(graph, costs);
     detail::DynamicGraph dynamic_graph(graph);
-    bioimage_cpp::detail::UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
+    bioimage_cpp::util::UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
     detail::EdgeHeap heap;
     detail::initialize_dynamic_graph(graph, costs, dynamic_graph, heap, true);
 

@@ -3,7 +3,7 @@
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/detail/mutex_storage.hxx"
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 
 #include <algorithm>
 #include <cstddef>
@@ -100,7 +100,7 @@ void mutex_watershed_grid(
         return first.weight > second.weight;
     });
 
-    detail::UnionFind sets(static_cast<std::size_t>(number_of_nodes));
+    bioimage_cpp::util::UnionFind sets(static_cast<std::size_t>(number_of_nodes));
     MutexStorage mutexes(static_cast<std::size_t>(number_of_nodes));
 
     for (const auto &edge : edge_order) {

@@ -2,7 +2,7 @@
 
 #include "bioimage_cpp/detail/edge_hash.hxx"
 #include "bioimage_cpp/detail/indexed_heap.hxx"
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 #include "bioimage_cpp/graph/multicut/objective.hxx"
 
 #include <algorithm>
@@ -343,7 +343,7 @@ inline bool apply_joins(
     if (number_of_clusters == 0) {
         return false;
     }
-    bioimage_cpp::detail::UnionFind sets(static_cast<std::size_t>(number_of_clusters));
+    bioimage_cpp::util::UnionFind sets(static_cast<std::size_t>(number_of_clusters));
     bool any_join = false;
     for (const auto &pair : pairs) {
         if (pair.cut_weight <= epsilon) {

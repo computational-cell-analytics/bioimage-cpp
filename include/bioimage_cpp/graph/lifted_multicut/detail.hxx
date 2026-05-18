@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bioimage_cpp/detail/indexed_heap.hxx"
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 #include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
@@ -161,7 +161,7 @@ inline void rename_neighbor(
 // pops base edges off the heap).
 inline std::size_t merge_dynamic_nodes(
     DynamicGraph &dynamic_graph,
-    bioimage_cpp::detail::UnionFind &sets,
+    bioimage_cpp::util::UnionFind &sets,
     EdgeHeap &heap,
     std::size_t u,
     std::size_t v
@@ -258,7 +258,7 @@ inline std::size_t merge_dynamic_nodes(
 }
 
 inline std::vector<std::uint64_t> labels_from_sets(
-    bioimage_cpp::detail::UnionFind &sets,
+    bioimage_cpp::util::UnionFind &sets,
     const UndirectedGraph &graph
 ) {
     return dense_labels_from_union_find(sets, graph.number_of_nodes());

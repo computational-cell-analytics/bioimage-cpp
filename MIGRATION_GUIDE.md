@@ -17,7 +17,8 @@ import bioimage_cpp as bic
 
 Graph functionality is under `bic.graph`, segmentation functionality is under
 `bic.segmentation`, ground-truth comparison functionality is under
-`bic.ground_truth`, and small utility functions are under `bic.utils`.
+`bic.ground_truth`, small utility functions are under `bic.utils`, and
+reusable data structures (e.g. union-find) are under `bic.util`.
 
 ## Blocking
 
@@ -1093,6 +1094,65 @@ inputs they may not; the development scripts under
 partition metrics and a semantic-label match fraction so the deviation is
 measurable. The bioimage-cpp partitions match an independent Python
 reference implementation of the algorithm.
+
+## Union-Find
+
+Nifty exposes a disjoint-set / union-find structure as `nifty.ufd.ufd`.
+`bioimage-cpp` provides the same primitive under `bic.util`.
+
+Nifty:
+
+```python
+import nifty.ufd as nufd
+import numpy as np
+
+uf = nufd.ufd(5)
+uf.merge(0, 1)
+uf.merge(np.array([[2, 3], [3, 4]], dtype="uint64"))
+roots = uf.find(np.array([0, 1, 2, 3, 4], dtype="uint64"))
+labels = uf.elementLabeling()
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+import numpy as np
+
+uf = bic.util.UnionFind(5)
+uf.merge(0, 1)
+uf.merge(np.array([[2, 3], [3, 4]], dtype=np.uint64))
+roots = uf.find(np.array([0, 1, 2, 3, 4], dtype=np.uint64))
+labels = uf.element_labeling()
+```
+
+Method mapping:
+
+| nifty-style name | bioimage-cpp name |
+| --- | --- |
+| `find(node)` / `find(array)` | `find(node)` / `find(array)` |
+| `merge(u, v)` / `merge(array)` | `merge(u, v)` / `merge(array)` |
+| `elementLabeling` | `element_labeling` |
+| `numberOfElements` | `size` (property) |
+
+Notes:
+
+- The constructor takes a single `size` argument; all elements start as
+  singletons.
+- Scalar `find`/`merge` accept Python integers and return Python integers.
+- Bulk `find(nodes)` accepts a 1D `uint64` array and returns a 1D `uint64`
+  array of roots of the same length.
+- Bulk `merge(edges)` accepts an `(N, 2)` `uint64` array of node-pair edges
+  and applies the merges in row order.
+- `element_labeling()` returns a `uint64` array of length `size`, each entry
+  the (path-compressed) root of that element. Use this when you want the
+  final labeling as one array rather than via repeated `find` calls.
+- `merge_to(stable, removed)` is also available: it forces `stable`'s root
+  to survive the union regardless of rank.
+- `reset(n)` reinitialises the structure to `n` singletons, reusing
+  capacity where possible.
+- The GIL is released around bulk operations, so multiple threads can run
+  bulk merges on independent `UnionFind` instances in parallel.
 
 ## Dictionary-Based Relabeling
 

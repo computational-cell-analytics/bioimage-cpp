@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bioimage_cpp/detail/indexed_heap.hxx"
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 #include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/multicut/objective.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
@@ -150,7 +150,7 @@ inline void initialize_dynamic_graph(
 }
 
 inline std::vector<std::uint64_t> labels_from_sets(
-    bioimage_cpp::detail::UnionFind &sets,
+    bioimage_cpp::util::UnionFind &sets,
     const UndirectedGraph &graph
 ) {
     return dense_labels_from_union_find(sets, graph.number_of_nodes());
@@ -199,7 +199,7 @@ inline void rename_neighbor(
 // edge id appears at most once.
 inline std::size_t merge_dynamic_nodes(
     DynamicGraph &dynamic_graph,
-    bioimage_cpp::detail::UnionFind &sets,
+    bioimage_cpp::util::UnionFind &sets,
     EdgeHeap &heap,
     std::size_t u,
     std::size_t v,

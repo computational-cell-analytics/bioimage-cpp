@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <cstddef>
@@ -11,7 +11,7 @@
 namespace bioimage_cpp::graph {
 
 inline std::vector<std::uint64_t> dense_labels_from_union_find(
-    detail::UnionFind &sets,
+    bioimage_cpp::util::UnionFind &sets,
     const std::uint64_t number_of_nodes
 ) {
     std::unordered_map<std::uint64_t, std::uint64_t> relabeling;
@@ -31,7 +31,7 @@ inline std::vector<std::uint64_t> connected_components(
     const UndirectedGraph &graph,
     const std::uint8_t *edge_mask = nullptr
 ) {
-    detail::UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
+    bioimage_cpp::util::UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
     for (std::uint64_t edge = 0; edge < graph.number_of_edges(); ++edge) {
         if (edge_mask != nullptr && edge_mask[static_cast<std::size_t>(edge)] == 0) {
             continue;

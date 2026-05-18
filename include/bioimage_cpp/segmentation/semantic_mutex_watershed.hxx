@@ -4,7 +4,7 @@
 #include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/detail/mutex_storage.hxx"
 #include "bioimage_cpp/detail/semantic_labels.hxx"
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 
 #include <algorithm>
 #include <cstddef>
@@ -132,7 +132,7 @@ void semantic_mutex_watershed_grid(
         return first.weight > second.weight;
     });
 
-    detail::UnionFind sets(static_cast<std::size_t>(number_of_nodes));
+    bioimage_cpp::util::UnionFind sets(static_cast<std::size_t>(number_of_nodes));
     MutexStorage mutexes(static_cast<std::size_t>(number_of_nodes));
     SemanticLabeling semantic_labels(static_cast<std::size_t>(number_of_nodes), -1);
 

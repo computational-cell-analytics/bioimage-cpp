@@ -7,6 +7,7 @@ from . import filters
 from . import graph
 from . import ground_truth
 from . import segmentation
+from . import util
 from . import utils
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "graph",
     "ground_truth",
     "segmentation",
+    "util",
     "utils",
 ]

@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-namespace bioimage_cpp::detail {
+namespace bioimage_cpp::util {
 
 // Disjoint-set / union-find with path compression and union-by-rank.
 //
@@ -85,4 +85,4 @@ private:
     std::vector<std::uint64_t> ranks_;
 };
 
-} // namespace bioimage_cpp::detail
+} // namespace bioimage_cpp::util

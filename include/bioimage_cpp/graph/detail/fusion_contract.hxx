@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <algorithm>
@@ -62,7 +62,7 @@ inline AgreementContraction contract_by_agreement(
         );
     }
 
-    bioimage_cpp::detail::UnionFind sets(static_cast<std::size_t>(number_of_nodes));
+    bioimage_cpp::util::UnionFind sets(static_cast<std::size_t>(number_of_nodes));
     for (std::uint64_t edge = 0; edge < number_of_edges; ++edge) {
         const auto uv = graph.uv(edge);
         const auto u = static_cast<std::size_t>(uv.first);

@@ -3,7 +3,7 @@
 #include "bioimage_cpp/detail/edge_hash.hxx"
 #include "bioimage_cpp/detail/indexed_heap.hxx"
 #include "bioimage_cpp/detail/profile.hxx"
-#include "bioimage_cpp/detail/union_find.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 #include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/lifted_multicut/objective.hxx"
 
