@@ -1,10 +1,10 @@
 [build-system]
-requires = ["scikit-build-core>=0.8", "nanobind>=2.0"]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "bioimage-cpp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Dependency-light C++ bioimage analysis algorithms with Python bindings"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,6 +51,10 @@ sdist.exclude = [
     ".pytest_cache/",
     "__pycache__/",
 ]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "src/bioimage_cpp/_version.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
