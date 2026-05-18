@@ -3,8 +3,10 @@
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/segmentation/mutex_watershed.hxx"
 #include "bioimage_cpp/segmentation/semantic_mutex_watershed.hxx"
+#include "bioimage_cpp/segmentation/watershed.hxx"
 
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/vector.h>
 
@@ -12,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -174,6 +177,68 @@ std::pair<LabelArray, SemanticLabelArray> semantic_mutex_watershed_grid_t(
     );
 }
 
+template <class HeightT, class LabelT>
+nb::ndarray<nb::numpy, LabelT, nb::c_contig> watershed_t(
+    nb::ndarray<nb::numpy, const HeightT, nb::c_contig> image,
+    nb::ndarray<nb::numpy, const LabelT, nb::c_contig> markers,
+    std::optional<nb::ndarray<nb::numpy, const std::uint8_t, nb::c_contig>> mask
+) {
+    if (markers.ndim() != image.ndim()) {
+        throw std::invalid_argument("markers shape must match image shape");
+    }
+    std::vector<std::ptrdiff_t> image_shape(image.ndim());
+    std::vector<std::size_t> out_shape(image.ndim());
+    for (std::size_t axis = 0; axis < image.ndim(); ++axis) {
+        image_shape[axis] = static_cast<std::ptrdiff_t>(image.shape(axis));
+        out_shape[axis] = image.shape(axis);
+        if (markers.shape(axis) != image.shape(axis)) {
+            throw std::invalid_argument("markers shape must match image shape");
+        }
+    }
+
+    std::vector<std::ptrdiff_t> mask_shape;
+    const std::uint8_t *mask_data = nullptr;
+    if (mask.has_value()) {
+        if (mask->ndim() != image.ndim()) {
+            throw std::invalid_argument("mask shape must match image shape");
+        }
+        mask_shape.resize(mask->ndim());
+        for (std::size_t axis = 0; axis < mask->ndim(); ++axis) {
+            mask_shape[axis] = static_cast<std::ptrdiff_t>(mask->shape(axis));
+            if (mask->shape(axis) != image.shape(axis)) {
+                throw std::invalid_argument("mask shape must match image shape");
+            }
+        }
+        mask_data = mask->data();
+    }
+
+    const auto number_of_nodes = std::accumulate(
+        image_shape.begin(),
+        image_shape.end(),
+        std::ptrdiff_t{1},
+        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
+    );
+    auto *data = new LabelT[static_cast<std::size_t>(number_of_nodes)]();
+    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<LabelT *>(p); });
+
+    ConstArrayView<HeightT> image_view{image.data(), image_shape, {}};
+    ConstArrayView<LabelT> markers_view{markers.data(), image_shape, {}};
+    ConstArrayView<std::uint8_t> mask_view{mask_data, mask_shape, {}};
+    ArrayView<LabelT> out_view{data, image_shape, {}};
+
+    {
+        nb::gil_scoped_release release;
+        watershed<HeightT, LabelT>(image_view, markers_view, mask_view, out_view);
+    }
+
+    return nb::ndarray<nb::numpy, LabelT, nb::c_contig>(
+        data,
+        out_shape.size(),
+        out_shape.data(),
+        owner
+    );
+}
+
 } // namespace
 
 void bind_segmentation(nb::module_ &m) {
@@ -214,6 +279,71 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("number_of_attractive_channels"),
         nb::arg("number_of_offsets"),
         "Run semantic mutex watershed on a 2D or 3D image-derived grid graph with float64 affinities."
+    );
+
+    m.def(
+        "_watershed_float32_uint32",
+        &watershed_t<float, std::uint32_t>,
+        nb::arg("image"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Marker-controlled watershed on a 2D or 3D float32 image with uint32 markers."
+    );
+    m.def(
+        "_watershed_float32_uint64",
+        &watershed_t<float, std::uint64_t>,
+        nb::arg("image"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Marker-controlled watershed on a 2D or 3D float32 image with uint64 markers."
+    );
+    m.def(
+        "_watershed_float32_int32",
+        &watershed_t<float, std::int32_t>,
+        nb::arg("image"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Marker-controlled watershed on a 2D or 3D float32 image with int32 markers."
+    );
+    m.def(
+        "_watershed_float32_int64",
+        &watershed_t<float, std::int64_t>,
+        nb::arg("image"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Marker-controlled watershed on a 2D or 3D float32 image with int64 markers."
+    );
+    m.def(
+        "_watershed_float64_uint32",
+        &watershed_t<double, std::uint32_t>,
+        nb::arg("image"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Marker-controlled watershed on a 2D or 3D float64 image with uint32 markers."
+    );
+    m.def(
+        "_watershed_float64_uint64",
+        &watershed_t<double, std::uint64_t>,
+        nb::arg("image"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Marker-controlled watershed on a 2D or 3D float64 image with uint64 markers."
+    );
+    m.def(
+        "_watershed_float64_int32",
+        &watershed_t<double, std::int32_t>,
+        nb::arg("image"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Marker-controlled watershed on a 2D or 3D float64 image with int32 markers."
+    );
+    m.def(
+        "_watershed_float64_int64",
+        &watershed_t<double, std::int64_t>,
+        nb::arg("image"),
+        nb::arg("markers"),
+        nb::arg("mask") = nb::none(),
+        "Marker-controlled watershed on a 2D or 3D float64 image with int64 markers."
     );
 }
 
