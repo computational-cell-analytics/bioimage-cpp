@@ -25,6 +25,22 @@ jobs:
       - uses: actions/configure-pages@v5
       - name: Install package and docs tooling
         run: python -m pip install -v ".[test]" pdoc
+      - name: Prepare source tree for pdoc
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import shutil
+          from pathlib import Path
+
+          spec = importlib.util.find_spec("bioimage_cpp._core")
+          if spec is None or spec.origin is None:
+              raise RuntimeError("Could not find installed bioimage_cpp._core")
+
+          source_package = Path("src/bioimage_cpp")
+          target = source_package / Path(spec.origin).name
+          shutil.copy2(spec.origin, target)
+          print(f"Copied {spec.origin} to {target}")
+          PY
       - name: Build docs
         run: PYTHONPATH=src pdoc bioimage_cpp -o docs
       - uses: actions/upload-pages-artifact@v3
