@@ -15,6 +15,7 @@ nanobind_add_module(_core
     src/bindings/blocking.cxx
     src/bindings/module.cxx
     src/bindings/filters.cxx
+    src/bindings/flow.cxx
     src/bindings/graph.cxx
     src/bindings/ground_truth.cxx
     src/bindings/segmentation.cxx
