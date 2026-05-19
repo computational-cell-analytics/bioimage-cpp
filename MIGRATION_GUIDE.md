@@ -1547,7 +1547,7 @@ Important differences from vigra and fastfilters:
   largest → smallest. This matches `fastfilters`. To get vigra's
   ascending order, reverse with `result[..., ::-1]`.
 - No IIR / recursive Gaussian, no `convolve` / `recursiveFilter2D`, no
-  morphology, no distance transforms, no nonlinear diffusion, and no
+  morphology, no nonlinear diffusion, and no
   non-local means in v1. Use `scipy.ndimage`, `skimage`, or the original
   vigra/fastfilters bindings if you need those.
 
@@ -1561,6 +1561,48 @@ Implementation notes:
 - Single-threaded for now. Threading can be added later via
   `detail/threading.hxx::parallel_for_chunks` without changing the
   public API.
+
+### Distance Transforms
+
+`bioimage-cpp` exposes exact binary Euclidean distance transforms under
+`bic.distance`.
+
+SciPy / vigra:
+
+```python
+from scipy import ndimage
+dist = ndimage.distance_transform_edt(mask, sampling=(2.0, 1.0))
+
+import vigra.filters as vf
+vec = vf.vectorDistanceTransform(mask)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+dist = bic.distance.distance_transform(mask, sampling=(2.0, 1.0))
+vec = bic.distance.vector_difference_transform(mask, sampling=(2.0, 1.0))
+```
+
+Name mapping:
+
+| scipy / vigra name | bioimage-cpp name |
+| --- | --- |
+| `scipy.ndimage.distance_transform_edt` | `distance_transform` |
+| `vigra.filters.vectorDistanceTransform` | `vector_difference_transform` |
+
+Important differences:
+
+- Distance-valued outputs are `float32`, not SciPy's `float64`.
+- `distance_transform` follows SciPy's binary convention: nonzero values are
+  foreground and distances are measured to the nearest zero-valued element.
+- `vector_difference_transform` returns `float32` vectors with shape
+  `mask.shape + (mask.ndim,)`. Components are sampled displacements from each
+  foreground element to its nearest zero-valued element in NumPy axis order.
+- The initial implementation prioritizes correctness and API coverage over
+  performance; benchmarks and optimized kernels are planned separately.
 
 ## I/O and Build Dependencies
 

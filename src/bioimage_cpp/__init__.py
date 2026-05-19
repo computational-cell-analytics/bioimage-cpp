@@ -23,6 +23,7 @@ TODO: document once on pip / conda
 
 This library provides the following functionality:
 - `affinities`: functionality for deriving affinities from segmentations.
+- `distance`: distance transform functionality.
 - `filters`: efficient implementation of convolutional image filters.
 - `graph`: graph creation and graph (partitioning) algorithms.
 - `segmentation`: image segmentation functionality.
@@ -61,6 +62,7 @@ print("Partitioned into", len(np.unique(partition)), "elements")
 
 from ._version import __version__
 from . import affinities
+from . import distance
 from . import filters
 from . import graph
 from . import segmentation
@@ -70,6 +72,7 @@ from . import utils
 __all__ = [
     "__version__",
     "affinities",
+    "distance",
     "filters",
     "graph",
     "segmentation",
