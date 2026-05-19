@@ -62,6 +62,7 @@ print("Partitioned into", len(np.unique(partition)), "elements")
 from ._version import __version__
 from . import affinities
 from . import filters
+from . import flow
 from . import graph
 from . import segmentation
 from . import transformation
@@ -71,6 +72,7 @@ __all__ = [
     "__version__",
     "affinities",
     "filters",
+    "flow",
     "graph",
     "segmentation",
     "transformation",
