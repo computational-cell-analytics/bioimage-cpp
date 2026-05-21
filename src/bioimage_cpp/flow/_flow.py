@@ -44,8 +44,11 @@ def compute_flow_density(
     flow: np.ndarray,
     fg_mask: np.ndarray,
     *,
-    n_iter: int,
-    dt: float,
+    n_iter: int = 50,
+    dt: float = 0.2,
+    tol: float = 0.005,
+    method: str = "rk2",
+    restrict_to_mask: bool = True,
     sigma: float | Sequence[float] | None = None,
     spacing: Sequence[float] | None = None,
     number_of_threads: int = 1,
@@ -62,9 +65,22 @@ def compute_flow_density(
         Foreground mask. Density is traced from, and retained only inside,
         non-zero mask pixels.
     n_iter:
-        Number of tracing iterations.
+        Maximum number of tracing iterations. Tracing stops earlier when all
+        particles have converged (see ``tol``) or left the mask (see
+        ``restrict_to_mask``).
     dt:
         Step size for every iteration. Must be finite and non-negative.
+    tol:
+        Per-particle convergence tolerance. A particle is frozen once its
+        per-iteration displacement ``|dt * step|_inf`` drops below this value.
+        Set to ``0`` to disable convergence-based early exit.
+    method:
+        Integration method. ``"euler"`` (one sample per step) or ``"rk2"``
+        (midpoint method, two samples per step but converges in fewer
+        iterations).
+    restrict_to_mask:
+        When ``True``, particles that step outside the foreground mask are
+        frozen at their last in-mask position.
     sigma:
         Optional Gaussian smoothing sigma applied to the density after
         tracing.
@@ -100,6 +116,12 @@ def compute_flow_density(
     step_size = float(dt)
     if not np.isfinite(step_size) or step_size < 0:
         raise ValueError("dt must be finite and >= 0")
+    tolerance = float(tol)
+    if not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tol must be finite and >= 0")
+    integration_method = str(method)
+    if integration_method not in ("euler", "rk2"):
+        raise ValueError(f"method must be 'euler' or 'rk2', got '{integration_method}'")
     n_threads = int(number_of_threads)
     if n_threads < 1:
         raise ValueError("number_of_threads must be >= 1")
@@ -109,11 +131,25 @@ def compute_flow_density(
 
     if ndim == 2:
         density = _core._compute_flow_density_2d_float32(
-            contiguous_flow, mask, n_steps, step_size, n_threads
+            contiguous_flow,
+            mask,
+            n_steps,
+            step_size,
+            tolerance,
+            integration_method,
+            bool(restrict_to_mask),
+            n_threads,
         )
     else:
         density = _core._compute_flow_density_3d_float32(
-            contiguous_flow, mask, n_steps, step_size, n_threads
+            contiguous_flow,
+            mask,
+            n_steps,
+            step_size,
+            tolerance,
+            integration_method,
+            bool(restrict_to_mask),
+            n_threads,
         )
 
     if sigma is not None:

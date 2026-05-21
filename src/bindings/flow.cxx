@@ -5,6 +5,7 @@
 #include "bioimage_cpp/flow/flow_density.hxx"
 
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 
 #include <cmath>
 #include <cstddef>
@@ -48,6 +49,9 @@ DensityArray compute_flow_density_t(
     MaskArray fg_mask,
     const std::int64_t n_iter,
     const double dt,
+    const double tol,
+    const std::string &method,
+    const bool restrict_to_mask,
     const std::int64_t number_of_threads
 ) {
     if (flow.ndim() != D + 1) {
@@ -79,6 +83,19 @@ DensityArray compute_flow_density_t(
     if (!std::isfinite(dt) || dt < 0.0) {
         throw std::invalid_argument("dt must be finite and >= 0");
     }
+    if (!std::isfinite(tol) || tol < 0.0) {
+        throw std::invalid_argument("tol must be finite and >= 0");
+    }
+    flow::IntegrationMethod integration_method;
+    if (method == "euler") {
+        integration_method = flow::IntegrationMethod::Euler;
+    } else if (method == "rk2") {
+        integration_method = flow::IntegrationMethod::RK2;
+    } else {
+        throw std::invalid_argument(
+            "method must be 'euler' or 'rk2', got '" + method + "'"
+        );
+    }
     if (number_of_threads < 1) {
         throw std::invalid_argument("number_of_threads must be >= 1");
     }
@@ -107,6 +124,9 @@ DensityArray compute_flow_density_t(
                 density_view,
                 static_cast<std::size_t>(n_iter),
                 static_cast<float>(dt),
+                static_cast<float>(tol),
+                integration_method,
+                restrict_to_mask,
                 static_cast<std::size_t>(number_of_threads)
             );
         } else {
@@ -116,6 +136,9 @@ DensityArray compute_flow_density_t(
                 density_view,
                 static_cast<std::size_t>(n_iter),
                 static_cast<float>(dt),
+                static_cast<float>(tol),
+                integration_method,
+                restrict_to_mask,
                 static_cast<std::size_t>(number_of_threads)
             );
         }
@@ -133,6 +156,9 @@ void bind_flow(nb::module_ &m) {
         nb::arg("fg_mask"),
         nb::arg("n_iter"),
         nb::arg("dt"),
+        nb::arg("tol"),
+        nb::arg("method"),
+        nb::arg("restrict_to_mask"),
         nb::arg("number_of_threads"),
         "Compute a flow convergence density map for a 2D float32 flow field."
     );
@@ -143,6 +169,9 @@ void bind_flow(nb::module_ &m) {
         nb::arg("fg_mask"),
         nb::arg("n_iter"),
         nb::arg("dt"),
+        nb::arg("tol"),
+        nb::arg("method"),
+        nb::arg("restrict_to_mask"),
         nb::arg("number_of_threads"),
         "Compute a flow convergence density map for a 3D float32 flow field."
     );

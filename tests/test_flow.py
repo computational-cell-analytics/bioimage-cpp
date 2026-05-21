@@ -28,7 +28,9 @@ def test_2d_flow_converges_to_center():
     flow = np.stack([2.0 - yy, 2.0 - xx]).astype(np.float32)
     mask = np.ones(shape, dtype=bool)
 
-    density = bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=1.0)
+    density = bic.flow.compute_flow_density(
+        flow, mask, n_iter=1, dt=1.0, tol=0.0, method="euler", restrict_to_mask=False
+    )
 
     expected = np.zeros(shape, dtype=np.float32)
     expected[2, 2] = np.prod(shape)
@@ -41,7 +43,9 @@ def test_3d_flow_converges_to_center():
     flow = np.stack([1.0 - zz, 2.0 - yy, 2.0 - xx]).astype(np.float32)
     mask = np.ones(shape, dtype=bool)
 
-    density = bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=1.0)
+    density = bic.flow.compute_flow_density(
+        flow, mask, n_iter=1, dt=1.0, tol=0.0, method="euler", restrict_to_mask=False
+    )
 
     expected = np.zeros(shape, dtype=np.float32)
     expected[1, 2, 2] = np.prod(shape)
@@ -107,6 +111,10 @@ def test_rejects_invalid_parameters():
         bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=-0.1)
     with pytest.raises(ValueError, match="dt"):
         bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=np.inf)
+    with pytest.raises(ValueError, match="tol"):
+        bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=0.1, tol=-0.1)
+    with pytest.raises(ValueError, match="method"):
+        bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=0.1, method="bogus")
     with pytest.raises(ValueError, match="number_of_threads"):
         bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=0.1, number_of_threads=0)
 
@@ -116,10 +124,48 @@ def test_multithreaded_matches_single_threaded():
     flow = rng.normal(scale=0.5, size=(3, 6, 24, 24)).astype(np.float32)
     mask = (rng.random((6, 24, 24)) > 0.3).astype(bool)
 
-    single = bic.flow.compute_flow_density(flow, mask, n_iter=20, dt=0.1, number_of_threads=1)
-    multi = bic.flow.compute_flow_density(flow, mask, n_iter=20, dt=0.1, number_of_threads=4)
+    kwargs = dict(n_iter=20, dt=0.1, tol=0.0, method="euler", restrict_to_mask=False)
+    single = bic.flow.compute_flow_density(flow, mask, number_of_threads=1, **kwargs)
+    multi = bic.flow.compute_flow_density(flow, mask, number_of_threads=4, **kwargs)
 
     np.testing.assert_array_equal(single, multi)
+
+
+def test_n_iter_beyond_convergence_is_stable():
+    flow = np.zeros((2, 8, 8), dtype=np.float32)
+    mask = np.ones((8, 8), dtype=bool)
+
+    short = bic.flow.compute_flow_density(flow, mask, n_iter=5, dt=0.1, tol=0.01)
+    long = bic.flow.compute_flow_density(flow, mask, n_iter=500, dt=0.1, tol=0.01)
+
+    np.testing.assert_array_equal(short, long)
+
+
+def test_restrict_to_mask_keeps_density_inside_mask():
+    rng = np.random.default_rng(7)
+    flow = rng.normal(scale=0.4, size=(2, 12, 12)).astype(np.float32)
+    mask = np.zeros((12, 12), dtype=bool)
+    mask[3:9, 3:9] = True
+
+    density = bic.flow.compute_flow_density(
+        flow, mask, n_iter=20, dt=0.1, tol=0.0, method="rk2", restrict_to_mask=True
+    )
+    assert (density[~mask] == 0).all()
+
+
+def test_rk2_runs():
+    rng = np.random.default_rng(0)
+    flow = rng.normal(scale=0.3, size=(2, 12, 12)).astype(np.float32)
+    mask = np.ones((12, 12), dtype=bool)
+
+    density = bic.flow.compute_flow_density(
+        flow, mask, n_iter=30, dt=0.1, method="rk2", tol=0.0, restrict_to_mask=False
+    )
+    assert density.dtype == np.float32
+    assert density.shape == mask.shape
+    # Particle count is preserved when restrict_to_mask=False and the mask
+    # covers the whole array.
+    assert density.sum() == float(mask.size)
 
 
 def test_sigma_with_spacing_runs_for_3d():
