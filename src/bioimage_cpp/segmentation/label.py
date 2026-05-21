@@ -34,6 +34,9 @@ def label(
         2D or 3D integer (or boolean) array. Supported dtypes are ``bool``,
         ``uint8``, ``uint16``, ``uint32``, ``uint64``, ``int32``, ``int64``.
         Floating-point inputs are rejected. Non-contiguous arrays are copied.
+        Passing a ``bool`` array enables an internal fast path that skips
+        per-pixel value-equality compares; convert to ``bool`` first if your
+        mask is currently stored as ``uint8`` with values ``{0, 1}``.
     background:
         Pixel value treated as background. Background pixels stay ``0`` in the
         output. Defaults to ``0``.
@@ -66,8 +69,10 @@ def label(
 
     if image_array.dtype == np.dtype("bool"):
         image_view = image_array.view(np.uint8)
+        binary_mode = True
     else:
         image_view = image_array
+        binary_mode = False
 
     try:
         run = _LABEL_BY_DTYPE[image_view.dtype]
@@ -80,4 +85,4 @@ def label(
 
     image_c = np.ascontiguousarray(image_view)
     background_value = image_view.dtype.type(background)
-    return run(image_c, background_value, connectivity)
+    return run(image_c, background_value, connectivity, binary_mode)

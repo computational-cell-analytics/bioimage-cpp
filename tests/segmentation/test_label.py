@@ -319,3 +319,98 @@ def test_label_matches_skimage_with_non_zero_background():
     bic_labels = bic.segmentation.label(image, background=2, connectivity=2)
     sk_labels = skimage_measure.label(image, background=2, connectivity=2)
     _assert_same_partition(bic_labels, sk_labels)
+
+
+def test_label_binary_path_matches_multi_value_path_2d():
+    # The binary fast path (triggered by bool input) must give the same
+    # partition as the multi-value path on the same content.
+    rng = np.random.default_rng(42)
+    mask = rng.random((37, 53)) > 0.55
+    for connectivity in (1, 2):
+        binary_labels = bic.segmentation.label(mask, connectivity=connectivity)
+        multi_labels = bic.segmentation.label(
+            mask.astype(np.uint8), connectivity=connectivity
+        )
+        _assert_same_partition(binary_labels, multi_labels)
+
+
+def test_label_binary_path_matches_multi_value_path_3d():
+    rng = np.random.default_rng(43)
+    mask = rng.random((9, 11, 13)) > 0.6
+    for connectivity in (1, 2, 3):
+        binary_labels = bic.segmentation.label(mask, connectivity=connectivity)
+        multi_labels = bic.segmentation.label(
+            mask.astype(np.uint8), connectivity=connectivity
+        )
+        _assert_same_partition(binary_labels, multi_labels)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(1, 1), (1, 8), (8, 1), (2, 1), (1, 2), (3, 3)],
+)
+@pytest.mark.parametrize("connectivity", [1, 2])
+def test_label_boundary_shapes_2d(shape, connectivity):
+    # Exercise the row/column prologue paths (first row, first column, last
+    # column). The expected behaviour is "all foreground == one component".
+    skimage_measure = pytest.importorskip("skimage.measure")
+    image = np.ones(shape, dtype=np.uint8)
+    bic_labels = bic.segmentation.label(image, connectivity=connectivity)
+    sk_labels = skimage_measure.label(image, connectivity=connectivity)
+    _assert_same_partition(bic_labels, sk_labels)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(1, 1, 1), (1, 1, 8), (1, 8, 1), (8, 1, 1), (1, 2, 3), (3, 1, 2), (2, 3, 1)],
+)
+@pytest.mark.parametrize("connectivity", [1, 2, 3])
+def test_label_boundary_shapes_3d(shape, connectivity):
+    # Exercise every degenerate 3D shape across all connectivities. Catches
+    # off-by-one errors in the slice/row/column prologues.
+    skimage_measure = pytest.importorskip("skimage.measure")
+    image = np.ones(shape, dtype=np.uint8)
+    bic_labels = bic.segmentation.label(image, connectivity=connectivity)
+    sk_labels = skimage_measure.label(image, connectivity=connectivity)
+    _assert_same_partition(bic_labels, sk_labels)
+
+
+def test_label_checkerboard_stress_2d_4_conn():
+    # Checkerboard: every other pixel is foreground; under 4-connectivity,
+    # no two foreground pixels touch, so we expect N/2 distinct components.
+    # Stresses LabelUnionFind growth (~500k new_label calls) and uint32
+    # headroom.
+    size = 1024
+    image = np.zeros((size, size), dtype=np.uint8)
+    image[::2, ::2] = 1
+    image[1::2, 1::2] = 1
+    labels = bic.segmentation.label(image, connectivity=1)
+    assert labels.dtype == np.uint64
+    # Expected components: half the pixels are foreground, none touch via
+    # 4-conn.
+    assert int(labels.max()) == (size * size) // 2
+    assert int((labels > 0).sum()) == (size * size) // 2
+
+
+def test_label_checkerboard_stress_2d_8_conn():
+    # Under 8-connectivity the same checkerboard collapses into two
+    # components (top-left pattern and the offset pattern), exercising heavy
+    # union-find merges.
+    size = 256
+    image = np.zeros((size, size), dtype=np.uint8)
+    image[::2, ::2] = 1
+    image[1::2, 1::2] = 1
+    labels = bic.segmentation.label(image, connectivity=2)
+    unique_labels = set(labels.ravel().tolist())
+    assert unique_labels == {0, 1}, unique_labels
+
+
+def test_label_binary_mode_matches_skimage_random_3d():
+    # Direct skimage parity for the binary fast path in 3D.
+    skimage_measure = pytest.importorskip("skimage.measure")
+    rng = np.random.default_rng(99)
+    mask = rng.random((10, 14, 18)) > 0.6
+    for connectivity in (1, 2, 3):
+        bic_labels = bic.segmentation.label(mask, connectivity=connectivity)
+        sk_labels = skimage_measure.label(mask, connectivity=connectivity)
+        _assert_same_partition(bic_labels, sk_labels)

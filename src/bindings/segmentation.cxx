@@ -325,7 +325,8 @@ template <class InT>
 nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig> label_t(
     nb::ndarray<nb::numpy, const InT, nb::c_contig> image,
     InT background,
-    int connectivity
+    int connectivity,
+    bool binary
 ) {
     if (image.ndim() != 2 && image.ndim() != 3) {
         throw std::invalid_argument(
@@ -356,7 +357,9 @@ nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig> label_t(
 
     {
         nb::gil_scoped_release release;
-        segmentation::label<InT>(image_view, background, connectivity, out_view);
+        segmentation::label<InT>(
+            image_view, background, connectivity, binary, out_view
+        );
     }
 
     return nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig>(
@@ -553,6 +556,7 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("image"),
         nb::arg("background"),
         nb::arg("connectivity"),
+        nb::arg("binary"),
         "Connected-components labeling of a 2D or 3D uint8 image."
     );
     m.def(
@@ -561,6 +565,7 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("image"),
         nb::arg("background"),
         nb::arg("connectivity"),
+        nb::arg("binary"),
         "Connected-components labeling of a 2D or 3D uint16 image."
     );
     m.def(
@@ -569,6 +574,7 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("image"),
         nb::arg("background"),
         nb::arg("connectivity"),
+        nb::arg("binary"),
         "Connected-components labeling of a 2D or 3D uint32 image."
     );
     m.def(
@@ -577,6 +583,7 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("image"),
         nb::arg("background"),
         nb::arg("connectivity"),
+        nb::arg("binary"),
         "Connected-components labeling of a 2D or 3D uint64 image."
     );
     m.def(
@@ -585,6 +592,7 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("image"),
         nb::arg("background"),
         nb::arg("connectivity"),
+        nb::arg("binary"),
         "Connected-components labeling of a 2D or 3D int32 image."
     );
     m.def(
@@ -593,6 +601,7 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("image"),
         nb::arg("background"),
         nb::arg("connectivity"),
+        nb::arg("binary"),
         "Connected-components labeling of a 2D or 3D int64 image."
     );
 }
