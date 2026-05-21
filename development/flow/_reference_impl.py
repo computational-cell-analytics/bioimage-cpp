@@ -1,4 +1,8 @@
-"""Naive reference implementation
+"""Naive reference implementation for flow tracing.
+
+Lives under ``development/`` and depends on ``scipy``, ``scikit-image``, and
+``tqdm`` — none of which are required by the installed ``bioimage_cpp``
+package. Only used by the comparison/benchmark scripts in this directory.
 """
 
 from typing import Optional, Tuple

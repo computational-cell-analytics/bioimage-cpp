@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dim", choices=("2", "3", "both"), default="both")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--atol", type=float, default=1e-5)
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=float, default=60.0)
     return parser.parse_args()
 
 

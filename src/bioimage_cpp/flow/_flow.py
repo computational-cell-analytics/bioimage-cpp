@@ -13,7 +13,7 @@ def _normalize_mask(fg_mask: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
     mask = np.asarray(fg_mask)
     if mask.shape != shape:
         raise ValueError(f"fg_mask has shape {mask.shape}, expected {shape}")
-    return np.ascontiguousarray(mask.astype(np.uint8, copy=False))
+    return np.ascontiguousarray(mask, dtype=np.uint8)
 
 
 def _normalize_sigma(
@@ -48,6 +48,7 @@ def compute_flow_density(
     dt: float,
     sigma: float | Sequence[float] | None = None,
     spacing: Sequence[float] | None = None,
+    number_of_threads: int = 1,
 ) -> np.ndarray:
     """Compute convergence density from tracing a flow field.
 
@@ -70,6 +71,10 @@ def compute_flow_density(
     spacing:
         Optional physical spacing. For 3D data and scalar ``sigma``, smoothing
         uses ``sigma / spacing`` per axis, matching the reference convention.
+    number_of_threads:
+        Number of threads used for the particle-tracing iteration. The final
+        density scatter and the (optional) Gaussian smoothing are not
+        parallelized here. Results are deterministic regardless of the value.
 
     Returns
     -------
@@ -95,17 +100,20 @@ def compute_flow_density(
     step_size = float(dt)
     if not np.isfinite(step_size) or step_size < 0:
         raise ValueError("dt must be finite and >= 0")
+    n_threads = int(number_of_threads)
+    if n_threads < 1:
+        raise ValueError("number_of_threads must be >= 1")
 
     contiguous_flow = np.ascontiguousarray(array, dtype=np.float32)
     mask = _normalize_mask(fg_mask, tuple(contiguous_flow.shape[1:]))
 
     if ndim == 2:
         density = _core._compute_flow_density_2d_float32(
-            contiguous_flow, mask, n_steps, step_size
+            contiguous_flow, mask, n_steps, step_size, n_threads
         )
     else:
         density = _core._compute_flow_density_3d_float32(
-            contiguous_flow, mask, n_steps, step_size
+            contiguous_flow, mask, n_steps, step_size, n_threads
         )
 
     if sigma is not None:

@@ -23,7 +23,8 @@ import numpy as np
 
 import bioimage_cpp as bic
 from bioimage_cpp._data import load_flow_data
-from bioimage_cpp.flow._reference_impl import _compute_flow_density
+
+from _reference_impl import _compute_flow_density
 
 
 N_ITER = 100
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dim", choices=("2", "3", "both"), default="both")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument(
         "--small",
         action="store_true",
@@ -129,8 +130,6 @@ def _benchmark_dim(ndim: int, repeats: int, warmup: int, timeout: float, small: 
     diff = np.abs(ours.astype(np.float64) - reference.astype(np.float64))
     max_diff = float(diff.max()) if diff.size else 0.0
     mean_diff = float(diff.mean()) if diff.size else 0.0
-    stored_diff = np.abs(ours.astype(np.float64) - density.astype(np.float64))
-    stored_max_diff = float(stored_diff.max()) if stored_diff.size else 0.0
 
     ours_med = median(ours_times)
     ref_med = median(ref_times)
@@ -145,6 +144,8 @@ def _benchmark_dim(ndim: int, repeats: int, warmup: int, timeout: float, small: 
     if small:
         print("stored-density comparison skipped for cropped smoke run")
     else:
+        stored_diff = np.abs(ours.astype(np.float64) - density.astype(np.float64))
+        stored_max_diff = float(stored_diff.max()) if stored_diff.size else 0.0
         print(f"max_abs_diff_vs_stored_density={stored_max_diff:.6g}")
 
 

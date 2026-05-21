@@ -1,6 +1,6 @@
 import h5py
 
-from bioimage_cpp.flow._reference_impl import _compute_flow_density
+from _reference_impl import _compute_flow_density
 
 
 def _compute_test_data(path, check=True):

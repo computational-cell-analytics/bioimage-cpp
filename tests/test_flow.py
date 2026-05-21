@@ -107,3 +107,28 @@ def test_rejects_invalid_parameters():
         bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=-0.1)
     with pytest.raises(ValueError, match="dt"):
         bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=np.inf)
+    with pytest.raises(ValueError, match="number_of_threads"):
+        bic.flow.compute_flow_density(flow, mask, n_iter=1, dt=0.1, number_of_threads=0)
+
+
+def test_multithreaded_matches_single_threaded():
+    rng = np.random.default_rng(1234)
+    flow = rng.normal(scale=0.5, size=(3, 6, 24, 24)).astype(np.float32)
+    mask = (rng.random((6, 24, 24)) > 0.3).astype(bool)
+
+    single = bic.flow.compute_flow_density(flow, mask, n_iter=20, dt=0.1, number_of_threads=1)
+    multi = bic.flow.compute_flow_density(flow, mask, n_iter=20, dt=0.1, number_of_threads=4)
+
+    np.testing.assert_array_equal(single, multi)
+
+
+def test_sigma_with_spacing_runs_for_3d():
+    flow = np.zeros((3, 4, 5, 6), dtype=np.float32)
+    mask = np.ones((4, 5, 6), dtype=bool)
+
+    density = bic.flow.compute_flow_density(
+        flow, mask, n_iter=0, dt=0.0, sigma=1.0, spacing=(2.0, 1.0, 1.0)
+    )
+
+    assert density.dtype == np.float32
+    assert density.shape == mask.shape
