@@ -1,5 +1,6 @@
 #include "affinities.hxx"
 #include "blocking.hxx"
+#include "distance.hxx"
 #include "filters.hxx"
 #include "flow.hxx"
 #include "graph.hxx"
@@ -17,6 +18,7 @@ NB_MODULE(_core, m) {
     m.doc() = "C++ extension module for bioimage_cpp.";
     bioimage_cpp::bindings::bind_affinities(m);
     bioimage_cpp::bindings::bind_blocking(m);
+    bioimage_cpp::bindings::bind_distance(m);
     bioimage_cpp::bindings::bind_filters(m);
     bioimage_cpp::bindings::bind_flow(m);
     bioimage_cpp::bindings::bind_graph(m);
