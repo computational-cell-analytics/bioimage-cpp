@@ -1,27 +1,28 @@
 """Benchmark distance transforms on skimage-derived 2D and 3D masks.
 
-The current bioimage-cpp implementation is correctness-first and brute-force:
-runtime is proportional to ``number_of_pixels * number_of_background_sites``.
-To keep this benchmark runnable before the optimized EDT implementation lands,
-the default data uses real skimage images/volumes to choose a sparse set of
-background sites. Every library receives the same contiguous float32 mask:
-nonzero foreground, zero background.
+bioimage-cpp's distance transform uses the separable Felzenszwalb–Huttenlocher
+algorithm (O(N * ndim)), which is the same algorithmic class as vigra and
+scipy. Masks are derived by thresholding real skimage images/volumes at a
+controllable quantile, giving a realistic foreground/background split.
+
+Each library is fed a pre-built mask in its preferred dtype, allocated once
+outside the timing loop so per-call dtype conversion does not show up in the
+measurement of a particular library:
+
+* bioimage_cpp.distance.distance_transform        — uint8 mask
+* bioimage_cpp.distance.vector_difference_transform — uint8 mask
+* vigra.filters.distanceTransform / vectorDistanceTransform — float32 mask
+* scipy.ndimage.distance_transform_edt            — float32 mask
+
+SciPy has no direct vector distance transform. The SciPy vector baseline uses
+``return_indices=True`` and converts feature indices to sampled difference
+vectors, which is the closest SciPy-only equivalent.
 
 Run::
 
     python development/distance/benchmark.py --small --repeats 3
     python development/distance/benchmark.py --repeats 5 --csv distance.csv
-
-Compared libraries:
-
-* bioimage_cpp.distance.distance_transform
-* bioimage_cpp.distance.vector_difference_transform
-* vigra.filters.distanceTransform / vectorDistanceTransform
-* scipy.ndimage.distance_transform_edt
-
-SciPy has no direct vector distance transform. The SciPy vector baseline uses
-``return_indices=True`` and converts feature indices to sampled difference
-vectors, which is the closest SciPy-only equivalent.
+    python development/distance/benchmark.py --large --threads 0
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ OPERATIONS = ("distance_transform", "vector_difference_transform")
 class DataSpec:
     label: str
     shape: tuple[int, ...]
-    n_targets: int
+    fraction_background: float
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,12 @@ class BenchConfig:
                 f"sampling has length {len(self.sampling)}, but data has ndim={ndim}"
             )
         return self.sampling
+
+
+@dataclass
+class Adapter:
+    fn: Callable[[np.ndarray], np.ndarray]
+    mask: np.ndarray
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,16 +98,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--targets-2d",
-        type=int,
-        default=None,
-        help="Number of zero-valued background sites in the 2D mask.",
+        "--density",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of pixels classified as background (0.0–1.0). The mask "
+            "is built by thresholding the source image at this quantile."
+        ),
     )
     parser.add_argument(
-        "--targets-3d",
+        "--threads",
         type=int,
-        default=None,
-        help="Number of zero-valued background sites in the 3D mask.",
+        default=1,
+        help=(
+            "Thread count for bioimage_cpp. 0 = hardware concurrency. "
+            "vigra and scipy are single-threaded."
+        ),
     )
     parser.add_argument(
         "--csv",
@@ -143,60 +156,46 @@ def _quiet_vigra_matplotlib_cache() -> None:
 # skimage-derived benchmark data
 # ---------------------------------------------------------------------------
 
-def _grid_shape(shape: tuple[int, ...], n_blocks: int) -> tuple[int, ...]:
-    dims = [1] * len(shape)
-    while math.prod(dims) < n_blocks:
-        axis = max(range(len(shape)), key=lambda ax: shape[ax] / dims[ax])
-        dims[axis] += 1
-    return tuple(dims)
+def _quantile_mask(image: np.ndarray, fraction_background: float) -> np.ndarray:
+    """Threshold `image` so roughly `fraction_background` of pixels are zero.
 
-
-def _dark_landmarks(image: np.ndarray, n_targets: int) -> np.ndarray:
-    """Pick spatially spread low-intensity coordinates from `image`.
-
-    The image is partitioned into approximately `n_targets` blocks, and the
-    darkest voxel/pixel from each block is used as a background site.
+    Returns a bool array where True is foreground (the brighter pixels). Both
+    extremes are clamped so degenerate all-zero / all-one masks are avoided.
     """
-    block_shape = _grid_shape(tuple(image.shape), n_targets)
-    ranges = [
-        np.array_split(np.arange(axis_size), n_splits)
-        for axis_size, n_splits in zip(image.shape, block_shape)
-    ]
-    coords = []
-    for block_indices in np.ndindex(*block_shape):
-        slices = tuple(
-            slice(int(ranges[axis][block_indices[axis]][0]),
-                  int(ranges[axis][block_indices[axis]][-1]) + 1)
-            for axis in range(image.ndim)
-        )
-        block = image[slices]
-        local = np.unravel_index(int(np.argmin(block)), block.shape)
-        coords.append(tuple(local[axis] + slices[axis].start for axis in range(image.ndim)))
-    coords = sorted(coords, key=lambda coord: float(image[coord]))
-    return np.asarray(coords[:n_targets], dtype=np.int64)
-
-
-def _mask_from_image(image: np.ndarray, n_targets: int) -> np.ndarray:
-    coords = _dark_landmarks(image, n_targets)
-    mask = np.ones(image.shape, dtype=np.float32)
-    mask[tuple(coords.T)] = 0.0
-    return np.ascontiguousarray(mask)
+    fraction = float(np.clip(fraction_background, 0.0, 1.0))
+    if fraction <= 0.0:
+        return np.ones(image.shape, dtype=bool)
+    if fraction >= 1.0:
+        return np.zeros(image.shape, dtype=bool)
+    threshold = np.quantile(image, fraction)
+    return image > threshold
 
 
 def load_2d(spec: DataSpec) -> np.ndarray:
     from skimage import data
 
     image = data.camera().astype(np.float32)
-    image = image[: spec.shape[0], : spec.shape[1]]
-    return _mask_from_image(image, spec.n_targets)
+    h, w = spec.shape
+    if h > image.shape[0] or w > image.shape[1]:
+        reps_h = math.ceil(h / image.shape[0])
+        reps_w = math.ceil(w / image.shape[1])
+        image = np.tile(image, (reps_h, reps_w))
+    image = image[:h, :w]
+    return np.ascontiguousarray(_quantile_mask(image, spec.fraction_background))
 
 
 def load_3d(spec: DataSpec) -> np.ndarray:
     from skimage import data
 
     volume = data.cells3d()[:, 1].astype(np.float32)
-    volume = volume[: spec.shape[0], : spec.shape[1], : spec.shape[2]]
-    return _mask_from_image(volume, spec.n_targets)
+    z, h, w = spec.shape
+    reps_z = math.ceil(z / volume.shape[0]) if z > volume.shape[0] else 1
+    reps_h = math.ceil(h / volume.shape[1]) if h > volume.shape[1] else 1
+    reps_w = math.ceil(w / volume.shape[2]) if w > volume.shape[2] else 1
+    if reps_z * reps_h * reps_w > 1:
+        volume = np.tile(volume, (reps_z, reps_h, reps_w))
+    volume = volume[:z, :h, :w]
+    return np.ascontiguousarray(_quantile_mask(volume, spec.fraction_background))
 
 
 def build_specs(args: argparse.Namespace) -> list[DataSpec]:
@@ -204,25 +203,20 @@ def build_specs(args: argparse.Namespace) -> list[DataSpec]:
         raise ValueError("--small and --large are mutually exclusive")
 
     if args.small:
-        shape_2d, targets_2d = (64, 64), 16
-        shape_3d, targets_3d = (12, 32, 32), 16
+        shape_2d = (256, 256)
+        shape_3d = (16, 64, 64)
     elif args.large:
-        shape_2d, targets_2d = (256, 256), 128
-        shape_3d, targets_3d = (32, 96, 96), 128
+        shape_2d = (2048, 2048)
+        shape_3d = (64, 512, 512)
     else:
-        shape_2d, targets_2d = (128, 128), 64
-        shape_3d, targets_3d = (20, 64, 64), 64
-
-    if args.targets_2d is not None:
-        targets_2d = args.targets_2d
-    if args.targets_3d is not None:
-        targets_3d = args.targets_3d
+        shape_2d = (512, 512)
+        shape_3d = (32, 256, 256)
 
     specs = []
     if not args.no_2d:
-        specs.append(DataSpec("2D", shape_2d, targets_2d))
+        specs.append(DataSpec("2D", shape_2d, args.density))
     if not args.no_3d:
-        specs.append(DataSpec("3D", shape_3d, targets_3d))
+        specs.append(DataSpec("3D", shape_3d, args.density))
     return specs
 
 
@@ -230,20 +224,24 @@ def build_specs(args: argparse.Namespace) -> list[DataSpec]:
 # Library adapters
 # ---------------------------------------------------------------------------
 
-def _bic_distance(sampling: tuple[float, ...]):
+def _bic_distance(sampling: tuple[float, ...], n_threads: int):
     from bioimage_cpp import distance
 
     def fn(mask: np.ndarray) -> np.ndarray:
-        return distance.distance_transform(mask, sampling=sampling)
+        return distance.distance_transform(
+            mask, sampling=sampling, number_of_threads=n_threads
+        )
 
     return fn
 
 
-def _bic_vector(sampling: tuple[float, ...]):
+def _bic_vector(sampling: tuple[float, ...], n_threads: int):
     from bioimage_cpp import distance
 
     def fn(mask: np.ndarray) -> np.ndarray:
-        return distance.vector_difference_transform(mask, sampling=sampling)
+        return distance.vector_difference_transform(
+            mask, sampling=sampling, number_of_threads=n_threads
+        )
 
     return fn
 
@@ -289,45 +287,60 @@ def _scipy_distance(sampling: tuple[float, ...]):
 def _scipy_vector(sampling: tuple[float, ...]):
     from scipy import ndimage
 
-    coords_cache: dict[tuple[int, ...], np.ndarray] = {}
     sampling_array = np.asarray(sampling, dtype=np.float64)
 
     def fn(mask: np.ndarray) -> np.ndarray:
         _, indices = ndimage.distance_transform_edt(
             mask, sampling=sampling, return_indices=True
         )
-        coords = coords_cache.get(mask.shape)
-        if coords is None:
-            coords = np.indices(mask.shape, dtype=np.int32)
-            coords_cache[mask.shape] = coords
+        coords = np.indices(mask.shape, dtype=np.int32)
         vectors = np.moveaxis(indices - coords, 0, -1)
-        vectors = vectors * sampling_array.reshape((1,) * mask.ndim + (-1,))
-        return vectors
+        return vectors * sampling_array.reshape((1,) * mask.ndim + (-1,))
 
     return fn
 
 
-def build_adapters(operation: str, sampling: tuple[float, ...]) -> dict[str, Callable[[np.ndarray], np.ndarray]]:
+def _prepare_mask(library: str, base_mask: np.ndarray) -> np.ndarray:
+    if library == "bioimage_cpp":
+        # The Python wrapper fast-paths uint8 C-contiguous input.
+        return np.ascontiguousarray(base_mask, dtype=np.uint8)
+    if library in ("vigra", "scipy"):
+        # vigra accepts float32 / uint32; scipy accepts any nonzero-tested
+        # array. Match the conventional float32 mask both libraries are
+        # typically called with.
+        return np.ascontiguousarray(base_mask, dtype=np.float32)
+    raise ValueError(f"unknown library: {library}")
+
+
+def build_adapters(
+    operation: str,
+    sampling: tuple[float, ...],
+    n_threads: int,
+    base_mask: np.ndarray,
+) -> dict[str, Adapter]:
     builders = {
         "distance_transform": {
-            "bioimage_cpp": _bic_distance,
-            "vigra": _vigra_distance,
-            "scipy": _scipy_distance,
+            "bioimage_cpp": lambda: _bic_distance(sampling, n_threads),
+            "vigra": lambda: _vigra_distance(sampling),
+            "scipy": lambda: _scipy_distance(sampling),
         },
         "vector_difference_transform": {
-            "bioimage_cpp": _bic_vector,
-            "vigra": _vigra_vector,
-            "scipy": _scipy_vector,
+            "bioimage_cpp": lambda: _bic_vector(sampling, n_threads),
+            "vigra": lambda: _vigra_vector(sampling),
+            "scipy": lambda: _scipy_vector(sampling),
         },
     }[operation]
 
-    adapters = {}
+    adapters: dict[str, Adapter] = {}
     for library, builder in builders.items():
         if library == "vigra" and not _import_available("vigra"):
             continue
         if library == "scipy" and not _import_available("scipy"):
             continue
-        adapters[library] = builder(sampling)
+        adapters[library] = Adapter(
+            fn=builder(),
+            mask=_prepare_mask(library, base_mask),
+        )
     return adapters
 
 
@@ -336,13 +349,12 @@ def build_adapters(operation: str, sampling: tuple[float, ...]) -> dict[str, Cal
 # ---------------------------------------------------------------------------
 
 def time_interleaved(
-    callables: dict[str, Callable[[np.ndarray], np.ndarray]],
-    mask: np.ndarray,
+    adapters: dict[str, Adapter],
     repeats: int,
 ) -> dict[str, dict]:
-    libs = list(callables)
-    for fn in callables.values():
-        fn(mask)
+    libs = list(adapters)
+    for adapter in adapters.values():
+        adapter.fn(adapter.mask)
 
     timings = {lib: [] for lib in libs}
     last_result = {}
@@ -350,8 +362,9 @@ def time_interleaved(
         rotation = repeat % len(libs)
         order = libs[rotation:] + libs[:rotation]
         for lib in order:
+            adapter = adapters[lib]
             t0 = perf_counter()
-            result = callables[lib](mask)
+            result = adapter.fn(adapter.mask)
             timings[lib].append(perf_counter() - t0)
             last_result[lib] = np.asarray(result)
 
@@ -368,19 +381,23 @@ def time_interleaved(
 
 def check_results(
     operation: str,
-    mask: np.ndarray,
     sampling: tuple[float, ...],
-    adapters: dict[str, Callable[[np.ndarray], np.ndarray]],
+    adapters: dict[str, Adapter],
 ) -> dict[str, float]:
     if "scipy" not in adapters:
         return {}
 
-    reference_distance = _scipy_distance(sampling)(mask).astype(np.float32, copy=False)
+    scipy_adapter = adapters["scipy"]
+    reference_distance = _scipy_distance(sampling)(scipy_adapter.mask).astype(
+        np.float32, copy=False
+    )
     errors = {}
-    for library, fn in adapters.items():
-        result = np.asarray(fn(mask))
+    for library, adapter in adapters.items():
+        result = np.asarray(adapter.fn(adapter.mask))
         if operation == "distance_transform":
-            errors[library] = float(np.max(np.abs(result.astype(np.float32) - reference_distance)))
+            errors[library] = float(
+                np.max(np.abs(result.astype(np.float32) - reference_distance))
+            )
         else:
             # Equidistant feature-index ties can choose different nearest
             # targets. Vector magnitudes must still match the distance map.
@@ -390,7 +407,7 @@ def check_results(
 
 
 def format_results_table(rows: list[dict]) -> str:
-    headers = ["operation", "dim", "shape", "targets"]
+    headers = ["operation", "dim", "shape", "bg %"]
     for lib in LIBRARIES:
         headers.extend([f"{lib} ms", "x ours"])
 
@@ -402,7 +419,7 @@ def format_results_table(rows: list[dict]) -> str:
             row["operation"],
             row["dim"],
             row["shape"],
-            str(row["targets"]),
+            f"{row['fraction_background'] * 100:.1f}",
         ]
         for lib in LIBRARIES:
             result = row["results"].get(lib)
@@ -456,6 +473,12 @@ def main() -> int:
     if args.repeats < 1:
         print("--repeats must be >= 1", file=sys.stderr)
         return 2
+    if args.threads < 0:
+        print("--threads must be >= 0", file=sys.stderr)
+        return 2
+    if not (0.0 <= args.density <= 1.0):
+        print("--density must be in [0.0, 1.0]", file=sys.stderr)
+        return 2
 
     try:
         cfg = BenchConfig(sampling=_parse_sampling(args.sampling))
@@ -468,30 +491,36 @@ def main() -> int:
         print("skimage is required for benchmark data", file=sys.stderr)
         return 2
 
-    print(f"repeats={args.repeats}, sampling={args.sampling}")
-    print("data: skimage camera/cells3d, sparse zero-valued landmarks from dark blocks")
+    print(
+        f"repeats={args.repeats}, sampling={args.sampling}, density={args.density}, "
+        f"bioimage_cpp threads={args.threads}"
+    )
+    print("data: quantile-thresholded skimage camera/cells3d (tiled if smaller than the requested shape)")
 
     rows = []
     csv_rows = []
     for spec in specs:
-        mask = load_2d(spec) if spec.label == "2D" else load_3d(spec)
-        sampling = cfg.sampling_for(mask.ndim)
+        base_mask = load_2d(spec) if spec.label == "2D" else load_3d(spec)
+        sampling = cfg.sampling_for(base_mask.ndim)
+        actual_bg = float(np.count_nonzero(base_mask == 0)) / base_mask.size
         print(
-            f"{spec.label}: shape={mask.shape}, targets={int(np.count_nonzero(mask == 0))}, "
-            f"foreground={int(np.count_nonzero(mask != 0))}"
+            f"{spec.label}: shape={base_mask.shape}, background={int(np.count_nonzero(base_mask == 0))} "
+            f"({actual_bg * 100:.1f}%), foreground={int(np.count_nonzero(base_mask != 0))}"
         )
         for operation in requested:
-            adapters = build_adapters(operation, sampling)
+            adapters = build_adapters(operation, sampling, args.threads, base_mask)
             if not adapters:
                 continue
-            errors = {} if args.skip_checks else check_results(operation, mask, sampling, adapters)
-            results = time_interleaved(adapters, mask, args.repeats)
+            errors = (
+                {} if args.skip_checks else check_results(operation, sampling, adapters)
+            )
+            results = time_interleaved(adapters, args.repeats)
             full_results = {lib: results.get(lib) for lib in LIBRARIES}
             rows.append({
                 "operation": operation,
                 "dim": spec.label,
-                "shape": str(tuple(mask.shape)),
-                "targets": int(np.count_nonzero(mask == 0)),
+                "shape": str(tuple(base_mask.shape)),
+                "fraction_background": actual_bg,
                 "results": full_results,
                 "errors": errors,
             })
@@ -501,13 +530,14 @@ def main() -> int:
                 csv_rows.append({
                     "operation": operation,
                     "dim": spec.label,
-                    "shape": tuple(mask.shape),
-                    "targets": int(np.count_nonzero(mask == 0)),
+                    "shape": tuple(base_mask.shape),
+                    "fraction_background": actual_bg,
                     "library": lib,
                     "median_s": result["median"],
                     "min_s": result["min"],
                     "max_abs_error": errors.get(lib, ""),
                     "repeats": args.repeats,
+                    "threads": args.threads if lib == "bioimage_cpp" else 1,
                 })
 
     print()
@@ -530,12 +560,13 @@ def main() -> int:
                     "operation",
                     "dim",
                     "shape",
-                    "targets",
+                    "fraction_background",
                     "library",
                     "median_s",
                     "min_s",
                     "max_abs_error",
                     "repeats",
+                    "threads",
                 ],
             )
             writer.writeheader()

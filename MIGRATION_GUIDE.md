@@ -1565,7 +1565,9 @@ Implementation notes:
 ### Distance Transforms
 
 `bioimage-cpp` exposes exact binary Euclidean distance transforms under
-`bic.distance`.
+`bic.distance`. The implementation uses the separable
+Felzenszwalb–Huttenlocher algorithm, complexity O(N · ndim), with optional
+multithreading across the orthogonal lines of each axis sweep.
 
 SciPy / vigra:
 
@@ -1582,7 +1584,19 @@ bioimage-cpp:
 ```python
 import bioimage_cpp as bic
 
+# One call can return any combination of distances, feature indices, and
+# difference vectors — the C++ kernel computes them in a single sweep.
 dist = bic.distance.distance_transform(mask, sampling=(2.0, 1.0))
+dist, idx, vec = bic.distance.distance_transform(
+    mask,
+    sampling=(2.0, 1.0),
+    return_distances=True,
+    return_indices=True,
+    return_vectors=True,
+)
+
+# Short alias kept for parity with vigra; equivalent to the call above with
+# return_distances=False, return_indices=False, return_vectors=True.
 vec = bic.distance.vector_difference_transform(mask, sampling=(2.0, 1.0))
 ```
 
@@ -1595,14 +1609,33 @@ Name mapping:
 
 Important differences:
 
-- Distance-valued outputs are `float32`, not SciPy's `float64`.
+- Distance-valued outputs are `float32`, not SciPy's `float64`. Indices are
+  `int32` with shape `(ndim, *mask.shape)` (matches SciPy's layout). Vectors
+  are `float32` with shape `(*mask.shape, ndim)`; components are sampled
+  displacements `(feature_coord - pixel_coord) * sampling[ax]` per axis.
 - `distance_transform` follows SciPy's binary convention: nonzero values are
   foreground and distances are measured to the nearest zero-valued element.
-- `vector_difference_transform` returns `float32` vectors with shape
-  `mask.shape + (mask.ndim,)`. Components are sampled displacements from each
-  foreground element to its nearest zero-valued element in NumPy axis order.
-- The initial implementation prioritizes correctness and API coverage over
-  performance; benchmarks and optimized kernels are planned separately.
+  `bool` and `uint8` C-contiguous inputs are fast-pathed without a copy;
+  other dtypes are converted via `array != 0`.
+- A single `distance_transform` call can return any non-empty subset of
+  `distances`, `indices`, and `vectors` via the corresponding
+  `return_distances` / `return_indices` / `return_vectors` flags. The result
+  is the array itself when only one output is requested, otherwise a tuple
+  in `(distances, indices, vectors)` order with omitted entries skipped.
+- Pre-allocated output buffers are supported via the `distances=`,
+  `indices=`, and `vectors=` keyword arguments. They must be C-contiguous,
+  writable, of the documented shape and dtype, and are written into in
+  place. Pre-allocated outputs are excluded from the return value (matching
+  SciPy's convention); the call returns `None` if every requested output
+  was preallocated.
+- `number_of_threads` selects the thread count for the per-axis sweep.
+  `1` (the default) is single-threaded; `0` uses
+  `std::thread::hardware_concurrency()`; positive values pin an explicit
+  count. Output is deterministic and bitwise identical across thread counts.
+- For an all-foreground input (no zero-valued elements), the result matches
+  SciPy: distances and indices report a virtual background point at
+  axis-0 coordinate `-1` and `0` on all other axes. The first row of
+  `indices` will then contain `-1` everywhere.
 
 ## I/O and Build Dependencies
 
