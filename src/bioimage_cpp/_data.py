@@ -31,6 +31,12 @@ Semantic labels:
   outside the labelled region; loaders crop to the labelled content slab.
   Used by the semantic-mutex-watershed comparison scripts under
   ``development/``.
+
+Flow tracing:
+- ``flow_data_2d.h5`` / ``flow_data_3d.h5`` — HDF5 files with directed
+  distance predictions under ``dist``, foreground scores under ``fg`` and
+  reference convergence density under ``density``. Callers should pass
+  ``-dist`` to ``bioimage_cpp.flow.compute_flow_density``.
 """
 
 from __future__ import annotations
@@ -45,6 +51,8 @@ DEFAULT_CACHE_DIR = Path.home() / ".cache" / "bioimage-cpp"
 CACHE_ENV_VAR = "BIOIMAGE_CPP_CACHE"
 ISBI_AFFINITY_FILENAME = "affinities"
 SEMANTIC_LABELS_FILENAME = "semantic_labels"
+FLOW_DATA_2D_FILENAME = "flow_data_2d.h5"
+FLOW_DATA_3D_FILENAME = "flow_data_3d.h5"
 ISBI_AFFINITY_OFFSETS = (
     (-1, 0, 0),
     (0, -1, 0),
@@ -113,6 +121,14 @@ _REGISTRY: dict[str, tuple[str, Optional[str]]] = {
     "semantic_labels": (
         "https://owncloud.gwdg.de/index.php/s/Ah7IGuYH7uuomQV/download",
         "6232fe2fd58fdbd3def978798143fdcc65a2af118b4d9ee177b5c942173ece26",
+    ),
+    FLOW_DATA_2D_FILENAME: (
+        "https://owncloud.gwdg.de/index.php/s/nxL1u3YtqXfUz6c/download",
+        "ac2f6420f2e06375432e8e72b36ff26b84917563c0505df7d76affa1950e12b2",
+    ),
+    FLOW_DATA_3D_FILENAME: (
+        "https://owncloud.gwdg.de/index.php/s/c8ekd4DklC5X79u/download",
+        "0836180a8d71cb565a56765092d7490e13733bbf37b709e0ff319701ce40b42f",
     ),
 }
 
@@ -316,3 +332,51 @@ def load_semantic_raw(
     with h5py.File(semantic_labels_path(timeout=timeout), "r") as f:
         raw = f["raw"][SEMANTIC_LABELS_CROP]
     return np.ascontiguousarray(raw)
+
+
+def flow_data_path(ndim: int, *, timeout: Optional[float] = None) -> Path:
+    """Return the cached path to a registered flow-tracing HDF5 file."""
+    ndim = int(ndim)
+    if ndim == 2:
+        filename = FLOW_DATA_2D_FILENAME
+    elif ndim == 3:
+        filename = FLOW_DATA_3D_FILENAME
+    else:
+        raise ValueError(f"ndim must be 2 or 3, got {ndim}")
+    return fetch(filename, timeout=timeout)
+
+
+def load_flow_data(
+    ndim: int,
+    *,
+    timeout: Optional[float] = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load registered flow-tracing sample data.
+
+    Returns
+    -------
+    dist:
+        Directed distances as stored in the sample file. They point toward
+        boundaries; pass ``-dist`` to ``bioimage_cpp.flow.compute_flow_density``.
+    fg:
+        Foreground scores. The reference data used ``fg > 0.5`` as mask.
+    density:
+        Reference convergence density stored under key ``density``.
+    """
+    try:
+        import h5py
+    except ModuleNotFoundError as error:
+        raise ModuleNotFoundError(
+            "h5py is required to load registered flow data. "
+            "Install it with `pip install h5py`."
+        ) from error
+
+    with h5py.File(flow_data_path(ndim, timeout=timeout), "r") as f:
+        dist = f["dist"][:]
+        fg = f["fg"][:]
+        density = f["density"][:]
+    return (
+        np.ascontiguousarray(dist),
+        np.ascontiguousarray(fg),
+        np.ascontiguousarray(density),
+    )
