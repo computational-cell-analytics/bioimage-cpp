@@ -2,14 +2,17 @@
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/segmentation/mutex_watershed.hxx"
+#include "bioimage_cpp/segmentation/relabel_sequential.hxx"
 #include "bioimage_cpp/segmentation/semantic_mutex_watershed.hxx"
 #include "bioimage_cpp/segmentation/watershed.hxx"
 
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -320,6 +323,81 @@ nb::ndarray<nb::numpy, LabelT, nb::c_contig> watershed_from_affinities_t(
     );
 }
 
+template <class T>
+nb::tuple relabel_sequential_t(
+    nb::ndarray<nb::numpy, const T, nb::c_contig> input,
+    const T offset
+) {
+    std::vector<std::size_t> ndarray_shape(input.ndim());
+    std::vector<std::ptrdiff_t> view_shape(input.ndim());
+    for (std::size_t axis = 0; axis < input.ndim(); ++axis) {
+        ndarray_shape[axis] = input.shape(axis);
+        view_shape[axis] = static_cast<std::ptrdiff_t>(input.shape(axis));
+    }
+
+    const auto n = std::accumulate(
+        view_shape.begin(),
+        view_shape.end(),
+        std::ptrdiff_t{1},
+        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
+    );
+
+    auto *relabeled_data = new T[static_cast<std::size_t>(n)]();
+    nb::capsule relabeled_owner(relabeled_data, [](void *p) noexcept {
+        delete[] static_cast<T *>(p);
+    });
+
+    ConstArrayView<T> input_view{input.data(), view_shape, {}};
+    ArrayView<T> out_view{relabeled_data, view_shape, {}};
+
+    segmentation::RelabelSequentialMaps<T> maps;
+    {
+        nb::gil_scoped_release release;
+        maps = segmentation::relabel_sequential<T>(input_view, offset, out_view);
+    }
+
+    const std::size_t forward_size = maps.forward_map.size();
+    auto *forward_data = new T[forward_size];
+    std::copy(maps.forward_map.begin(), maps.forward_map.end(), forward_data);
+    nb::capsule forward_owner(forward_data, [](void *p) noexcept {
+        delete[] static_cast<T *>(p);
+    });
+
+    const std::size_t inverse_size = maps.inverse_map.size();
+    auto *inverse_data = new T[inverse_size];
+    std::copy(maps.inverse_map.begin(), maps.inverse_map.end(), inverse_data);
+    nb::capsule inverse_owner(inverse_data, [](void *p) noexcept {
+        delete[] static_cast<T *>(p);
+    });
+
+    auto relabeled_array = nb::ndarray<nb::numpy, T, nb::c_contig>(
+        relabeled_data,
+        ndarray_shape.size(),
+        ndarray_shape.data(),
+        relabeled_owner
+    );
+    std::size_t forward_shape[1] = {forward_size};
+    auto forward_array = nb::ndarray<nb::numpy, T, nb::c_contig>(
+        forward_data,
+        1,
+        forward_shape,
+        forward_owner
+    );
+    std::size_t inverse_shape[1] = {inverse_size};
+    auto inverse_array = nb::ndarray<nb::numpy, T, nb::c_contig>(
+        inverse_data,
+        1,
+        inverse_shape,
+        inverse_owner
+    );
+
+    return nb::make_tuple(
+        nb::cast(relabeled_array),
+        nb::cast(forward_array),
+        nb::cast(inverse_array)
+    );
+}
+
 } // namespace
 
 void bind_segmentation(nb::module_ &m) {
@@ -498,6 +576,35 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("markers"),
         nb::arg("mask") = nb::none(),
         "Affinity-based watershed on 2D or 3D nearest-neighbour float64 affinities with int64 markers."
+    );
+
+    m.def(
+        "_relabel_sequential_uint32",
+        &relabel_sequential_t<std::uint32_t>,
+        nb::arg("input"),
+        nb::arg("offset"),
+        "Relabel a contiguous uint32 array to consecutive labels starting at offset."
+    );
+    m.def(
+        "_relabel_sequential_uint64",
+        &relabel_sequential_t<std::uint64_t>,
+        nb::arg("input"),
+        nb::arg("offset"),
+        "Relabel a contiguous uint64 array to consecutive labels starting at offset."
+    );
+    m.def(
+        "_relabel_sequential_int32",
+        &relabel_sequential_t<std::int32_t>,
+        nb::arg("input"),
+        nb::arg("offset"),
+        "Relabel a contiguous int32 array to consecutive labels starting at offset."
+    );
+    m.def(
+        "_relabel_sequential_int64",
+        &relabel_sequential_t<std::int64_t>,
+        nb::arg("input"),
+        nb::arg("offset"),
+        "Relabel a contiguous int64 array to consecutive labels starting at offset."
     );
 }
 
