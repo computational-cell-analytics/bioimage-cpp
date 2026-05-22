@@ -906,6 +906,102 @@ Important differences:
   API yet; the implementation is structured so these filters/extra edges can
   be added later.
 
+### Label Multiset
+
+The label-multiset data structure stores, for each spatial block of a label
+volume, a histogram of `(label, count)` pairs over the underlying voxels,
+with identical histograms across blocks deduplicated into shared storage.
+It is used by Paintera to build multi-resolution label pyramids.
+
+`nifty.tools` exposes three functions / classes — `readSubset`,
+`downsampleMultiset`, and `MultisetMerger` — operating on five flat arrays
+(`offsets`, `entry_sizes`, `entry_offsets`, `ids`, `counts`). `bioimage-cpp`
+keeps the same algorithm and storage layout but wraps it in a
+`LabelMultiset` dataclass plus a level-0 bootstrap helper.
+
+Nifty:
+
+```python
+import nifty.tools as nt
+
+# nifty does not provide a "from labels" helper; level-0 multisets are
+# typically constructed by the caller (e.g. by writing histograms manually
+# to N5 chunks).
+blocking = nt.blocking([0, 0, 0], list(labels.shape), [2, 2, 2])
+argmax, new_offsets, new_ids, new_counts = nt.downsampleMultiset(
+    blocking, offsets, entry_sizes, entry_offsets, ids, counts,
+    restrict_set=-1,
+)
+
+ids, counts = nt.readSubset(offsets, sizes, ids, counts, True)
+
+merger = nt.MultisetMerger(unique_offsets, entry_sizes, ids, counts)
+merger.update(unique_offsets, entry_sizes, ids, counts, offsets)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+from bioimage_cpp.label_multiset import (
+    LabelMultiset,
+    MultisetMerger,
+    downsample_multiset,
+    multiset_from_labels,
+    read_subset,
+)
+
+# Build the level-0 multiset directly from a label volume.
+ms0 = multiset_from_labels(labels, block_shape=(1, 1, 1))
+
+# Downsample one level. `blocking.roi_end` must match the input's spatial
+# extent (i.e. the shape used to build ms0).
+blocking = bic.utils.Blocking([0, 0, 0], list(labels.shape), [2, 2, 2])
+ms1 = downsample_multiset(ms0, blocking, restrict_set=-1)
+
+# Merge entries from a list of (offset, size) ranges into one histogram.
+ids, counts = read_subset(offsets, sizes, ms1.ids, ms1.counts)
+
+# Deduplicating merger — constructor takes one offset per unique entry.
+merger = MultisetMerger.from_multiset(ms1)
+merger.update(unique_offsets, entry_sizes, ids, counts, offsets)
+```
+
+Name and API changes:
+
+| nifty-style name | bioimage-cpp name |
+| --- | --- |
+| `readSubset` | `read_subset` |
+| `downsampleMultiset` | `downsample_multiset` |
+| `MultisetMerger` | `MultisetMerger` |
+| `MultisetMerger.get_ids()` | `MultisetMerger.ids` (property) |
+| `MultisetMerger.get_counts()` | `MultisetMerger.counts` |
+| `restrict_set` (keyword) | `restrict_set` (keyword, same default `-1`) |
+
+Notes:
+
+- A `LabelMultiset` carries all five arrays (`offsets`, `entry_offsets`,
+  `entry_sizes`, `ids`, `counts`) plus `argmax`. Nifty's
+  `downsampleMultiset` returns only four of them and leaves the caller to
+  reconstruct `entry_offsets` / `entry_sizes`; `bioimage-cpp` returns them
+  directly so multi-level downsample chains compose without bookkeeping.
+- `multiset_from_labels(labels, block_shape)` builds the level-0 multiset
+  from a `uint32` or `uint64` label volume in one call. There is no nifty
+  equivalent.
+- `MultisetMerger.__init__` takes one offset per unique entry (length
+  `n_unique`), matching nifty's contract. Use
+  `MultisetMerger.from_multiset(ms)` to construct one directly from a
+  `LabelMultiset`.
+- Count dtype is `uint32` (nifty uses `int32`). Convert at the boundary
+  if you are reading nifty-written data.
+- 2D and 3D blockings are both supported. The bindings instantiate `uint64`
+  ids, `uint32` counts, and `uint64` offsets; wider dtype matrices can be
+  added on demand.
+- The `LabelMultisetWrapper` z5/N5 reader from
+  `nifty/tools/label_multiset_wrapper.hxx` is intentionally **not** ported
+  — I/O stays out of the C++ core. Read/write Paintera-format chunks with
+  `zarr`/`numpy` in Python if needed.
+
 ### Lifted Multicut
 
 Nifty exposes lifted multicut through a separate objective + solver hierarchy.
