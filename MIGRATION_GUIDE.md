@@ -1478,6 +1478,44 @@ unspecified.
 labels = bic.segmentation.watershed(image, markers, mask=optional_mask)
 ```
 
+### Sequential Label Relabeling
+
+`bic.segmentation.relabel_sequential` mirrors
+`skimage.segmentation.relabel_sequential`: it remaps an integer label array so
+all non-zero labels become consecutive starting at `offset`, in sorted order
+of the original label values. Label `0` is preserved as background. The
+return is a `(relabeled, forward_map, inverse_map)` tuple with the same
+indexing semantics as skimage (`forward_map[old] == new`,
+`inverse_map[new] == old`).
+
+```python
+labels = np.array([0, 5, 10, 5, 0, 200], dtype=np.uint32)
+relabeled, forward_map, inverse_map = bic.segmentation.relabel_sequential(labels)
+# relabeled  -> [0, 1, 2, 1, 0, 3]
+# forward_map[5] == 1, forward_map[10] == 2, forward_map[200] == 3
+# inverse_map -> [0, 5, 10, 200]
+
+# Custom offset works the same way; only label 0 is treated as background.
+relabeled, _, _ = bic.segmentation.relabel_sequential(labels, offset=10)
+# relabeled  -> [0, 10, 11, 10, 0, 12]
+```
+
+Notes:
+
+- Supported input dtypes are `uint32`, `uint64`, `int32`, and `int64`. The
+  `relabeled`, `forward_map`, and `inverse_map` arrays all share the input
+  dtype (skimage picks the smallest dtype that fits the output range; this
+  implementation does not).
+- `offset` must be a positive integer (`>= 1`).
+- Negative values in signed-dtype inputs are rejected.
+- Non-contiguous inputs are copied before entering C++.
+- Single-threaded but typically ~7–11× faster than skimage and ~12–28×
+  faster than `vigra.analysis.relabelConsecutive` on dense label fields
+  (1024² and 128³ arrays with hundreds to hundreds-of-thousands of distinct
+  labels). The internal kernel allocates a forward-map LUT of size
+  `max(label_field) + 1`, so adversarial inputs with very large `max` and few
+  distinct labels will use more memory than a hashmap-based implementation.
+
 ### Connected-Components Labeling
 
 `bioimage-cpp` provides pixel-grid connected-components labeling for 2D and
