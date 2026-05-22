@@ -33,7 +33,7 @@ DTYPES = ("float32", "float64")
 def load_problem(size: str, *, timeout: float):
     import bioimage_cpp as bic
 
-    problem = bic.graph.load_lifted_multicut_problem(size, timeout=timeout)
+    problem = bic.graph.lifted_multicut.load_lifted_multicut_problem(size, timeout=timeout)
     bic_graph = bic.graph.UndirectedGraph.from_edges(problem.n_nodes, problem.local_uvs)
     return bic_graph, problem
 
@@ -41,7 +41,7 @@ def load_problem(size: str, *, timeout: float):
 def run_bioimage_cpp(bic_graph, problem, *, dtype: np.dtype) -> np.ndarray:
     import bioimage_cpp as bic
 
-    return bic.graph.mutex_watershed_clustering(
+    return bic.graph.mutex_watershed.mutex_watershed_clustering(
         bic_graph,
         problem.local_costs.astype(dtype, copy=False),
         problem.lifted_uvs,

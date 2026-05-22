@@ -6,7 +6,7 @@ import bioimage_cpp as bic
 
 def test_objective_no_lifted_edges_matches_base(chain_with_lifted):
     base, base_costs, _, _ = chain_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(base, base_costs)
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs)
 
     # Default labels (singleton): every base edge is cut.
     assert objective.number_of_base_edges == int(base.number_of_edges)
@@ -14,13 +14,13 @@ def test_objective_no_lifted_edges_matches_base(chain_with_lifted):
     assert objective.energy() == pytest.approx(float(base_costs.sum()))
 
     # Same labeling under a multicut objective should yield the same energy.
-    mc_objective = bic.graph.MulticutObjective(base, base_costs)
+    mc_objective = bic.graph.multicut.MulticutObjective(base, base_costs)
     assert objective.energy() == pytest.approx(mc_objective.energy())
 
 
 def test_objective_with_lifted_edges(chain_with_lifted):
     base, base_costs, lifted_uvs, lifted_costs = chain_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
     assert objective.number_of_base_edges == 3
@@ -40,7 +40,7 @@ def test_objective_with_lifted_edges(chain_with_lifted):
 
 def test_objective_lifted_edge_over_base_accumulates(triangle_with_lifted):
     base, base_costs, lifted_uvs, lifted_costs = triangle_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
 
@@ -53,7 +53,7 @@ def test_objective_lifted_edge_over_base_accumulates(triangle_with_lifted):
 
 def test_objective_lifted_edge_over_base_overwrite(triangle_with_lifted):
     base, base_costs, lifted_uvs, lifted_costs = triangle_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base,
         base_costs,
         lifted_uvs=lifted_uvs,
@@ -68,7 +68,7 @@ def test_objective_lifted_edge_over_base_overwrite(triangle_with_lifted):
 
 def test_objective_set_cost_inserts_and_accumulates(chain_with_lifted):
     base, base_costs, _, _ = chain_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(base, base_costs)
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs)
 
     edge, is_new = objective.set_cost(0, 3, -5.0)
     assert is_new
@@ -88,7 +88,7 @@ def test_objective_set_cost_inserts_and_accumulates(chain_with_lifted):
 def test_objective_bfs_distance_inserts_within_k_hops(small_chain_bfs_problem):
     base, base_costs = small_chain_bfs_problem
 
-    objective = bic.graph.LiftedMulticutObjective(base, base_costs, bfs_distance=2)
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs, bfs_distance=2)
     # 5-node chain at distance 2: lifted edges are (0,2), (1,3), (2,4) — 3 edges.
     assert objective.number_of_lifted_edges == 3
     lifted_uvs = objective.lifted_graph.uv_ids()[objective.number_of_base_edges:]
@@ -96,7 +96,7 @@ def test_objective_bfs_distance_inserts_within_k_hops(small_chain_bfs_problem):
     assert pairs == {(0, 2), (1, 3), (2, 4)}
 
     # Default lifted weights are zero so the energy equals the multicut energy.
-    expected = bic.graph.MulticutObjective(base, base_costs).energy()
+    expected = bic.graph.multicut.MulticutObjective(base, base_costs).energy()
     assert objective.energy() == pytest.approx(expected)
 
 
@@ -104,7 +104,7 @@ def test_objective_bfs_distance_combines_with_explicit_lifted_costs(small_chain_
     base, base_costs = small_chain_bfs_problem
     lifted_uvs = np.array([[0, 4]], dtype=np.uint64)
     lifted_costs = np.array([-3.0], dtype=np.float64)
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base,
         base_costs,
         bfs_distance=2,
@@ -118,7 +118,7 @@ def test_objective_bfs_distance_combines_with_explicit_lifted_costs(small_chain_
 
 def test_objective_labels_and_reset(chain_with_lifted):
     base, base_costs, lifted_uvs, lifted_costs = chain_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
     objective.labels = [0, 0, 1, 1]
@@ -134,19 +134,19 @@ def test_objective_validation_errors():
     base_costs = np.array([1.0, 2.0], dtype=np.float64)
 
     with pytest.raises(ValueError, match="edge_costs"):
-        bic.graph.LiftedMulticutObjective(base, np.array([1.0], dtype=np.float64))
+        bic.graph.lifted_multicut.LiftedMulticutObjective(base, np.array([1.0], dtype=np.float64))
 
-    obj = bic.graph.LiftedMulticutObjective(base, base_costs)
+    obj = bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs)
     with pytest.raises(ValueError, match="labels"):
         obj.labels = [0, 1]
 
     with pytest.raises(ValueError, match="lifted_uvs and lifted_costs"):
-        bic.graph.LiftedMulticutObjective(
+        bic.graph.lifted_multicut.LiftedMulticutObjective(
             base, base_costs, lifted_uvs=np.array([[0, 2]], dtype=np.uint64)
         )
 
     with pytest.raises(ValueError, match="same length"):
-        bic.graph.LiftedMulticutObjective(
+        bic.graph.lifted_multicut.LiftedMulticutObjective(
             base,
             base_costs,
             lifted_uvs=np.array([[0, 2]], dtype=np.uint64),
@@ -154,4 +154,4 @@ def test_objective_validation_errors():
         )
 
     with pytest.raises(ValueError, match="bfs_distance"):
-        bic.graph.LiftedMulticutObjective(base, base_costs, bfs_distance=0)
+        bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs, bfs_distance=0)

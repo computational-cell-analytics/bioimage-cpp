@@ -77,7 +77,7 @@ def build_grid_lifted_problem(
 ):
     graph = bic.graph.grid_graph(affinities.shape[1:])
     local_weights, valid_edges, lifted_uvs, lifted_weights, _ = (
-        bic.graph.grid_affinity_features_with_lifted(graph, affinities, offsets)
+        bic.graph.features.grid_affinity_features_with_lifted(graph, affinities, offsets)
     )
     if not np.all(valid_edges):
         invalid = int(valid_edges.size - np.count_nonzero(valid_edges))

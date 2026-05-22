@@ -9,7 +9,7 @@ def main() -> None:
     args = parser("Compare bioimage-cpp and nifty decomposer multicut.").parse_args()
     run_comparison(
         "decomposer",
-        lambda: bic.graph.MulticutDecomposer(bic.graph.GreedyAdditiveMulticut()),
+        lambda: bic.graph.multicut.MulticutDecomposer(bic.graph.multicut.GreedyAdditiveMulticut()),
         lambda objective: objective.multicutDecomposerFactory(
             submodelFactory=objective.greedyAdditiveFactory(),
             fallthroughFactory=objective.greedyAdditiveFactory(),

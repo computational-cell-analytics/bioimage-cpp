@@ -29,11 +29,11 @@ def solver_configs():
 
     return {
         "greedy_additive": SolverConfig(
-            make_bic_solver=lambda threads: bic.graph.GreedyAdditiveMulticut(),
+            make_bic_solver=lambda threads: bic.graph.multicut.GreedyAdditiveMulticut(),
             make_nifty_factory=lambda objective, threads: objective.greedyAdditiveFactory(),
         ),
         "kernighan_lin": SolverConfig(
-            make_bic_solver=lambda threads: bic.graph.KernighanLinMulticut(
+            make_bic_solver=lambda threads: bic.graph.multicut.KernighanLinMulticut(
                 number_of_outer_iterations=5
             ),
             make_nifty_factory=lambda objective, threads: objective.kernighanLinFactory(
@@ -42,14 +42,14 @@ def solver_configs():
             ),
         ),
         "greedy_fixation": SolverConfig(
-            make_bic_solver=lambda threads: bic.graph.GreedyFixationMulticut(),
+            make_bic_solver=lambda threads: bic.graph.multicut.GreedyFixationMulticut(),
             make_nifty_factory=lambda objective, threads: objective.greedyFixationFactory(),
         ),
         "chained": SolverConfig(
-            make_bic_solver=lambda threads: bic.graph.ChainedMulticutSolvers(
+            make_bic_solver=lambda threads: bic.graph.multicut.ChainedMulticutSolvers(
                 [
-                    bic.graph.GreedyAdditiveMulticut(),
-                    bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
+                    bic.graph.multicut.GreedyAdditiveMulticut(),
+                    bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=5),
                 ]
             ),
             make_nifty_factory=lambda objective, threads: objective.chainedSolversFactory(
@@ -60,8 +60,8 @@ def solver_configs():
             ),
         ),
         "decomposer": SolverConfig(
-            make_bic_solver=lambda threads: bic.graph.MulticutDecomposer(
-                bic.graph.GreedyAdditiveMulticut()
+            make_bic_solver=lambda threads: bic.graph.multicut.MulticutDecomposer(
+                bic.graph.multicut.GreedyAdditiveMulticut()
             ),
             make_nifty_factory=lambda objective, threads: objective.multicutDecomposerFactory(
                 submodelFactory=objective.greedyAdditiveFactory(),
@@ -70,8 +70,8 @@ def solver_configs():
             ),
         ),
         "fusion_move": SolverConfig(
-            make_bic_solver=lambda threads: bic.graph.FusionMoveMulticut(
-                proposal_generator=bic.graph.WatershedProposalGenerator(),
+            make_bic_solver=lambda threads: bic.graph.multicut.FusionMoveMulticut(
+                proposal_generator=bic.graph.multicut.WatershedProposalGenerator(),
                 number_of_threads=threads,
                 number_of_parallel_proposals=threads,
             ),
@@ -108,7 +108,7 @@ def load_problem(problem_name: str, *, timeout: float):
     import nifty
 
     sample, size = parse_problem_name(problem_name)
-    uv_ids, costs = bic.graph.load_multicut_problem_data(
+    uv_ids, costs = bic.graph.multicut.load_multicut_problem_data(
         sample=sample,
         size=size,
         timeout=timeout,
@@ -123,7 +123,7 @@ def load_problem(problem_name: str, *, timeout: float):
 def bic_energy(graph, costs: np.ndarray, labels: np.ndarray) -> float:
     import bioimage_cpp as bic
 
-    return float(bic.graph.MulticutObjective(graph, costs).energy(labels))
+    return float(bic.graph.multicut.MulticutObjective(graph, costs).energy(labels))
 
 
 def nifty_energy(graph, costs: np.ndarray, labels: np.ndarray) -> float:
@@ -144,7 +144,7 @@ def evaluate(problem_name: str, solver_name: str, config: SolverConfig, args):
 
     for _ in range(args.n_repeats):
         if args.backend in ("both", "bic"):
-            bic_objective = bic.graph.MulticutObjective(bic_graph, costs)
+            bic_objective = bic.graph.multicut.MulticutObjective(bic_graph, costs)
             start = perf_counter()
             bic_labels = config.make_bic_solver(args.threads).optimize(bic_objective)
             bic_runtimes.append(perf_counter() - start)

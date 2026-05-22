@@ -11,7 +11,7 @@ def main() -> None:
     ).parse_args()
     run_comparison(
         "lifted_greedy_additive",
-        lambda: bic.graph.LiftedGreedyAdditiveMulticut(),
+        lambda: bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut(),
         lambda objective: objective.liftedMulticutGreedyAdditiveFactory(),
         args,
     )

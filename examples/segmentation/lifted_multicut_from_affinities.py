@@ -52,16 +52,16 @@ def main():
         f"{lifted_problem.lifted_uvs.shape[0]} lifted edges"
     )
 
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         lifted_problem.rag,
         lifted_problem.local_costs,
         lifted_uvs=lifted_problem.lifted_uvs,
         lifted_costs=lifted_problem.lifted_costs,
     )
-    solver = bic.graph.LiftedChainedSolvers(
+    solver = bic.graph.lifted_multicut.LiftedChainedSolvers(
         [
-            bic.graph.LiftedGreedyAdditiveMulticut(),
-            bic.graph.LiftedKernighanLinMulticut(
+            bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut(),
+            bic.graph.lifted_multicut.LiftedKernighanLinMulticut(
                 number_of_outer_iterations=args.kl_outer_iterations
             ),
         ]

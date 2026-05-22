@@ -25,7 +25,7 @@ def _grid_lifted_problem(shape=(4, 4), bfs_distance=2, seed=0):
     base = bic.graph.UndirectedGraph.from_edges(shape[0] * shape[1], edges)
     base_costs = np.array(base_costs, dtype=np.float64)
 
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, bfs_distance=bfs_distance
     )
     # Reweight a handful of lifted edges to non-zero, mixed sign, so they
@@ -41,7 +41,7 @@ def _grid_lifted_problem(shape=(4, 4), bfs_distance=2, seed=0):
 
 def test_fusion_move_splits_chain_along_repulsive_lifted_edge(chain_with_lifted):
     base, base_costs, lifted_uvs, lifted_costs = chain_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
 
@@ -50,8 +50,8 @@ def test_fusion_move_splits_chain_along_repulsive_lifted_edge(chain_with_lifted)
     # subsequent proposal/fuse loop must not regress past that.
     merged_energy = objective.energy(np.zeros(4, dtype=np.uint64))
 
-    solver = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=1),
+    solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=1),
         number_of_iterations=10,
     )
     labels = solver.optimize(objective)
@@ -65,15 +65,15 @@ def test_fusion_move_splits_chain_along_repulsive_lifted_edge(chain_with_lifted)
 
 def test_fusion_move_safety_net_never_regresses(chain_with_lifted):
     base, base_costs, lifted_uvs, lifted_costs = chain_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
-    baseline = bic.graph.LiftedGreedyAdditiveMulticut().optimize(objective)
+    baseline = bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(objective)
     baseline_energy = objective.energy(baseline)
 
     objective.reset_labels()
-    solver = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=7),
+    solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=7),
         number_of_iterations=8,
     )
     labels = solver.optimize(objective)
@@ -89,15 +89,15 @@ def test_fusion_move_matches_multicut_without_lifted_edges():
     )
     base_costs = np.array([5, -20, 5, 5, -20, 5, 5], dtype=np.float64)
 
-    mc_objective = bic.graph.MulticutObjective(base, base_costs)
-    mc_labels = bic.graph.FusionMoveMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=3),
+    mc_objective = bic.graph.multicut.MulticutObjective(base, base_costs)
+    mc_labels = bic.graph.multicut.FusionMoveMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=3),
         number_of_iterations=5,
     ).optimize(mc_objective)
 
-    lmc_objective = bic.graph.LiftedMulticutObjective(base, base_costs)
-    lmc_labels = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=3),
+    lmc_objective = bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs)
+    lmc_labels = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=3),
         number_of_iterations=5,
     ).optimize(lmc_objective)
 
@@ -111,10 +111,10 @@ def test_fusion_move_matches_multicut_without_lifted_edges():
 def test_fusion_move_warm_starts_from_singleton():
     base = bic.graph.UndirectedGraph.from_edges(3, [[0, 1], [1, 2]])
     base_costs = np.array([2.0, 2.0], dtype=np.float64)
-    objective = bic.graph.LiftedMulticutObjective(base, base_costs)
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs)
     # Singleton labels trigger the internal lifted greedy-additive warm start.
-    labels = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=0),
+    labels = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=0),
         number_of_iterations=3,
     ).optimize(objective)
     same_partition(labels, [0, 0, 0])
@@ -126,11 +126,11 @@ def test_fusion_move_keeps_base_disconnected_clusters_separate(
     base, base_costs, lifted_uvs, lifted_costs = (
         disjoint_clusters_with_attractive_lifted
     )
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
-    labels = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=0),
+    labels = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=0),
         number_of_iterations=5,
     ).optimize(objective)
     # The (0, 2) lifted edge is attractive, but the base graph has no path
@@ -142,12 +142,12 @@ def test_fusion_move_keeps_base_disconnected_clusters_separate(
 def test_fusion_move_greedy_additive_proposal_generator_runs():
     objective = _grid_lifted_problem()
     baseline = objective.energy(
-        bic.graph.LiftedGreedyAdditiveMulticut().optimize(objective)
+        bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(objective)
     )
 
     objective.reset_labels()
-    solver = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.GreedyAdditiveProposalGenerator(
+    solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.GreedyAdditiveProposalGenerator(
             seed=3, sigma=1.0
         ),
         number_of_iterations=5,
@@ -159,14 +159,14 @@ def test_fusion_move_greedy_additive_proposal_generator_runs():
 @pytest.mark.parametrize(
     "sub_solver",
     [
-        bic.graph.LiftedGreedyAdditiveMulticut(),
-        bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=3),
+        bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut(),
+        bic.graph.lifted_multicut.LiftedKernighanLinMulticut(number_of_outer_iterations=3),
     ],
 )
 def test_fusion_move_sub_solver_pluggability(sub_solver):
     objective = _grid_lifted_problem()
-    solver = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=2),
+    solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=2),
         sub_solver=sub_solver,
         number_of_iterations=4,
     )
@@ -180,14 +180,14 @@ def test_fusion_move_stops_after_no_improvement():
     # threshold: the loop must terminate quickly.
     base = bic.graph.UndirectedGraph.from_edges(3, [[0, 1], [1, 2], [0, 2]])
     base_costs = np.array([2.0, 2.0, -5.0], dtype=np.float64)
-    objective = bic.graph.LiftedMulticutObjective(base, base_costs)
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs)
     baseline = objective.energy(
-        bic.graph.LiftedGreedyAdditiveMulticut().optimize(objective)
+        bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(objective)
     )
 
     objective.reset_labels()
-    solver = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=0),
+    solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=0),
         number_of_iterations=1000,
         stop_if_no_improvement=1,
     )
@@ -197,20 +197,20 @@ def test_fusion_move_stops_after_no_improvement():
 
 def test_fusion_move_chains_with_kernighan_lin(chain_with_lifted):
     base, base_costs, lifted_uvs, lifted_costs = chain_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
     baseline = objective.energy(
-        bic.graph.LiftedGreedyAdditiveMulticut().optimize(objective)
+        bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(objective)
     )
 
     objective.reset_labels()
-    solver = bic.graph.LiftedChainedSolvers([
-        bic.graph.FusionMoveLiftedMulticut(
-            proposal_generator=bic.graph.WatershedProposalGenerator(seed=11),
+    solver = bic.graph.lifted_multicut.LiftedChainedSolvers([
+        bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+            proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=11),
             number_of_iterations=5,
         ),
-        bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=3),
+        bic.graph.lifted_multicut.LiftedKernighanLinMulticut(number_of_outer_iterations=3),
     ])
     labels = solver.optimize(objective)
     assert objective.energy(labels) <= baseline + 1e-9
@@ -218,38 +218,38 @@ def test_fusion_move_chains_with_kernighan_lin(chain_with_lifted):
 
 def test_fusion_move_rejects_non_proposal_generator():
     with pytest.raises(TypeError, match="proposal_generator"):
-        bic.graph.FusionMoveLiftedMulticut(proposal_generator=object())
+        bic.graph.lifted_multicut.FusionMoveLiftedMulticut(proposal_generator=object())
 
 
 def test_fusion_move_rejects_non_lifted_sub_solver():
     with pytest.raises(TypeError, match="sub_solver"):
-        bic.graph.FusionMoveLiftedMulticut(
-            proposal_generator=bic.graph.WatershedProposalGenerator(),
-            sub_solver=bic.graph.GreedyAdditiveMulticut(),
+        bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+            proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(),
+            sub_solver=bic.graph.multicut.GreedyAdditiveMulticut(),
         )
 
 
 def test_fusion_move_rejects_zero_thread_count():
     with pytest.raises(ValueError, match="number_of_threads"):
-        bic.graph.FusionMoveLiftedMulticut(
-            proposal_generator=bic.graph.WatershedProposalGenerator(),
+        bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+            proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(),
             number_of_threads=0,
         )
 
 
 def test_fusion_move_rejects_zero_parallel_proposals():
     with pytest.raises(ValueError, match="number_of_parallel_proposals"):
-        bic.graph.FusionMoveLiftedMulticut(
-            proposal_generator=bic.graph.WatershedProposalGenerator(),
+        bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+            proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(),
             number_of_parallel_proposals=0,
         )
 
 
 def test_fusion_move_runs_on_empty_graph():
     base = bic.graph.UndirectedGraph(0)
-    objective = bic.graph.LiftedMulticutObjective(base, np.zeros(0))
-    solver = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(),
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(base, np.zeros(0))
+    solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(),
     )
     labels = solver.optimize(objective)
     assert labels.shape == (0,)
@@ -258,12 +258,12 @@ def test_fusion_move_runs_on_empty_graph():
 def test_fusion_move_parallel_threads_match_single_threaded_safety_net():
     objective = _grid_lifted_problem(seed=11)
     baseline = objective.energy(
-        bic.graph.LiftedGreedyAdditiveMulticut().optimize(objective)
+        bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(objective)
     )
 
     objective.reset_labels()
-    solver = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=11),
+    solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=11),
         number_of_threads=4,
         number_of_iterations=5,
     )
@@ -274,12 +274,12 @@ def test_fusion_move_parallel_threads_match_single_threaded_safety_net():
 def test_fusion_move_multi_proposal_runs():
     objective = _grid_lifted_problem(seed=3)
     baseline = objective.energy(
-        bic.graph.LiftedGreedyAdditiveMulticut().optimize(objective)
+        bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(objective)
     )
 
     objective.reset_labels()
-    solver = bic.graph.FusionMoveLiftedMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=3),
+    solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+        proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=3),
         number_of_threads=2,
         number_of_parallel_proposals=4,
         number_of_iterations=5,
@@ -291,8 +291,8 @@ def test_fusion_move_multi_proposal_runs():
 def test_fusion_move_parallel_is_deterministic_given_settings():
     def run():
         objective = _grid_lifted_problem(seed=7)
-        solver = bic.graph.FusionMoveLiftedMulticut(
-            proposal_generator=bic.graph.WatershedProposalGenerator(seed=7),
+        solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+            proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(seed=7),
             number_of_threads=4,
             number_of_iterations=5,
         )
@@ -302,9 +302,9 @@ def test_fusion_move_parallel_is_deterministic_given_settings():
 
 
 def test_fusion_move_default_parallel_proposals_tracks_threads():
-    pgen = bic.graph.WatershedProposalGenerator()
-    one_thread = bic.graph.FusionMoveLiftedMulticut(proposal_generator=pgen)
-    four_threads = bic.graph.FusionMoveLiftedMulticut(
+    pgen = bic.graph.lifted_multicut.WatershedProposalGenerator()
+    one_thread = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(proposal_generator=pgen)
+    four_threads = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
         proposal_generator=pgen, number_of_threads=4
     )
     assert one_thread.number_of_parallel_proposals == 2

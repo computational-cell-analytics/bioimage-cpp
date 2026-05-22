@@ -19,6 +19,22 @@ Graph functionality is under `bic.graph`, segmentation functionality is under
 `bic.segmentation`, and utility functionality (blocking, relabeling, overlap
 measurement, union-find, etc.) is under `bic.utils`.
 
+`bic.graph` keeps the core graph types and graph-level algorithms
+(`UndirectedGraph`, `GridGraph2D`, `GridGraph3D`, `RegionAdjacencyGraph`,
+`connected_components`, `breadth_first_search`, `edge_weighted_watershed`,
+`region_adjacency_graph`, `project_node_labels_to_pixels`) at the top level.
+Algorithmic domains live in dedicated submodules:
+
+- `bic.graph.multicut` — multicut objective and solvers, fusion-move
+  proposal generators, multicut problem loaders.
+- `bic.graph.lifted_multicut` — lifted multicut objective and solvers,
+  lifted multicut problem loaders. Proposal generators are re-exported
+  from `bic.graph.multicut` here for convenience.
+- `bic.graph.mutex_watershed` — graph-based mutex watershed clustering
+  (with and without semantic constraints).
+- `bic.graph.features` — edge-feature accumulation for RAGs and grid
+  graphs (boundary maps, affinity channels, lifted edge features).
+
 ## Affogato
 
 ### Affinities
@@ -142,7 +158,7 @@ Important migration notes:
 
 For mutex watershed on an arbitrary undirected graph (region adjacency graph
 or otherwise) with a separate list of long-range repulsive edges,
-`bioimage-cpp` provides `bic.graph.mutex_watershed_clustering`. This is a
+`bioimage-cpp` provides `bic.graph.mutex_watershed.mutex_watershed_clustering`. This is a
 port of affogato's `compute_mws_clustering` using the same input format as
 `LiftedMulticutObjective`: a base graph carries the attractive edges, and
 long-range (called *mutex* here) edges are supplied alongside as a `(M, 2)`
@@ -170,7 +186,7 @@ bioimage-cpp:
 import bioimage_cpp as bic
 
 graph = bic.graph.UndirectedGraph.from_edges(number_of_nodes, uvs)
-labels = bic.graph.mutex_watershed_clustering(
+labels = bic.graph.mutex_watershed.mutex_watershed_clustering(
     graph,
     weights,
     mutex_uvs,
@@ -292,7 +308,7 @@ bioimage-cpp:
 import bioimage_cpp as bic
 
 graph = bic.graph.UndirectedGraph.from_edges(number_of_nodes, uvs)
-labels, semantic_labels = bic.graph.semantic_mutex_watershed_clustering(
+labels, semantic_labels = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
     graph,
     weights,
     mutex_uvs,
@@ -806,11 +822,11 @@ Multicut problems (3 samples × 2 sizes, originally from
 
 ```python
 # Returns (UndirectedGraph, edge_costs)
-graph, costs = bic.graph.load_multicut_problem(sample="A", size="small")
+graph, costs = bic.graph.multicut.load_multicut_problem(sample="A", size="small")
 # Or just the underlying arrays
-uv_ids, costs = bic.graph.load_multicut_problem_data(sample="B", size="medium")
+uv_ids, costs = bic.graph.multicut.load_multicut_problem_data(sample="B", size="medium")
 # Or the cached file path
-path = bic.graph.multicut_problem_path(sample="C", size="medium")
+path = bic.graph.multicut.multicut_problem_path(sample="C", size="medium")
 ```
 
 Valid samples are `"A"`, `"B"`, `"C"`; valid sizes are `"small"` and
@@ -824,10 +840,10 @@ Lifted multicut problems (2D ISBI slice, RAG-based 3D volume, and grid-graph
 volume):
 
 ```python
-problem = bic.graph.load_lifted_multicut_problem(size="2d")
+problem = bic.graph.lifted_multicut.load_lifted_multicut_problem(size="2d")
 # Fields: n_nodes (int), local_uvs, local_costs, lifted_uvs, lifted_costs.
 graph = bic.graph.UndirectedGraph.from_edges(problem.n_nodes, problem.local_uvs)
-objective = bic.graph.LiftedMulticutObjective(
+objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
     graph,
     problem.local_costs,
     lifted_uvs=problem.lifted_uvs,
@@ -914,14 +930,14 @@ bioimage-cpp:
 ```python
 import bioimage_cpp as bic
 
-objective = bic.graph.LiftedMulticutObjective(
+objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
     graph,
     edge_costs,
     lifted_uvs=lifted_uvs,
     lifted_costs=lifted_costs,
     bfs_distance=3,  # optional: also insert zero-weight lifted edges within k hops
 )
-labels = bic.graph.LiftedGreedyAdditiveMulticut().optimize(objective)
+labels = bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(objective)
 energy = objective.energy(labels)
 ```
 
@@ -969,11 +985,11 @@ safety net). The differences are:
   pluggable via `sub_solver=`.
 
 ```python
-solver = bic.graph.FusionMoveLiftedMulticut(
-    proposal_generator=bic.graph.WatershedProposalGenerator(
+solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+    proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(
         sigma=1.0, n_seeds_fraction=0.1, seed=0,
     ),
-    sub_solver=bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=3),
+    sub_solver=bic.graph.lifted_multicut.LiftedKernighanLinMulticut(number_of_outer_iterations=3),
     number_of_iterations=10,
     stop_if_no_improvement=4,
     number_of_threads=4,
@@ -984,9 +1000,9 @@ labels = solver.optimize(objective)
 A typical warm-started solve combines greedy and KL:
 
 ```python
-solver = bic.graph.LiftedChainedSolvers([
-    bic.graph.LiftedGreedyAdditiveMulticut(),
-    bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=10),
+solver = bic.graph.lifted_multicut.LiftedChainedSolvers([
+    bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut(),
+    bic.graph.lifted_multicut.LiftedKernighanLinMulticut(number_of_outer_iterations=10),
 ])
 labels = solver.optimize(objective)
 ```
@@ -1016,19 +1032,19 @@ two focused helpers that cover the same workflow:
 ```python
 # Discover lifted edges implied by long-range affinity offsets. 1-hop offsets
 # are skipped automatically, so the full offset list can be passed in.
-lifted_uvs = bic.graph.lifted_edges_from_affinities(
+lifted_uvs = bic.graph.features.lifted_edges_from_affinities(
     rag, oversegmentation, offsets, number_of_threads=0,
 )
 
 # Accumulate (mean, size) statistics per lifted edge. Pixel pairs whose
 # (u, v) does not appear in `lifted_uvs` are skipped, so local edges are
 # never contaminated with long-range affinities.
-lifted_features = bic.graph.lifted_affinity_features(
+lifted_features = bic.graph.features.lifted_affinity_features(
     oversegmentation, affinities, offsets, lifted_uvs,
     number_of_threads=0,
 )
 # For the 12-column feature set (mean, median, std, min, max, percentiles, size):
-lifted_features = bic.graph.lifted_affinity_features_complex(...)
+lifted_features = bic.graph.features.lifted_affinity_features_complex(...)
 ```
 
 The output column conventions match the local-edge variants
@@ -1038,16 +1054,16 @@ End-to-end pipeline (also in `examples/segmentation/lifted_multicut_from_affinit
 
 ```python
 rag = bic.graph.region_adjacency_graph(oversegmentation)
-local_costs = local_threshold - bic.graph.affinity_features(
+local_costs = local_threshold - bic.graph.features.affinity_features(
     rag, oversegmentation, direct_affinities, direct_offsets,
 )[:, 0]
-lifted_uvs = bic.graph.lifted_edges_from_affinities(
+lifted_uvs = bic.graph.features.lifted_edges_from_affinities(
     rag, oversegmentation, long_range_offsets,
 )
-lifted_costs = lifted_threshold - bic.graph.lifted_affinity_features(
+lifted_costs = lifted_threshold - bic.graph.features.lifted_affinity_features(
     oversegmentation, long_range_affinities, long_range_offsets, lifted_uvs,
 )[:, 0]
-objective = bic.graph.LiftedMulticutObjective(
+objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
     rag, local_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs,
 )
 ```
@@ -1074,8 +1090,8 @@ bioimage-cpp:
 ```python
 import bioimage_cpp as bic
 
-objective = bic.graph.MulticutObjective(graph, edge_costs)
-labels = bic.graph.GreedyAdditiveMulticut().optimize(objective)
+objective = bic.graph.multicut.MulticutObjective(graph, edge_costs)
+labels = bic.graph.multicut.GreedyAdditiveMulticut().optimize(objective)
 energy = objective.energy(labels)
 ```
 
@@ -1111,7 +1127,7 @@ Constructor argument mapping:
 Kernighan-Lin example:
 
 ```python
-solver = bic.graph.KernighanLinMulticut(number_of_outer_iterations=5)
+solver = bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=5)
 labels = solver.optimize(objective)
 ```
 
@@ -1123,9 +1139,9 @@ warm-start, set `objective.set_labels(...)` to a non-trivial labeling first.
 Chaining solvers:
 
 ```python
-solver = bic.graph.ChainedMulticutSolvers([
-    bic.graph.GreedyAdditiveMulticut(),
-    bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
+solver = bic.graph.multicut.ChainedMulticutSolvers([
+    bic.graph.multicut.GreedyAdditiveMulticut(),
+    bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=5),
 ])
 labels = solver.optimize(objective)
 ```
@@ -1134,9 +1150,9 @@ Decomposing a problem into positive-cost connected components and solving each
 sub-problem with a cheaper solver:
 
 ```python
-solver = bic.graph.MulticutDecomposer(
-    sub_solver=bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
-    fallthrough_solver=bic.graph.GreedyAdditiveMulticut(),
+solver = bic.graph.multicut.MulticutDecomposer(
+    sub_solver=bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=5),
+    fallthrough_solver=bic.graph.multicut.GreedyAdditiveMulticut(),
     number_of_threads=0,
 )
 labels = solver.optimize(objective)
@@ -1190,12 +1206,12 @@ bioimage-cpp:
 ```python
 import bioimage_cpp as bic
 
-objective = bic.graph.MulticutObjective(graph, edge_costs)
-solver = bic.graph.FusionMoveMulticut(
-    proposal_generator=bic.graph.WatershedProposalGenerator(
+objective = bic.graph.multicut.MulticutObjective(graph, edge_costs)
+solver = bic.graph.multicut.FusionMoveMulticut(
+    proposal_generator=bic.graph.multicut.WatershedProposalGenerator(
         sigma=1.0, n_seeds_fraction=0.1, seed=0,
     ),
-    sub_solver=bic.graph.GreedyAdditiveMulticut(),
+    sub_solver=bic.graph.multicut.GreedyAdditiveMulticut(),
     number_of_iterations=10,
     stop_if_no_improvement=4,
 )
@@ -1283,26 +1299,26 @@ Simple edge-map features:
 
 ```python
 rag = bic.graph.region_adjacency_graph(labels)
-features = bic.graph.edge_map_features(rag, labels, edge_map)
+features = bic.graph.features.edge_map_features(rag, labels, edge_map)
 ```
 
 The columns are:
 
 ```python
-bic.graph.SIMPLE_EDGE_FEATURE_NAMES
+bic.graph.features.SIMPLE_EDGE_FEATURE_NAMES
 # ("mean", "size")
 ```
 
 Complex edge-map features:
 
 ```python
-features = bic.graph.edge_map_features_complex(rag, labels, edge_map)
+features = bic.graph.features.edge_map_features_complex(rag, labels, edge_map)
 ```
 
 The columns are:
 
 ```python
-bic.graph.COMPLEX_EDGE_FEATURE_NAMES
+bic.graph.features.COMPLEX_EDGE_FEATURE_NAMES
 # ("mean", "median", "std", "min", "max", "p5", "p10",
 #  "p25", "p75", "p90", "p95", "size")
 ```
@@ -1310,7 +1326,7 @@ bic.graph.COMPLEX_EDGE_FEATURE_NAMES
 Affinity features:
 
 ```python
-features = bic.graph.affinity_features(
+features = bic.graph.features.affinity_features(
     rag,
     labels,
     affinities,
@@ -1321,7 +1337,7 @@ features = bic.graph.affinity_features(
 Complex affinity features:
 
 ```python
-features = bic.graph.affinity_features_complex(
+features = bic.graph.features.affinity_features_complex(
     rag,
     labels,
     affinities,

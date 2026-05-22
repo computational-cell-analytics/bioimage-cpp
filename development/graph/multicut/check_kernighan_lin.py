@@ -9,7 +9,7 @@ def main() -> None:
     args = parser("Compare bioimage-cpp and nifty Kernighan-Lin multicut.").parse_args()
     run_comparison(
         "kernighan_lin",
-        lambda: bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
+        lambda: bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=5),
         lambda objective: objective.kernighanLinFactory(
             warmStartGreedy=True,
             numberOfOuterIterations=5,

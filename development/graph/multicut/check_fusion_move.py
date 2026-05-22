@@ -20,8 +20,8 @@ def main() -> None:
     threads = int(args.threads)
     run_comparison(
         "fusion_move",
-        lambda: bic.graph.FusionMoveMulticut(
-            proposal_generator=bic.graph.WatershedProposalGenerator(),
+        lambda: bic.graph.multicut.FusionMoveMulticut(
+            proposal_generator=bic.graph.multicut.WatershedProposalGenerator(),
             number_of_threads=threads,
             number_of_parallel_proposals=threads,
         ),

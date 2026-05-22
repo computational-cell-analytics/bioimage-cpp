@@ -51,7 +51,7 @@ def load_problem(size: str, *, timeout: float):
     import nifty
     import nifty.graph.opt.lifted_multicut as nlmc
 
-    problem = bic.graph.load_lifted_multicut_problem(size, timeout=timeout)
+    problem = bic.graph.lifted_multicut.load_lifted_multicut_problem(size, timeout=timeout)
 
     bic_graph = bic.graph.UndirectedGraph.from_edges(
         problem.n_nodes, problem.local_uvs
@@ -84,7 +84,7 @@ def time_call(function: Callable[[], np.ndarray], repeats: int):
 def optimize_bic_solver(make_bic_solver, bic_graph, problem):
     import bioimage_cpp as bic
 
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         bic_graph,
         problem.local_costs,
         lifted_uvs=problem.lifted_uvs,
@@ -96,7 +96,7 @@ def optimize_bic_solver(make_bic_solver, bic_graph, problem):
 def bic_energy(bic_graph, problem, labels: np.ndarray) -> float:
     import bioimage_cpp as bic
 
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         bic_graph,
         problem.local_costs,
         lifted_uvs=problem.lifted_uvs,

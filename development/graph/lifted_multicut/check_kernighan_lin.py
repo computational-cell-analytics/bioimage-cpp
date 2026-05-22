@@ -16,7 +16,7 @@ def main() -> None:
     # implementations are doing the same work.
     run_comparison(
         "lifted_kernighan_lin",
-        lambda: bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=10),
+        lambda: bic.graph.lifted_multicut.LiftedKernighanLinMulticut(number_of_outer_iterations=10),
         lambda objective: objective.chainedSolversFactory(
             [
                 objective.liftedMulticutGreedyAdditiveFactory(),

@@ -144,7 +144,7 @@ def compare_boundary_features(
     # what its parallelism is tuned for, and forcing a single block (== labels
     # shape) starves nifty's worker pool.
     bic_timings, bic_features = time_call(
-        lambda: bic.graph.edge_map_features(
+        lambda: bic.graph.features.edge_map_features(
             bic_rag, labels, boundary_map, number_of_threads=threads
         ),
         repeats,
@@ -189,7 +189,7 @@ def compare_affinity_features(
         max_val = min_val + 1.0
 
     bic_timings, bic_features = time_call(
-        lambda: bic.graph.affinity_features(
+        lambda: bic.graph.features.affinity_features(
             bic_rag,
             labels,
             affs_float32,

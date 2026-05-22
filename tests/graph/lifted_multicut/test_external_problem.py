@@ -16,7 +16,7 @@ ENERGY_BOUND = -1574.5
 
 def _load_problem():
     try:
-        return bic.graph.load_lifted_multicut_problem("2d", timeout=30)
+        return bic.graph.lifted_multicut.load_lifted_multicut_problem("2d", timeout=30)
     except (FileNotFoundError, ModuleNotFoundError, RuntimeError) as error:
         pytest.skip(str(error))
 
@@ -26,18 +26,18 @@ def test_solvers_on_2d_lifted_problem():
     graph = bic.graph.UndirectedGraph.from_edges(problem.n_nodes, problem.local_uvs)
 
     solvers = [
-        bic.graph.LiftedGreedyAdditiveMulticut(),
-        bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=10),
-        bic.graph.LiftedChainedSolvers(
+        bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut(),
+        bic.graph.lifted_multicut.LiftedKernighanLinMulticut(number_of_outer_iterations=10),
+        bic.graph.lifted_multicut.LiftedChainedSolvers(
             [
-                bic.graph.LiftedGreedyAdditiveMulticut(),
-                bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=10),
+                bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut(),
+                bic.graph.lifted_multicut.LiftedKernighanLinMulticut(number_of_outer_iterations=10),
             ]
         ),
     ]
 
     for solver in solvers:
-        objective = bic.graph.LiftedMulticutObjective(
+        objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
             graph,
             problem.local_costs,
             lifted_uvs=problem.lifted_uvs,

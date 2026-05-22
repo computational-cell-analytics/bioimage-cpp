@@ -30,11 +30,11 @@ def solver_configs():
     # side because the bic proposal generator only sees the base graph.
     return {
         "lifted_greedy_additive": SolverConfig(
-            make_bic_solver=lambda: bic.graph.LiftedGreedyAdditiveMulticut(),
+            make_bic_solver=lambda: bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut(),
             make_nifty_factory=lambda objective: objective.liftedMulticutGreedyAdditiveFactory(),
         ),
         "lifted_kernighan_lin": SolverConfig(
-            make_bic_solver=lambda: bic.graph.LiftedKernighanLinMulticut(
+            make_bic_solver=lambda: bic.graph.lifted_multicut.LiftedKernighanLinMulticut(
                 number_of_outer_iterations=10
             ),
             make_nifty_factory=lambda objective: objective.chainedSolversFactory(
@@ -47,8 +47,8 @@ def solver_configs():
             ),
         ),
         "lifted_fusion_move": SolverConfig(
-            make_bic_solver=lambda: bic.graph.FusionMoveLiftedMulticut(
-                proposal_generator=bic.graph.WatershedProposalGenerator(),
+            make_bic_solver=lambda: bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+                proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(),
                 number_of_iterations=10,
                 stop_if_no_improvement=4,
                 number_of_threads=1,
@@ -76,7 +76,7 @@ def load_problem(size: str, *, timeout: float):
     import nifty
     import nifty.graph.opt.lifted_multicut as nlmc
 
-    problem = bic.graph.load_lifted_multicut_problem(size, timeout=timeout)
+    problem = bic.graph.lifted_multicut.load_lifted_multicut_problem(size, timeout=timeout)
     bic_graph = bic.graph.UndirectedGraph.from_edges(problem.n_nodes, problem.local_uvs)
     nifty_graph = nifty.graph.undirectedGraph(int(problem.n_nodes))
     nifty_graph.insertEdges(problem.local_uvs.astype(np.uint64, copy=False))
@@ -97,7 +97,7 @@ def load_problem(size: str, *, timeout: float):
 def make_bic_objective(bic_graph, problem):
     import bioimage_cpp as bic
 
-    return bic.graph.LiftedMulticutObjective(
+    return bic.graph.lifted_multicut.LiftedMulticutObjective(
         bic_graph,
         problem.local_costs,
         lifted_uvs=problem.lifted_uvs,

@@ -89,7 +89,7 @@ def multicut_from_affinities(
     rag = bic.graph.region_adjacency_graph(
         oversegmentation, number_of_threads=number_of_threads
     )
-    features = bic.graph.affinity_features(
+    features = bic.graph.features.affinity_features(
         rag,
         oversegmentation,
         affinities,
@@ -98,11 +98,11 @@ def multicut_from_affinities(
     )
     edge_costs = threshold - features[:, 0]
 
-    objective = bic.graph.MulticutObjective(rag, edge_costs)
-    node_labels = bic.graph.ChainedMulticutSolvers(
+    objective = bic.graph.multicut.MulticutObjective(rag, edge_costs)
+    node_labels = bic.graph.multicut.ChainedMulticutSolvers(
         [
-            bic.graph.GreedyAdditiveMulticut(),
-            bic.graph.KernighanLinMulticut(number_of_outer_iterations=10),
+            bic.graph.multicut.GreedyAdditiveMulticut(),
+            bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=10),
         ]
     ).optimize(objective)
     segmentation = bic.graph.project_node_labels_to_pixels(

@@ -139,7 +139,7 @@ def build_lifted_problem(
         oversegmentation, number_of_threads=number_of_threads
     )
 
-    local_features = bic.graph.affinity_features(
+    local_features = bic.graph.features.affinity_features(
         rag,
         oversegmentation,
         affinity_problem.direct_affinities,
@@ -148,7 +148,7 @@ def build_lifted_problem(
     )
     local_costs = (local_threshold - local_features[:, 0]).astype(np.float64, copy=False)
 
-    lifted_uvs = bic.graph.lifted_edges_from_affinities(
+    lifted_uvs = bic.graph.features.lifted_edges_from_affinities(
         rag,
         oversegmentation,
         affinity_problem.long_range_offsets,
@@ -157,7 +157,7 @@ def build_lifted_problem(
     if lifted_uvs.shape[0] == 0:
         lifted_costs = np.zeros(0, dtype=np.float64)
     else:
-        lifted_features = bic.graph.lifted_affinity_features(
+        lifted_features = bic.graph.features.lifted_affinity_features(
             oversegmentation,
             affinity_problem.long_range_affinities,
             affinity_problem.long_range_offsets,

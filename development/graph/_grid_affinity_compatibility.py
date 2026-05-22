@@ -104,7 +104,7 @@ def bioimage_cpp_local(affinities: np.ndarray, offsets: list[tuple[int, ...]]):
     import bioimage_cpp as bic
 
     graph = bic.graph.grid_graph(affinities.shape[1:])
-    weights, _ = bic.graph.grid_affinity_features(graph, affinities, offsets)
+    weights, _ = bic.graph.features.grid_affinity_features(graph, affinities, offsets)
     return graph.uv_ids(), weights
 
 
@@ -119,7 +119,7 @@ def bioimage_cpp_local_weights_only(
     """
     import bioimage_cpp as bic
 
-    weights, _ = bic.graph.grid_affinity_features(graph, affinities, offsets)
+    weights, _ = bic.graph.features.grid_affinity_features(graph, affinities, offsets)
     return weights
 
 
@@ -131,7 +131,7 @@ def bioimage_cpp_local_with_uvs(
     ``compute_nh_and_weights``, both of which return uvs in their output."""
     import bioimage_cpp as bic
 
-    weights, _ = bic.graph.grid_affinity_features(graph, affinities, offsets)
+    weights, _ = bic.graph.features.grid_affinity_features(graph, affinities, offsets)
     return graph.uv_ids(), weights
 
 
@@ -140,7 +140,7 @@ def bioimage_cpp_lifted(affinities: np.ndarray, offsets: list[tuple[int, ...]]):
 
     graph = bic.graph.grid_graph(affinities.shape[1:])
     local_weights, _, lifted_uvs, lifted_weights, _ = (
-        bic.graph.grid_affinity_features_with_lifted(graph, affinities, offsets)
+        bic.graph.features.grid_affinity_features_with_lifted(graph, affinities, offsets)
     )
     return graph, graph.uv_ids(), local_weights, lifted_uvs, lifted_weights
 
@@ -152,7 +152,7 @@ def bioimage_cpp_lifted_features_only(
     import bioimage_cpp as bic
 
     local_weights, _, lifted_uvs, lifted_weights, _ = (
-        bic.graph.grid_affinity_features_with_lifted(graph, affinities, offsets)
+        bic.graph.features.grid_affinity_features_with_lifted(graph, affinities, offsets)
     )
     return local_weights, lifted_uvs, lifted_weights
 
@@ -164,7 +164,7 @@ def bioimage_cpp_lifted_with_uvs(
     import bioimage_cpp as bic
 
     local_weights, _, lifted_uvs, lifted_weights, _ = (
-        bic.graph.grid_affinity_features_with_lifted(graph, affinities, offsets)
+        bic.graph.features.grid_affinity_features_with_lifted(graph, affinities, offsets)
     )
     return graph.uv_ids(), local_weights, lifted_uvs, lifted_weights
 
@@ -173,7 +173,7 @@ def assert_local_offsets_cover_all_edges(graph, affinities, offsets) -> None:
     """One-shot correctness check called outside of the timing loop."""
     import bioimage_cpp as bic
 
-    _, valid_edges = bic.graph.grid_affinity_features(graph, affinities, offsets)
+    _, valid_edges = bic.graph.features.grid_affinity_features(graph, affinities, offsets)
     if not np.all(valid_edges):
         raise AssertionError("local offsets did not cover all grid edges")
 
