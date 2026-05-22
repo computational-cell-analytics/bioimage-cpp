@@ -8,14 +8,14 @@ from ._helpers import same_partition
 
 def test_kl_splits_chain_along_repulsive_lifted_edge(chain_with_lifted):
     base, base_costs, lifted_uvs, lifted_costs = chain_with_lifted
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
 
     # Warm-starting from a single cluster (everything merged) and running KL
     # should split the chain so that the repulsive (0, 3) lifted edge is cut.
     objective.labels = np.zeros(4, dtype=np.uint64)
-    labels = bic.graph.LiftedKernighanLinMulticut(
+    labels = bic.graph.lifted_multicut.LiftedKernighanLinMulticut(
         number_of_outer_iterations=10
     ).optimize(objective)
 
@@ -29,11 +29,11 @@ def test_kl_keeps_base_disconnected_clusters_separate(
     disjoint_clusters_with_attractive_lifted,
 ):
     base, base_costs, lifted_uvs, lifted_costs = disjoint_clusters_with_attractive_lifted
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
 
-    labels = bic.graph.LiftedKernighanLinMulticut(
+    labels = bic.graph.lifted_multicut.LiftedKernighanLinMulticut(
         number_of_outer_iterations=10
     ).optimize(objective)
     # Lifted (0, 2) is attractive but the base graph offers no path between
@@ -53,13 +53,13 @@ def test_kl_matches_multicut_without_lifted_edges():
     )
     base_costs = np.array([5, -20, 5, 5, -20, 5, 5], dtype=np.float64)
 
-    mc_objective = bic.graph.MulticutObjective(base, base_costs)
-    mc_labels = bic.graph.KernighanLinMulticut(
+    mc_objective = bic.graph.multicut.MulticutObjective(base, base_costs)
+    mc_labels = bic.graph.multicut.KernighanLinMulticut(
         number_of_outer_iterations=10
     ).optimize(mc_objective)
 
-    lmc_objective = bic.graph.LiftedMulticutObjective(base, base_costs)
-    lmc_labels = bic.graph.LiftedKernighanLinMulticut(
+    lmc_objective = bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs)
+    lmc_labels = bic.graph.lifted_multicut.LiftedKernighanLinMulticut(
         number_of_outer_iterations=10
     ).optimize(lmc_objective)
 
@@ -77,10 +77,10 @@ def test_kl_lifted_attractive_overrides_repulsive_base():
     lifted_uvs = np.array([[0, 2]], dtype=np.uint64)
     lifted_costs = np.array([10.0], dtype=np.float64)
 
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
     )
-    labels = bic.graph.LiftedKernighanLinMulticut(
+    labels = bic.graph.lifted_multicut.LiftedKernighanLinMulticut(
         number_of_outer_iterations=10
     ).optimize(objective)
 
@@ -91,9 +91,9 @@ def test_kl_lifted_attractive_overrides_repulsive_base():
 def test_kl_warm_starts_from_singleton():
     base = bic.graph.UndirectedGraph.from_edges(3, [[0, 1], [1, 2]])
     base_costs = np.array([2.0, 2.0], dtype=np.float64)
-    objective = bic.graph.LiftedMulticutObjective(base, base_costs)
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(base, base_costs)
     # Singleton labels trigger an internal greedy-additive warm start.
-    labels = bic.graph.LiftedKernighanLinMulticut(
+    labels = bic.graph.lifted_multicut.LiftedKernighanLinMulticut(
         number_of_outer_iterations=5
     ).optimize(objective)
     same_partition(labels, [0, 0, 0])

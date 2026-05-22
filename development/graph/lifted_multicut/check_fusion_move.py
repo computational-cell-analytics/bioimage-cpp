@@ -36,8 +36,8 @@ def main() -> None:
         )
     run_comparison(
         "lifted_fusion_move",
-        lambda: bic.graph.FusionMoveLiftedMulticut(
-            proposal_generator=bic.graph.WatershedProposalGenerator(),
+        lambda: bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+            proposal_generator=bic.graph.lifted_multicut.WatershedProposalGenerator(),
             number_of_iterations=10,
             stop_if_no_improvement=4,
             number_of_threads=threads,

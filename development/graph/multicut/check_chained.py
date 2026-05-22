@@ -9,10 +9,10 @@ def main() -> None:
     args = parser("Compare bioimage-cpp and nifty chained multicut solvers.").parse_args()
     run_comparison(
         "chained",
-        lambda: bic.graph.ChainedMulticutSolvers(
+        lambda: bic.graph.multicut.ChainedMulticutSolvers(
             [
-                bic.graph.GreedyAdditiveMulticut(),
-                bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
+                bic.graph.multicut.GreedyAdditiveMulticut(),
+                bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=5),
             ]
         ),
         lambda objective: objective.chainedSolversFactory(

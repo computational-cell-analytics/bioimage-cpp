@@ -12,9 +12,9 @@ Pipeline (single mode, no subcommands):
 3. Oversegment with a simple grid-marker watershed on
    ``1 - mean(attractive affinities)``.
 4. Build a RAG from the oversegmentation and reduce weights to per-edge
-   attractive costs (``bic.graph.affinity_features`` mean), to long-range
-   mutex edges (``bic.graph.lifted_edges_from_affinities`` +
-   ``bic.graph.lifted_affinity_features``), and to per-(node, class)
+   attractive costs (``bic.graph.features.affinity_features`` mean), to long-range
+   mutex edges (``bic.graph.features.lifted_edges_from_affinities`` +
+   ``bic.graph.features.lifted_affinity_features``), and to per-(node, class)
    semantic costs via ``scipy.ndimage.mean``.
 5. Run bioimage-cpp + affogato side-by-side, time both, and report partition
    + semantic agreement.
@@ -139,7 +139,7 @@ def build_costs(
         weights[:number_of_attractive_channels].astype(np.float32, copy=False)
     )
     attr_offsets = offsets[:number_of_attractive_channels]
-    attr_features = bic.graph.affinity_features(
+    attr_features = bic.graph.features.affinity_features(
         rag, over_seg, attr_w, attr_offsets, number_of_threads=rag_threads
     )
     edge_costs = np.ascontiguousarray(attr_features[:, 0], dtype=np.float32)
@@ -152,10 +152,10 @@ def build_costs(
             np.float32, copy=False
         )
     )
-    mutex_uvs = bic.graph.lifted_edges_from_affinities(
+    mutex_uvs = bic.graph.features.lifted_edges_from_affinities(
         rag, over_seg, mutex_offsets, number_of_threads=rag_threads
     )
-    mutex_features = bic.graph.lifted_affinity_features(
+    mutex_features = bic.graph.features.lifted_affinity_features(
         over_seg, mutex_w, mutex_offsets, mutex_uvs, number_of_threads=rag_threads
     )
     # mutex_features columns are (mean, size); use the mean as the edge cost.
@@ -199,7 +199,7 @@ def run_bioimage_cpp(
 ) -> tuple[np.ndarray, np.ndarray]:
     import bioimage_cpp as bic
 
-    return bic.graph.semantic_mutex_watershed_clustering(
+    return bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         rag,
         edge_costs,
         mutex_uvs,

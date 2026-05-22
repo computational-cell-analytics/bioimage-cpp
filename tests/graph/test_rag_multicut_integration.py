@@ -42,16 +42,16 @@ def test_rag_feature_multicut_projection_on_realistic_oversegmentation():
     boundary_map[boundary_pixels] = 0.92
 
     rag = bic.graph.region_adjacency_graph(oversegmentation, number_of_threads=3)
-    features = bic.graph.edge_map_features(
+    features = bic.graph.features.edge_map_features(
         rag, oversegmentation, boundary_map, number_of_threads=3
     )
     edge_costs = 0.6 - features[:, 0]
 
-    objective = bic.graph.MulticutObjective(rag, edge_costs)
-    node_labels = bic.graph.ChainedMulticutSolvers(
+    objective = bic.graph.multicut.MulticutObjective(rag, edge_costs)
+    node_labels = bic.graph.multicut.ChainedMulticutSolvers(
         [
-            bic.graph.GreedyAdditiveMulticut(),
-            bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
+            bic.graph.multicut.GreedyAdditiveMulticut(),
+            bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=5),
         ]
     ).optimize(objective)
     projected = bic.graph.project_node_labels_to_pixels(

@@ -35,10 +35,10 @@ def test_without_semantic_edges_matches_regular_mutex_watershed():
     mutex_costs = np.array([5.0], dtype=np.float64)
     semantic_uvs, semantic_costs = _empty_semantic()
 
-    labels, semantic = bic.graph.semantic_mutex_watershed_clustering(
+    labels, semantic = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs, semantic_uvs, semantic_costs
     )
-    regular_labels = bic.graph.mutex_watershed_clustering(
+    regular_labels = bic.graph.mutex_watershed.mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs
     )
 
@@ -60,7 +60,7 @@ def test_semantic_constraint_blocks_merge():
     semantic_node_classes = np.array([[0, 0], [2, 1]], dtype=np.uint64)
     semantic_costs = np.array([10.0, 10.0], dtype=np.float64)
 
-    labels, semantic = bic.graph.semantic_mutex_watershed_clustering(
+    labels, semantic = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs,
         semantic_node_classes, semantic_costs,
     )
@@ -85,7 +85,7 @@ def test_semantic_label_propagates_across_merge():
     semantic_node_classes = np.array([[0, 3]], dtype=np.uint64)
     semantic_costs = np.array([10.0], dtype=np.float64)
 
-    labels, semantic = bic.graph.semantic_mutex_watershed_clustering(
+    labels, semantic = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs,
         semantic_node_classes, semantic_costs,
     )
@@ -104,7 +104,7 @@ def test_same_semantic_label_does_not_block_merge():
     semantic_node_classes = np.array([[0, 7], [2, 7]], dtype=np.uint64)
     semantic_costs = np.array([10.0, 10.0], dtype=np.float64)
 
-    labels, semantic = bic.graph.semantic_mutex_watershed_clustering(
+    labels, semantic = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs,
         semantic_node_classes, semantic_costs,
     )
@@ -122,7 +122,7 @@ def test_mutex_still_separates_under_semantic():
     semantic_node_classes = np.array([[0, 0], [1, 0], [2, 0]], dtype=np.uint64)
     semantic_costs = np.array([0.5, 0.5, 0.5], dtype=np.float64)
 
-    labels, semantic = bic.graph.semantic_mutex_watershed_clustering(
+    labels, semantic = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs,
         semantic_node_classes, semantic_costs,
     )
@@ -142,7 +142,7 @@ def test_unassigned_clusters_keep_minus_one():
     semantic_node_classes = np.array([[0, 5]], dtype=np.uint64)
     semantic_costs = np.array([10.0], dtype=np.float64)
 
-    labels, semantic = bic.graph.semantic_mutex_watershed_clustering(
+    labels, semantic = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs,
         semantic_node_classes, semantic_costs,
     )
@@ -160,7 +160,7 @@ def test_dense_label_range():
     mutex_costs = np.zeros(0, dtype=np.float64)
     semantic_uvs, semantic_costs = _empty_semantic()
 
-    labels, _ = bic.graph.semantic_mutex_watershed_clustering(
+    labels, _ = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs, semantic_uvs, semantic_costs
     )
 
@@ -186,10 +186,10 @@ def test_deterministic_across_runs():
     semantic_node_classes = np.stack([semantic_nodes, semantic_classes], axis=1)
     semantic_costs = rng.uniform(0.0, 1.0, size=10).astype(np.float64)
 
-    first = bic.graph.semantic_mutex_watershed_clustering(
+    first = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs, semantic_node_classes, semantic_costs
     )
-    second = bic.graph.semantic_mutex_watershed_clustering(
+    second = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs, semantic_node_classes, semantic_costs
     )
     np.testing.assert_array_equal(first[0], second[0])
@@ -204,7 +204,7 @@ def test_float32_inputs_supported():
     semantic_node_classes = np.array([[0, 0], [2, 1]], dtype=np.uint64)
     semantic_costs = np.array([10.0, 10.0], dtype=np.float32)
 
-    labels, semantic = bic.graph.semantic_mutex_watershed_clustering(
+    labels, semantic = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs,
         semantic_node_classes, semantic_costs,
     )
@@ -222,7 +222,7 @@ def test_mismatched_dtypes_are_promoted():
     semantic_node_classes = np.array([[0, 0], [2, 1]], dtype=np.uint64)
     semantic_costs = np.array([10.0, 10.0], dtype=np.float64)
 
-    labels, semantic = bic.graph.semantic_mutex_watershed_clustering(
+    labels, semantic = bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
         graph, edge_costs, mutex_uvs, mutex_costs,
         semantic_node_classes, semantic_costs,
     )
@@ -241,7 +241,7 @@ def test_invalid_semantic_shape_raises():
     semantic_costs = np.array([1.0], dtype=np.float64)
 
     with pytest.raises(ValueError):
-        bic.graph.semantic_mutex_watershed_clustering(
+        bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
             graph, edge_costs, mutex_uvs, mutex_costs, bad_semantic, semantic_costs
         )
 
@@ -255,7 +255,7 @@ def test_mismatched_semantic_costs_raises():
     bad_costs = np.array([1.0, 2.0], dtype=np.float64)
 
     with pytest.raises(ValueError):
-        bic.graph.semantic_mutex_watershed_clustering(
+        bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
             graph, edge_costs, mutex_uvs, mutex_costs,
             semantic_node_classes, bad_costs,
         )
@@ -270,7 +270,7 @@ def test_out_of_range_semantic_node_raises():
     semantic_costs = np.array([1.0], dtype=np.float64)
 
     with pytest.raises((ValueError, RuntimeError)):
-        bic.graph.semantic_mutex_watershed_clustering(
+        bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
             graph, edge_costs, mutex_uvs, mutex_costs,
             semantic_node_classes, semantic_costs,
         )

@@ -9,7 +9,7 @@ def main() -> None:
     args = parser("Compare bioimage-cpp and nifty greedy-fixation multicut.").parse_args()
     run_comparison(
         "greedy_fixation",
-        lambda: bic.graph.GreedyFixationMulticut(),
+        lambda: bic.graph.multicut.GreedyFixationMulticut(),
         lambda objective: objective.greedyFixationFactory(),
         args,
     )

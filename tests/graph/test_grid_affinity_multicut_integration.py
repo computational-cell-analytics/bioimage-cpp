@@ -42,15 +42,15 @@ def test_grid_local_affinities_drive_multicut_partition():
     offsets = [(1, 0), (0, 1)]
     affinities = _affinities_from_partition(partition, offsets)
 
-    weights, valid_edges = bic.graph.grid_affinity_features(graph, affinities, offsets)
+    weights, valid_edges = bic.graph.features.grid_affinity_features(graph, affinities, offsets)
     np.testing.assert_array_equal(valid_edges, np.ones(graph.number_of_edges, dtype=bool))
     edge_costs = weights - 0.5
 
-    objective = bic.graph.MulticutObjective(graph, edge_costs)
-    labels = bic.graph.ChainedMulticutSolvers(
+    objective = bic.graph.multicut.MulticutObjective(graph, edge_costs)
+    labels = bic.graph.multicut.ChainedMulticutSolvers(
         [
-            bic.graph.GreedyAdditiveMulticut(),
-            bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
+            bic.graph.multicut.GreedyAdditiveMulticut(),
+            bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=5),
         ]
     ).optimize(objective)
 
@@ -66,22 +66,22 @@ def test_grid_long_range_affinities_drive_lifted_multicut_partition():
     affinities = _affinities_from_partition(partition, offsets)
 
     local_weights, valid_edges, lifted_uvs, lifted_weights, lifted_offset_ids = (
-        bic.graph.grid_affinity_features_with_lifted(graph, affinities, offsets)
+        bic.graph.features.grid_affinity_features_with_lifted(graph, affinities, offsets)
     )
     np.testing.assert_array_equal(valid_edges, np.ones(graph.number_of_edges, dtype=bool))
     assert lifted_uvs.shape[0] > 0
     assert set(np.unique(lifted_offset_ids).tolist()) == {2, 3}
 
-    objective = bic.graph.LiftedMulticutObjective(
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
         graph,
         local_weights - 0.5,
         lifted_uvs=lifted_uvs,
         lifted_costs=lifted_weights - 0.5,
     )
-    labels = bic.graph.LiftedChainedSolvers(
+    labels = bic.graph.lifted_multicut.LiftedChainedSolvers(
         [
-            bic.graph.LiftedGreedyAdditiveMulticut(),
-            bic.graph.LiftedKernighanLinMulticut(number_of_outer_iterations=5),
+            bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut(),
+            bic.graph.lifted_multicut.LiftedKernighanLinMulticut(number_of_outer_iterations=5),
         ]
     ).optimize(objective)
 

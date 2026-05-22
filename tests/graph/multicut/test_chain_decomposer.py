@@ -8,11 +8,11 @@ from ._helpers import same_partition
 
 def test_chained_multicut_solvers(chain_problem):
     graph, costs = chain_problem
-    objective = bic.graph.MulticutObjective(graph, costs)
-    solver = bic.graph.ChainedMulticutSolvers(
+    objective = bic.graph.multicut.MulticutObjective(graph, costs)
+    solver = bic.graph.multicut.ChainedMulticutSolvers(
         [
-            bic.graph.GreedyAdditiveMulticut(),
-            bic.graph.KernighanLinMulticut(number_of_outer_iterations=5),
+            bic.graph.multicut.GreedyAdditiveMulticut(),
+            bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=5),
         ]
     )
 
@@ -24,13 +24,13 @@ def test_chained_multicut_solvers(chain_problem):
 
 def test_chained_solver_rejects_empty_chain():
     with pytest.raises(ValueError, match="at least one"):
-        bic.graph.ChainedMulticutSolvers([])
+        bic.graph.multicut.ChainedMulticutSolvers([])
 
 
 def test_multicut_decomposer_solves_positive_components():
     graph = bic.graph.UndirectedGraph.from_edges(4, [[0, 1], [1, 2], [2, 3]])
-    objective = bic.graph.MulticutObjective(graph, [1.0, -5.0, 1.0])
-    solver = bic.graph.MulticutDecomposer(bic.graph.GreedyAdditiveMulticut())
+    objective = bic.graph.multicut.MulticutObjective(graph, [1.0, -5.0, 1.0])
+    solver = bic.graph.multicut.MulticutDecomposer(bic.graph.multicut.GreedyAdditiveMulticut())
 
     labels = solver.optimize(objective)
 
@@ -39,15 +39,15 @@ def test_multicut_decomposer_solves_positive_components():
 
 
 def test_multicut_decomposer_uses_fallthrough_solver_for_single_component():
-    class SingletonSolver(bic.graph.MulticutSolver):
+    class SingletonSolver(bic.graph.multicut.MulticutSolver):
         def optimize(self, objective):
             objective.labels = np.arange(objective.graph.number_of_nodes, dtype=np.uint64)
             return objective.labels
 
     graph = bic.graph.UndirectedGraph.from_edges(2, [[0, 1]])
-    objective = bic.graph.MulticutObjective(graph, [1.0])
-    solver = bic.graph.MulticutDecomposer(
-        bic.graph.GreedyAdditiveMulticut(),
+    objective = bic.graph.multicut.MulticutObjective(graph, [1.0])
+    solver = bic.graph.multicut.MulticutDecomposer(
+        bic.graph.multicut.GreedyAdditiveMulticut(),
         fallthrough_solver=SingletonSolver(),
     )
 
@@ -58,12 +58,12 @@ def test_multicut_decomposer_uses_fallthrough_solver_for_single_component():
 
 def test_decomposer_on_external_toy_problem(external_toy_problem):
     graph, costs, _ = external_toy_problem
-    objective = bic.graph.MulticutObjective(graph, costs)
-    solver = bic.graph.MulticutDecomposer(
-        bic.graph.ChainedMulticutSolvers(
+    objective = bic.graph.multicut.MulticutObjective(graph, costs)
+    solver = bic.graph.multicut.MulticutDecomposer(
+        bic.graph.multicut.ChainedMulticutSolvers(
             [
-                bic.graph.GreedyAdditiveMulticut(),
-                bic.graph.KernighanLinMulticut(number_of_outer_iterations=10),
+                bic.graph.multicut.GreedyAdditiveMulticut(),
+                bic.graph.multicut.KernighanLinMulticut(number_of_outer_iterations=10),
             ]
         )
     )
@@ -75,8 +75,8 @@ def test_decomposer_on_external_toy_problem(external_toy_problem):
 
 def test_decomposer_energy_bound_on_grid_problem(grid_problem):
     graph, costs = grid_problem
-    objective = bic.graph.MulticutObjective(graph, costs)
-    solver = bic.graph.MulticutDecomposer(bic.graph.GreedyAdditiveMulticut())
+    objective = bic.graph.multicut.MulticutObjective(graph, costs)
+    solver = bic.graph.multicut.MulticutDecomposer(bic.graph.multicut.GreedyAdditiveMulticut())
 
     labels = solver.optimize(objective)
 

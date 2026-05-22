@@ -13,15 +13,15 @@ def test_watershed_proposal_generator_is_deterministic_given_seed():
     )
     costs = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 0.5], dtype=np.float64)
 
-    objective_a = bic.graph.MulticutObjective(graph, costs)
-    objective_b = bic.graph.MulticutObjective(graph, costs)
+    objective_a = bic.graph.multicut.MulticutObjective(graph, costs)
+    objective_b = bic.graph.multicut.MulticutObjective(graph, costs)
 
-    solver_a = bic.graph.FusionMoveMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=42),
+    solver_a = bic.graph.multicut.FusionMoveMulticut(
+        proposal_generator=bic.graph.multicut.WatershedProposalGenerator(seed=42),
         number_of_iterations=3,
     )
-    solver_b = bic.graph.FusionMoveMulticut(
-        proposal_generator=bic.graph.WatershedProposalGenerator(seed=42),
+    solver_b = bic.graph.multicut.FusionMoveMulticut(
+        proposal_generator=bic.graph.multicut.WatershedProposalGenerator(seed=42),
         number_of_iterations=3,
     )
 
@@ -32,15 +32,15 @@ def test_watershed_proposal_generator_is_deterministic_given_seed():
 
 def test_greedy_additive_proposal_generator_is_deterministic_given_seed(grid_problem):
     graph, costs = grid_problem
-    objective_a = bic.graph.MulticutObjective(graph, costs)
-    objective_b = bic.graph.MulticutObjective(graph, costs)
+    objective_a = bic.graph.multicut.MulticutObjective(graph, costs)
+    objective_b = bic.graph.multicut.MulticutObjective(graph, costs)
 
-    solver_a = bic.graph.FusionMoveMulticut(
-        proposal_generator=bic.graph.GreedyAdditiveProposalGenerator(seed=5),
+    solver_a = bic.graph.multicut.FusionMoveMulticut(
+        proposal_generator=bic.graph.multicut.GreedyAdditiveProposalGenerator(seed=5),
         number_of_iterations=3,
     )
-    solver_b = bic.graph.FusionMoveMulticut(
-        proposal_generator=bic.graph.GreedyAdditiveProposalGenerator(seed=5),
+    solver_b = bic.graph.multicut.FusionMoveMulticut(
+        proposal_generator=bic.graph.multicut.GreedyAdditiveProposalGenerator(seed=5),
         number_of_iterations=3,
     )
     np.testing.assert_array_equal(
@@ -60,8 +60,8 @@ def test_cpp_proposal_generator_validates_costs_length():
 
 def test_proposal_generator_isinstance_check():
     assert isinstance(
-        bic.graph.WatershedProposalGenerator(), bic.graph.ProposalGenerator
+        bic.graph.multicut.WatershedProposalGenerator(), bic.graph.multicut.ProposalGenerator
     )
     assert isinstance(
-        bic.graph.GreedyAdditiveProposalGenerator(), bic.graph.ProposalGenerator
+        bic.graph.multicut.GreedyAdditiveProposalGenerator(), bic.graph.multicut.ProposalGenerator
     )

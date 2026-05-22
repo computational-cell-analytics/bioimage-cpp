@@ -9,9 +9,9 @@ def test_edge_map_features_simple():
     edge_map = np.array([[1.0, 2.0, 10.0], [3.0, 4.0, 20.0]])
     rag = bic.graph.region_adjacency_graph(labels)
 
-    features = bic.graph.edge_map_features(rag, labels, edge_map)
+    features = bic.graph.features.edge_map_features(rag, labels, edge_map)
 
-    assert tuple(bic.graph.SIMPLE_EDGE_FEATURE_NAMES) == ("mean", "size")
+    assert tuple(bic.graph.features.SIMPLE_EDGE_FEATURE_NAMES) == ("mean", "size")
     np.testing.assert_allclose(
         features,
         np.array(
@@ -29,9 +29,9 @@ def test_edge_map_features_complex():
     edge_map = np.array([[1.0, 2.0, 10.0], [3.0, 4.0, 20.0]])
     rag = bic.graph.region_adjacency_graph(labels)
 
-    features = bic.graph.edge_map_features_complex(rag, labels, edge_map)
+    features = bic.graph.features.edge_map_features_complex(rag, labels, edge_map)
 
-    assert tuple(bic.graph.COMPLEX_EDGE_FEATURE_NAMES) == (
+    assert tuple(bic.graph.features.COMPLEX_EDGE_FEATURE_NAMES) == (
         "mean",
         "median",
         "std",
@@ -73,7 +73,7 @@ def test_affinity_features_simple():
     affinities[0] = np.array([[0.0, 6.0, 0.0], [7.0, 8.0, 0.0]])
     affinities[1] = np.array([[0.0, 9.0, 0.0], [0.0, 0.0, 0.0]])
 
-    features = bic.graph.affinity_features(
+    features = bic.graph.features.affinity_features(
         rag, labels, affinities, offsets=[[0, 1], [1, 0]]
     )
 
@@ -142,7 +142,7 @@ def test_affinity_features_2d_offsets_match_reference(offsets):
     ).astype(np.float32)
 
     expected = _reference_affinity_features(labels, rag, affinities, offsets)
-    got = bic.graph.affinity_features(rag, labels, affinities, offsets=offsets)
+    got = bic.graph.features.affinity_features(rag, labels, affinities, offsets=offsets)
 
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
 
@@ -167,7 +167,7 @@ def test_affinity_features_3d_offsets_match_reference(offsets):
     ).astype(np.float32)
 
     expected = _reference_affinity_features(labels, rag, affinities, offsets)
-    got = bic.graph.affinity_features(rag, labels, affinities, offsets=offsets)
+    got = bic.graph.features.affinity_features(rag, labels, affinities, offsets=offsets)
 
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
 
@@ -178,10 +178,10 @@ def test_affinity_features_complex_parallel_matches_single_thread():
     affinities = np.arange(2 * labels.size, dtype=np.float64).reshape((2,) + labels.shape)
     offsets = [[0, 1], [1, 0]]
 
-    single_threaded = bic.graph.affinity_features_complex(
+    single_threaded = bic.graph.features.affinity_features_complex(
         rag, labels, affinities, offsets, number_of_threads=1
     )
-    parallel = bic.graph.affinity_features_complex(
+    parallel = bic.graph.features.affinity_features_complex(
         rag, labels, affinities, offsets, number_of_threads=3
     )
 
@@ -193,12 +193,12 @@ def test_rag_feature_validation():
     rag = bic.graph.region_adjacency_graph(labels)
 
     with pytest.raises(ValueError, match="edge_map shape"):
-        bic.graph.edge_map_features(rag, labels, np.ones((2, 2)))
+        bic.graph.features.edge_map_features(rag, labels, np.ones((2, 2)))
 
     with pytest.raises(ValueError, match="affinities must have shape"):
-        bic.graph.affinity_features(rag, labels, np.ones((2, 2)), offsets=[[0, 1]])
+        bic.graph.features.affinity_features(rag, labels, np.ones((2, 2)), offsets=[[0, 1]])
 
     with pytest.raises(ValueError, match="offsets length"):
-        bic.graph.affinity_features(
+        bic.graph.features.affinity_features(
             rag, labels, np.ones((2, 1, 2)), offsets=[[0, 1]]
         )
