@@ -53,6 +53,40 @@ Notes:
   affinity array is needed.
 - `number_of_threads` must be a positive integer; the default is `1`.
 
+### Embedding Distances
+
+Affogato:
+
+```python
+from affogato.affinities import compute_embedding_distances
+
+distances = compute_embedding_distances(values, offsets, norm="l2")
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+distances = bic.affinities.compute_embedding_distances(
+    values,
+    offsets,
+    norm="l2",
+)
+```
+
+Notes:
+
+- `values` has shape `(C, *spatial)` and dtype `float32`. `spatial` must be 2D
+  or 3D; non-contiguous arrays are copied to C-contiguous memory when needed.
+- Offsets are in NumPy axis order and must have one entry per spatial axis.
+- The output is `float32` with shape `(n_offsets, *spatial)`. Out-of-bounds
+  positions are left at `0.0`.
+- Supported norms are `"l1"` (new in bioimage-cpp), `"l2"`, and `"cosine"`.
+  Cosine on a zero-norm channel vector yields `NaN`/`Inf` (matching affogato).
+- No mask is returned (matches affogato).
+- `number_of_threads` parallelizes over offset channels.
+
 ### Mutex Watershed
 
 `bioimage-cpp` ships two mutex-watershed entry points, mirroring the two

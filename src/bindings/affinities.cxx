@@ -1,11 +1,13 @@
 #include "affinities.hxx"
 
 #include "bioimage_cpp/affinities/compute_affinities.hxx"
+#include "bioimage_cpp/affinities/compute_embedding_distances.hxx"
 #include "bioimage_cpp/array_view.hxx"
 
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
+#include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
 #include <array>
@@ -24,6 +26,7 @@ namespace {
 template <class T>
 using LabelArray = nb::ndarray<nb::numpy, const T, nb::c_contig>;
 using FloatArray = nb::ndarray<nb::numpy, float, nb::c_contig>;
+using ConstFloatArray = nb::ndarray<nb::numpy, const float, nb::c_contig>;
 using UInt8Array = nb::ndarray<nb::numpy, std::uint8_t, nb::c_contig>;
 
 template <class T>
@@ -152,6 +155,86 @@ std::pair<FloatArray, UInt8Array> compute_affinities_nd_t(
     return {std::move(affs), std::move(mask)};
 }
 
+affinities::EmbeddingNorm parse_embedding_norm(const std::string &norm) {
+    if (norm == "l1") {
+        return affinities::EmbeddingNorm::L1;
+    }
+    if (norm == "l2") {
+        return affinities::EmbeddingNorm::L2;
+    }
+    if (norm == "cosine") {
+        return affinities::EmbeddingNorm::Cosine;
+    }
+    throw std::invalid_argument(
+        "norm must be one of (\"l1\", \"l2\", \"cosine\"), got \"" + norm + "\""
+    );
+}
+
+template <std::size_t D>
+FloatArray compute_embedding_distances_nd_t(
+    ConstFloatArray values,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets,
+    const std::string &norm,
+    const std::size_t number_of_threads
+) {
+    if (values.ndim() != D + 1) {
+        throw std::invalid_argument(
+            "values must have ndim=" + std::to_string(D + 1) +
+            " for spatial ndim=" + std::to_string(D) +
+            ", got ndim=" + std::to_string(values.ndim())
+        );
+    }
+    if (offsets.empty()) {
+        throw std::invalid_argument("offsets must not be empty");
+    }
+    auto offsets_typed = validate_offsets<D>(offsets);
+    const auto norm_enum = parse_embedding_norm(norm);
+
+    const auto values_shape = ndarray_shape(values);
+
+    std::vector<std::size_t> out_shape;
+    out_shape.reserve(D + 1);
+    out_shape.push_back(offsets.size());
+    for (std::size_t axis = 0; axis < D; ++axis) {
+        out_shape.push_back(static_cast<std::size_t>(values_shape[axis + 1]));
+    }
+
+    std::vector<std::ptrdiff_t> out_view_shape(out_shape.size());
+    for (std::size_t axis = 0; axis < out_shape.size(); ++axis) {
+        out_view_shape[axis] = static_cast<std::ptrdiff_t>(out_shape[axis]);
+    }
+
+    auto distances = make_float_array(out_shape);
+
+    ConstArrayView<float> values_view{
+        values.data(),
+        values_shape,
+        {},
+    };
+    ArrayView<float> distances_view{
+        distances.data(),
+        out_view_shape,
+        {},
+    };
+
+    {
+        nb::gil_scoped_release release;
+        if constexpr (D == 2) {
+            affinities::compute_embedding_distances_2d<float>(
+                values_view, offsets_typed, distances_view,
+                norm_enum, number_of_threads
+            );
+        } else if constexpr (D == 3) {
+            affinities::compute_embedding_distances_3d<float>(
+                values_view, offsets_typed, distances_view,
+                norm_enum, number_of_threads
+            );
+        }
+    }
+
+    return distances;
+}
+
 } // namespace
 
 void bind_affinities(nb::module_ &m) {
@@ -225,6 +308,22 @@ void bind_affinities(nb::module_ &m) {
         nb::arg("offsets"),
         nb::arg("ignore_label"),
         nb::arg("return_mask"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_compute_embedding_distances_2d",
+        &compute_embedding_distances_nd_t<2>,
+        nb::arg("values"),
+        nb::arg("offsets"),
+        nb::arg("norm"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_compute_embedding_distances_3d",
+        &compute_embedding_distances_nd_t<3>,
+        nb::arg("values"),
+        nb::arg("offsets"),
+        nb::arg("norm"),
         nb::arg("number_of_threads")
     );
 }
