@@ -66,6 +66,7 @@ from . import distance
 from . import filters
 from . import flow
 from . import graph
+from . import label_multiset
 from . import segmentation
 from . import transformation
 from . import utils
@@ -77,6 +78,7 @@ __all__ = [
     "filters",
     "flow",
     "graph",
+    "label_multiset",
     "segmentation",
     "transformation",
     "utils",
