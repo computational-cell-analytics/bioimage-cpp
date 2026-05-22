@@ -1516,6 +1516,81 @@ Notes:
   `max(label_field) + 1`, so adversarial inputs with very large `max` and few
   distinct labels will use more memory than a hashmap-based implementation.
 
+### Connected-Components Labeling
+
+`bioimage-cpp` provides pixel-grid connected-components labeling for 2D and
+3D arrays, mirroring `skimage.measure.label`. Two non-background pixels share
+a component iff there is a path of `connectivity`-neighbour steps between
+them along which the input value is constant.
+
+Skimage:
+
+```python
+from skimage.measure import label
+
+labels = label(image, background=0, connectivity=None)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+labels = bic.segmentation.label(image, background=0, connectivity=None)
+```
+
+Vigra has a closely related entry point on binary / labeled inputs:
+
+```python
+import vigra.analysis as va
+
+labels = va.labelMultiArrayWithBackground(
+    image, neighborhood="direct", background_value=0,
+)
+```
+
+`bic.segmentation.label` covers both cases — it labels equal-value runs (as
+`skimage.measure.label` does), and for binary masks it agrees with vigra's
+`labelMultiArrayWithBackground` partition. `neighborhood="direct"` maps to
+`connectivity=1`, `neighborhood="indirect"` maps to `connectivity=image.ndim`.
+
+Important migration notes:
+
+- Supported input dtypes are `bool`, `uint8`, `uint16`, `uint32`, `uint64`,
+  `int32`, `int64`. Floating-point inputs are rejected. Non-contiguous
+  arrays are copied to contiguous memory.
+- `connectivity` is an integer in `[1, image.ndim]`. `1` is orthogonal
+  neighbours only (4-connectivity in 2D, 6-connectivity in 3D);
+  `image.ndim` enables full diagonal connectivity (8-connectivity in 2D,
+  26-connectivity in 3D); `2` in 3D is 18-connectivity. `connectivity=None`
+  defaults to `image.ndim`, matching `skimage.measure.label`.
+- `background` is the pixel value treated as background. Background pixels
+  stay `0` in the output; other equal-valued pixels start at label `1`.
+- The output dtype is always `uint64`. `skimage.measure.label` returns
+  `intp`; cast if you need bit-for-bit dtype parity.
+- Output labels are dense, start at `1`, and are assigned in row-major
+  first-occurrence order — same convention as skimage.
+- Passing a `bool` array enables an internal fast path that skips
+  per-pixel value-equality compares. Convert `uint8` masks to `bool` first
+  if your data is binary.
+- Only 2D and 3D inputs are supported in v1. `skimage.measure.label`
+  accepts arbitrary ndim; loop over slices externally if you need 4D+.
+- `return_num=True` from `skimage.measure.label` is not provided. Use
+  `int(labels.max())` to get the component count.
+
+Performance characteristics (single-threaded, against `skimage 0.25` and
+`vigra 1.11`):
+
+- On integer inputs (`uint8`/`uint16`/…), bioimage-cpp clearly beats both
+  skimage and vigra across the tested grid (2D 512²–2048², 3D 64³–128³, all
+  connectivities, binary and multi-value). Typical margin is **1.5×–3×**
+  faster than skimage and **2×–8×** faster than vigra.
+- On `bool` inputs, skimage ships a separately tuned 2D kernel that is very
+  fast at large sizes. bioimage-cpp matches it at small/medium sizes and on
+  all 3D cases; at 2D 2048² the skimage-bool path is currently ahead by
+  roughly 1.7×. Convert to `uint8` to fall back onto the general path if
+  you need to win at every 2D size.
+
 ## Vigra / fastfilters
 
 ### Image Filters

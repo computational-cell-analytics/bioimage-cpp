@@ -1,6 +1,7 @@
 #include "segmentation.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/segmentation/connected_components.hxx"
 #include "bioimage_cpp/segmentation/mutex_watershed.hxx"
 #include "bioimage_cpp/segmentation/relabel_sequential.hxx"
 #include "bioimage_cpp/segmentation/semantic_mutex_watershed.hxx"
@@ -398,6 +399,55 @@ nb::tuple relabel_sequential_t(
     );
 }
 
+template <class InT>
+nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig> label_t(
+    nb::ndarray<nb::numpy, const InT, nb::c_contig> image,
+    InT background,
+    int connectivity,
+    bool binary
+) {
+    if (image.ndim() != 2 && image.ndim() != 3) {
+        throw std::invalid_argument(
+            "image must have ndim 2 or 3, got ndim=" +
+            std::to_string(image.ndim())
+        );
+    }
+    std::vector<std::ptrdiff_t> image_shape(image.ndim());
+    std::vector<std::size_t> out_shape(image.ndim());
+    for (std::size_t axis = 0; axis < image.ndim(); ++axis) {
+        image_shape[axis] = static_cast<std::ptrdiff_t>(image.shape(axis));
+        out_shape[axis] = image.shape(axis);
+    }
+
+    const auto number_of_nodes = std::accumulate(
+        image_shape.begin(),
+        image_shape.end(),
+        std::ptrdiff_t{1},
+        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
+    );
+    auto *data = new std::uint64_t[static_cast<std::size_t>(number_of_nodes)]();
+    nb::capsule owner(data, [](void *p) noexcept {
+        delete[] static_cast<std::uint64_t *>(p);
+    });
+
+    ConstArrayView<InT> image_view{image.data(), image_shape, {}};
+    ArrayView<std::uint64_t> out_view{data, image_shape, {}};
+
+    {
+        nb::gil_scoped_release release;
+        segmentation::label<InT>(
+            image_view, background, connectivity, binary, out_view
+        );
+    }
+
+    return nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig>(
+        data,
+        out_shape.size(),
+        out_shape.data(),
+        owner
+    );
+}
+
 } // namespace
 
 void bind_segmentation(nb::module_ &m) {
@@ -605,6 +655,61 @@ void bind_segmentation(nb::module_ &m) {
         nb::arg("input"),
         nb::arg("offset"),
         "Relabel a contiguous int64 array to consecutive labels starting at offset."
+    );
+
+    m.def(
+        "_label_uint8",
+        &label_t<std::uint8_t>,
+        nb::arg("image"),
+        nb::arg("background"),
+        nb::arg("connectivity"),
+        nb::arg("binary"),
+        "Connected-components labeling of a 2D or 3D uint8 image."
+    );
+    m.def(
+        "_label_uint16",
+        &label_t<std::uint16_t>,
+        nb::arg("image"),
+        nb::arg("background"),
+        nb::arg("connectivity"),
+        nb::arg("binary"),
+        "Connected-components labeling of a 2D or 3D uint16 image."
+    );
+    m.def(
+        "_label_uint32",
+        &label_t<std::uint32_t>,
+        nb::arg("image"),
+        nb::arg("background"),
+        nb::arg("connectivity"),
+        nb::arg("binary"),
+        "Connected-components labeling of a 2D or 3D uint32 image."
+    );
+    m.def(
+        "_label_uint64",
+        &label_t<std::uint64_t>,
+        nb::arg("image"),
+        nb::arg("background"),
+        nb::arg("connectivity"),
+        nb::arg("binary"),
+        "Connected-components labeling of a 2D or 3D uint64 image."
+    );
+    m.def(
+        "_label_int32",
+        &label_t<std::int32_t>,
+        nb::arg("image"),
+        nb::arg("background"),
+        nb::arg("connectivity"),
+        nb::arg("binary"),
+        "Connected-components labeling of a 2D or 3D int32 image."
+    );
+    m.def(
+        "_label_int64",
+        &label_t<std::int64_t>,
+        nb::arg("image"),
+        nb::arg("background"),
+        nb::arg("connectivity"),
+        nb::arg("binary"),
+        "Connected-components labeling of a 2D or 3D int64 image."
     );
 }
 
