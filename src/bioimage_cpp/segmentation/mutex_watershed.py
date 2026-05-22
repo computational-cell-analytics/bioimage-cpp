@@ -30,6 +30,10 @@ def mutex_watershed(
 ) -> np.ndarray:
     """Run mutex watershed on a 2D or 3D image-derived grid graph.
 
+    Introduced in "The Mutex Watershed and its Objective: Efficient,
+    Parameter-Free Image Partitioning":
+    https://arxiv.org/pdf/1904.12654.pdf
+
     Parameters
     ----------
     affinities:
@@ -126,6 +130,10 @@ def semantic_mutex_watershed(
     mask_label: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run semantic mutex watershed on a 2D or 3D image-derived grid graph.
+
+    Introduced in "The Semantic Mutex Watershed for Efficient Bottom-Up
+    Semantic Instance Segmentation":
+    https://arxiv.org/pdf/1912.12717.pdf
 
     The affinity array stacks three groups of channels along axis 0:
 

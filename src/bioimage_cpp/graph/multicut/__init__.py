@@ -94,6 +94,12 @@ class MulticutSolver(ABC):
 
 
 class GreedyAdditiveMulticut(MulticutSolver):
+    """Greedy additive edge contraction (GAEC) multicut solver.
+
+    Introduced in "Fusion moves for correlation clustering":
+    http://openaccess.thecvf.com/content_cvpr_2015/papers/Beier_Fusion_Moves_for_2015_CVPR_paper.pdf
+    """
+
     def __init__(
         self,
         *,
@@ -133,6 +139,13 @@ class GreedyAdditiveMulticut(MulticutSolver):
 
 
 class GreedyFixationMulticut(MulticutSolver):
+    """Greedy fixation multicut solver.
+
+    Introduced in "A Comparative Study of Local Search Algorithms for
+    Correlation Clustering":
+    https://link.springer.com/chapter/10.1007/978-3-319-66709-6_9
+    """
+
     def __init__(self, *, weight_stop: float = 0.0, node_num_stop: float = -1.0):
         self.weight_stop = float(weight_stop)
         self.node_num_stop = float(node_num_stop)
@@ -155,6 +168,12 @@ class GreedyFixationMulticut(MulticutSolver):
 
 
 class KernighanLinMulticut(MulticutSolver):
+    """Kernighan-Lin multicut solver.
+
+    Introduced in "An efficient heuristic procedure for partitioning graphs":
+    http://xilinx.asia/_hdl/4/eda.ee.ucla.edu/EE201A-04Spring/kl.pdf
+    """
+
     def __init__(
         self,
         *,
@@ -289,6 +308,9 @@ class GreedyAdditiveProposalGenerator(ProposalGenerator):
 class FusionMoveMulticut(MulticutSolver):
     """Fusion-move multicut solver.
 
+    Introduced in "Fusion moves for correlation clustering":
+    http://openaccess.thecvf.com/content_cvpr_2015/papers/Beier_Fusion_Moves_for_2015_CVPR_paper.pdf
+
     Iteratively generates proposals via ``proposal_generator``, fuses them
     with the current best labeling, and accepts improvements. The fuse step
     solves a contracted multicut subproblem with ``sub_solver``; if omitted,
@@ -396,6 +418,16 @@ class ChainedMulticutSolvers(MulticutSolver):
 
 
 class MulticutDecomposer(MulticutSolver):
+    """Decomposition-based multicut solver.
+
+    Introduced in "Break and Conquer: Efficient Correlation Clustering for
+    Image Segmentation":
+    https://link.springer.com/chapter/10.1007/978-3-642-39140-8_9
+
+    Splits the multicut problem into connected components (based on positive
+    edge costs) and solves each component independently with ``sub_solver``.
+    """
+
     def __init__(
         self,
         sub_solver: MulticutSolver,

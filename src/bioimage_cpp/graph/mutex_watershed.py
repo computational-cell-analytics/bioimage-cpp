@@ -39,6 +39,10 @@ def mutex_watershed_clustering(
 ) -> np.ndarray:
     """Mutex watershed clustering on an undirected graph.
 
+    Introduced in "The Mutex Watershed and its Objective: Efficient,
+    Parameter-Free Image Partitioning":
+    https://arxiv.org/pdf/1904.12654.pdf
+
     Attractive edges come from ``graph`` (one cost per edge in
     ``edge_costs``); repulsive long-range edges are supplied separately as
     ``mutex_uvs`` with weights ``mutex_costs``. All edges are jointly sorted
@@ -112,6 +116,10 @@ def semantic_mutex_watershed_clustering(
     semantic_costs,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Semantic mutex watershed clustering on an undirected graph.
+
+    Introduced in "The Semantic Mutex Watershed for Efficient Bottom-Up
+    Semantic Instance Segmentation":
+    https://arxiv.org/pdf/1912.12717.pdf
 
     Extends :func:`mutex_watershed_clustering` with a third group of edges
     that attach semantic class labels to clusters. Two clusters carrying

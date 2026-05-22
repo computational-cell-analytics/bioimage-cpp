@@ -322,6 +322,13 @@ class LiftedMulticutSolver(ABC):
 
 
 class LiftedGreedyAdditiveMulticut(LiftedMulticutSolver):
+    """Greedy additive edge contraction (GAEC) lifted multicut solver.
+
+    Introduced in "An efficient fusion move algorithm for the minimum cost
+    lifted multicut problem":
+    https://hci.iwr.uni-heidelberg.de/sites/default/files/publications/files/1939997197/beier_16_efficient.pdf
+    """
+
     def __init__(
         self,
         *,
@@ -362,6 +369,13 @@ class LiftedGreedyAdditiveMulticut(LiftedMulticutSolver):
 
 
 class LiftedKernighanLinMulticut(LiftedMulticutSolver):
+    """Kernighan-Lin lifted multicut solver.
+
+    Introduced in "Efficient decomposition of image and mesh graphs by lifted
+    multicuts":
+    http://openaccess.thecvf.com/content_iccv_2015/papers/Keuper_Efficient_Decomposition_of_ICCV_2015_paper.pdf
+    """
+
     def __init__(
         self,
         *,
@@ -410,6 +424,10 @@ class LiftedKernighanLinMulticut(LiftedMulticutSolver):
 
 class FusionMoveLiftedMulticut(LiftedMulticutSolver):
     """Fusion-move lifted multicut solver.
+
+    Introduced in "An efficient fusion move algorithm for the minimum cost
+    lifted multicut problem":
+    https://hci.iwr.uni-heidelberg.de/sites/default/files/publications/files/1939997197/beier_16_efficient.pdf
 
     Iteratively generates proposals via ``proposal_generator`` (which sees the
     *base* graph and base edge costs), fuses them with the current best
