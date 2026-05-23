@@ -7,6 +7,7 @@
 #include "bioimage_cpp/graph/feature_accumulation.hxx"
 #include "bioimage_cpp/graph/grid_features.hxx"
 #include "bioimage_cpp/graph/grid_graph.hxx"
+#include "bioimage_cpp/graph/label_accumulation.hxx"
 #include "bioimage_cpp/graph/lifted_from_affinities.hxx"
 #include "bioimage_cpp/graph/lifted_multicut.hxx"
 #include "bioimage_cpp/graph/lifted_multicut/fusion_move.hxx"
@@ -111,6 +112,20 @@ DoubleArray make_double_array(const std::vector<std::size_t> &shape) {
     auto *data = new double[size]();
     nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<double *>(p); });
     return DoubleArray(data, shape.size(), shape.data(), owner);
+}
+
+template <class T>
+using TypedArray = nb::ndarray<nb::numpy, T, nb::c_contig>;
+
+template <class T>
+TypedArray<T> make_typed_array(const std::vector<std::size_t> &shape) {
+    std::size_t size = 1;
+    for (const auto axis_size : shape) {
+        size *= axis_size;
+    }
+    auto *data = new T[size]();
+    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
+    return TypedArray<T>(data, shape.size(), shape.data(), owner);
 }
 
 template <class T>
@@ -1245,6 +1260,55 @@ UInt64Array project_node_labels_to_pixels_t(
     return result;
 }
 
+template <class LabelT, class OtherT>
+TypedArray<OtherT> accumulate_labels_t(
+    const Rag &rag,
+    LabelArray<LabelT> labels,
+    LabelArray<OtherT> other_labels,
+    const bool has_ignore_value,
+    const OtherT ignore_value,
+    const std::size_t number_of_threads
+) {
+    if (labels.ndim() != other_labels.ndim()) {
+        throw std::invalid_argument("other_labels shape must match labels shape");
+    }
+    for (std::size_t axis = 0; axis < labels.ndim(); ++axis) {
+        if (labels.shape(axis) != other_labels.shape(axis)) {
+            throw std::invalid_argument("other_labels shape must match labels shape");
+        }
+    }
+
+    auto result = make_typed_array<OtherT>({static_cast<std::size_t>(rag.number_of_nodes())});
+
+    ConstArrayView<LabelT> labels_view{
+        labels.data(),
+        ndarray_shape(labels),
+        {},
+    };
+    ConstArrayView<OtherT> other_labels_view{
+        other_labels.data(),
+        ndarray_shape(other_labels),
+        {},
+    };
+    ArrayView<OtherT> out_view{
+        result.data(),
+        {static_cast<std::ptrdiff_t>(rag.number_of_nodes())},
+        {},
+    };
+
+    nb::gil_scoped_release release;
+    graph::accumulate_labels<LabelT, OtherT>(
+        rag,
+        labels_view,
+        other_labels_view,
+        has_ignore_value,
+        ignore_value,
+        number_of_threads,
+        out_view
+    );
+    return result;
+}
+
 } // namespace
 
 void bind_graph(nb::module_ &m) {
@@ -1889,6 +1953,37 @@ void bind_graph(nb::module_ &m) {
         nb::arg("node_labels"),
         nb::arg("number_of_threads")
     );
+
+#define BIC_BIND_ACCUMULATE_LABELS(LSUF, LT, OSUF, OT)              \
+    m.def(                                                          \
+        "_accumulate_labels_" #LSUF "_" #OSUF,                      \
+        &accumulate_labels_t<LT, OT>,                               \
+        nb::arg("rag"),                                             \
+        nb::arg("labels"),                                          \
+        nb::arg("other_labels"),                                    \
+        nb::arg("has_ignore_value"),                                \
+        nb::arg("ignore_value"),                                    \
+        nb::arg("number_of_threads")                                \
+    )
+
+    BIC_BIND_ACCUMULATE_LABELS(uint32, std::uint32_t, uint32, std::uint32_t);
+    BIC_BIND_ACCUMULATE_LABELS(uint32, std::uint32_t, uint64, std::uint64_t);
+    BIC_BIND_ACCUMULATE_LABELS(uint32, std::uint32_t, int32,  std::int32_t);
+    BIC_BIND_ACCUMULATE_LABELS(uint32, std::uint32_t, int64,  std::int64_t);
+    BIC_BIND_ACCUMULATE_LABELS(uint64, std::uint64_t, uint32, std::uint32_t);
+    BIC_BIND_ACCUMULATE_LABELS(uint64, std::uint64_t, uint64, std::uint64_t);
+    BIC_BIND_ACCUMULATE_LABELS(uint64, std::uint64_t, int32,  std::int32_t);
+    BIC_BIND_ACCUMULATE_LABELS(uint64, std::uint64_t, int64,  std::int64_t);
+    BIC_BIND_ACCUMULATE_LABELS(int32,  std::int32_t,  uint32, std::uint32_t);
+    BIC_BIND_ACCUMULATE_LABELS(int32,  std::int32_t,  uint64, std::uint64_t);
+    BIC_BIND_ACCUMULATE_LABELS(int32,  std::int32_t,  int32,  std::int32_t);
+    BIC_BIND_ACCUMULATE_LABELS(int32,  std::int32_t,  int64,  std::int64_t);
+    BIC_BIND_ACCUMULATE_LABELS(int64,  std::int64_t,  uint32, std::uint32_t);
+    BIC_BIND_ACCUMULATE_LABELS(int64,  std::int64_t,  uint64, std::uint64_t);
+    BIC_BIND_ACCUMULATE_LABELS(int64,  std::int64_t,  int32,  std::int32_t);
+    BIC_BIND_ACCUMULATE_LABELS(int64,  std::int64_t,  int64,  std::int64_t);
+
+#undef BIC_BIND_ACCUMULATE_LABELS
 }
 
 } // namespace bioimage_cpp::bindings
