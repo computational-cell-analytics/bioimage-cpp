@@ -17,12 +17,20 @@
 namespace bioimage_cpp::graph::agglomeration {
 
 // Linkage criterion for GASP. The criterion determines how parallel edges
-// fold when two clusters merge; the heap priority is always |edge_weight|.
+// fold when two clusters merge and how the agglomeration terminates.
 //
-// `kMutexWatershed` interprets a negative weight on the heap top as a
-// cannot-link constraint (the edge is rejected and a mutex installed
-// between the two clusters), exactly matching the mutex-watershed algorithm
-// applied to a single edge list.
+// For all linkages except ``kMutexWatershed`` the heap priority is
+// ``-edge_weight`` (signed): the most attractive edge pops first, and the
+// agglomeration stops as soon as no positive-weight edges remain. This
+// matches nifty's "stop when no merge candidates are left" behaviour and
+// avoids doing unbounded work after all attractive evidence has been
+// consumed (otherwise critical for ``kSum`` whose combined weight can grow
+// without bound).
+//
+// ``kMutexWatershed`` instead uses priority ``-|edge_weight|`` so the
+// largest-magnitude edge pops first; a negative-weight pop installs a
+// permanent cannot-link constraint between the two clusters and is
+// rejected, exactly matching the mutex-watershed algorithm.
 enum class GaspLinkage {
     kSum = 0,
     kMean = 1,
@@ -96,10 +104,7 @@ public:
             const auto u = static_cast<std::size_t>(uv.first);
             const auto v = static_cast<std::size_t>(uv.second);
             const auto edge_index = static_cast<std::size_t>(edge_id);
-            const double weight = edge_weight_[edge_index];
-            // Min-heap stores ``-|weight|`` so the largest |weight| is the
-            // first to pop (recovers max-heap-on-absolute-value semantics).
-            const double priority = -std::abs(weight);
+            const double priority = priority_of(edge_weight_[edge_index]);
             auto &edge = dynamic_graph.edges[edge_index];
             edge.u = u;
             edge.v = v;
@@ -127,6 +132,16 @@ public:
         const auto v = static_cast<std::uint64_t>(edge.v);
         if (check_mutex(u, v, cannot_link_)) {
             return Action::kRejectEdge;
+        }
+        // Non-mutex-watershed linkages use signed-weight priority and stop
+        // as soon as the top of the heap is non-positive (no attractive
+        // edges remain). Matches `nifty.graph.agglo`'s `isDone` behaviour
+        // and prevents `kSum` / `kAbsMax` from running away when negative
+        // weights flood the queue.
+        if (linkage_ != GaspLinkage::kMutexWatershed) {
+            if (edge_weight_[edge_id] <= 0.0) {
+                return Action::kStop;
+            }
         }
         if (!is_mergeable_[edge_id]) {
             insert_mutex(u, v, cannot_link_);
@@ -195,10 +210,22 @@ public:
         // contribution makes the surviving edge a cannot-link candidate.
         is_mergeable_[existing_id] =
             (is_mergeable_[existing_id] != 0 && is_mergeable_[fold_id] != 0) ? 1 : 0;
-        return -std::abs(combined);
+        return priority_of(combined);
     }
 
 private:
+    // For non-mutex-watershed linkages the priority is the negated signed
+    // weight (min-heap pops the most-positive weight first; the loop
+    // terminates when the top is non-positive). The mutex-watershed
+    // linkage uses ``-|weight|`` so the largest-magnitude edge pops first
+    // regardless of sign.
+    double priority_of(const double weight) const {
+        if (linkage_ == GaspLinkage::kMutexWatershed) {
+            return -std::abs(weight);
+        }
+        return -weight;
+    }
+
     std::vector<double> edge_weight_;
     std::vector<double> edge_size_;
     std::vector<std::uint8_t> is_mergeable_;

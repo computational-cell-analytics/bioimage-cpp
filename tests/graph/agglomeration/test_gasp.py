@@ -28,25 +28,12 @@ def test_all_positive_collapses_to_one_cluster(linkage, dtype):
     assert_same_partition(labels, [0, 0, 0, 0])
 
 
-def test_mutex_watershed_linkage_negative_bridge_keeps_two_clusters():
-    # Only the ``mutex_watershed`` linkage treats a negative weight as a
-    # hard cannot-link constraint. Other linkages incorporate the sign into
-    # their update rule but still process every edge in priority order, so
-    # with ``num_clusters_stop=1`` they collapse the whole graph.
-    graph = two_clusters_graph()
-    weights = np.array(
-        [0.9, 0.8, 0.85, 0.95, 0.92, 0.94, -1.0], dtype=np.float64
-    )
-
-    labels = bic.graph.agglomeration.GaspClusterPolicy(
-        num_clusters_stop=1, linkage="mutex_watershed"
-    ).optimize(graph, weights)
-
-    assert_same_partition(labels, [0, 0, 0, 1, 1, 1])
-
-
-@pytest.mark.parametrize("linkage", ["sum", "mean", "max", "min", "abs_max"])
-def test_non_mutex_linkages_ignore_sign_for_constraints(linkage):
+@pytest.mark.parametrize("linkage", LINKAGES)
+def test_negative_bridge_keeps_two_clusters(linkage):
+    # All linkages observe the "stop when no positive edges remain" rule,
+    # matching ``nifty.graph.agglo``. The ``mutex_watershed`` linkage gets
+    # there via cannot-link constraints on negative heap pops; the others
+    # via the global signed-priority stop check in ``next_action``.
     graph = two_clusters_graph()
     weights = np.array(
         [0.9, 0.8, 0.85, 0.95, 0.92, 0.94, -1.0], dtype=np.float64
@@ -56,7 +43,7 @@ def test_non_mutex_linkages_ignore_sign_for_constraints(linkage):
         num_clusters_stop=1, linkage=linkage
     ).optimize(graph, weights)
 
-    assert len(np.unique(labels)) == 1
+    assert_same_partition(labels, [0, 0, 0, 1, 1, 1])
 
 
 def test_mutex_watershed_linkage_matches_mutex_watershed():
@@ -125,35 +112,44 @@ def test_weight_length_mismatch_raises():
 
 
 @pytest.mark.parametrize(
-    "linkage,expected_value",
+    "linkage,expect_one_cluster",
     [
-        ("sum", 0.9 + 0.5),
-        ("max", 0.9),
-        ("min", 0.5),
-        ("mean", (1.0 * 0.9 + 1.0 * 0.5) / 2.0),
-        ("abs_max", 0.9),
+        ("sum", True),       # combined = 0.4 > 0 → next pop still merges
+        ("mean", True),      # combined = 0.2 > 0 → next pop still merges
+        ("max", True),       # combined = max(0.5, -0.1) = 0.5 > 0
+        ("abs_max", True),   # combined = 0.5 (largest |w|) > 0
+        ("min", False),      # combined = min(0.5, -0.1) = -0.1 → stop
     ],
 )
-def test_linkage_combines_parallel_edges(linkage, expected_value):
+def test_linkage_combines_parallel_edges(linkage, expect_one_cluster):
     # Triangle: 0-1 (0.9), 0-2 (0.5), 1-2 (-0.1). The first contraction
     # merges 0 and 1 (top heap), folding edges 0-2 and 1-2 into one. The
-    # resulting two-component graph has a single combined edge whose
-    # value depends on the linkage rule.
+    # combined weight depends on the linkage rule; with the signed-priority
+    # stop criterion, ``min`` is the only rule that drops the combined
+    # weight below zero and therefore halts before the second merge.
     uvs = np.array([[0, 1], [0, 2], [1, 2]], dtype=np.uint64)
     graph = bic.graph.UndirectedGraph.from_edges(3, uvs)
     weights = np.array([0.9, 0.5, -0.1], dtype=np.float64)
 
-    # Stop after one contraction so we keep two clusters and the single
-    # folded edge is still present.
     labels = bic.graph.agglomeration.GaspClusterPolicy(
-        num_clusters_stop=2, linkage=linkage
+        num_clusters_stop=1, linkage=linkage
     ).optimize(graph, weights)
 
-    # After the first merge of 0-1 the only remaining edge is the folded
-    # one between {0,1} and {2}. The number of clusters is exactly 2.
-    assert len(np.unique(labels)) == 2
-    # Use expected_value implicitly: with sum/mean the folded edge has a
-    # positive combined value, so the second pop would merge if allowed; we
-    # just check that the linkage choice doesn't crash and respects the
-    # num_clusters_stop barrier.
-    _ = expected_value
+    expected = 1 if expect_one_cluster else 2
+    assert len(np.unique(labels)) == expected
+
+
+def test_signed_priority_stop_matches_nifty_semantics():
+    # With non-mutex_watershed linkages and ``num_clusters_stop=1``, the
+    # agglomeration must still leave clusters separated by negative-weight
+    # bridges. Mirrors `nifty.graph.agglo`'s "no attractive edges remain"
+    # termination.
+    graph = two_clusters_graph()
+    weights = np.array(
+        [0.9, 0.8, 0.85, 0.95, 0.92, 0.94, -10.0], dtype=np.float64
+    )
+    for linkage in ("sum", "mean", "max", "abs_max"):
+        labels = bic.graph.agglomeration.GaspClusterPolicy(
+            num_clusters_stop=1, linkage=linkage
+        ).optimize(graph, weights)
+        assert_same_partition(labels, [0, 0, 0, 1, 1, 1])

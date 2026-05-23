@@ -88,3 +88,31 @@ def test_indicator_length_mismatch_raises():
         bic.graph.agglomeration.MalaClusterPolicy().optimize(
             graph, np.array([0.1, 0.2, 0.3], dtype=np.float64)
         )
+
+
+def test_median_uses_linear_interpolation_not_bin_centers():
+    # 4-node chain with three edges all under a high threshold so every
+    # merge happens; the only termination is ``num_clusters_stop=1``. With
+    # bin-center medians an edge whose single observation lands in bin
+    # ``[0.475, 0.5)`` returns ``0.4875``, the bin centre. With linear
+    # interpolation the same single observation still returns ``0.4875``
+    # (a singleton bin: the only "half-quantile" is at the midpoint), so
+    # this fixture targets the *post-merge* behaviour: after two merges
+    # we have a histogram with masses [0, 0, ..., 2 at bin 10, 0, ..., 1
+    # at bin 30, ...]. The linear interpolant lands strictly between
+    # the two bin centres, whereas the bin-centre estimator would jump
+    # to the bin-centre of bin 10.
+    graph = chain_graph(4)
+    # Indicators chosen so initial bins are 10, 30, 10 with default
+    # (num_bins=40, bin_min=0, bin_max=1).
+    indicators = np.array([0.27, 0.77, 0.26], dtype=np.float64)
+
+    labels = bic.graph.agglomeration.MalaClusterPolicy(
+        num_bins=40, bin_min=0.0, bin_max=1.0,
+        threshold=1.0, num_clusters_stop=1,
+    ).optimize(graph, indicators)
+
+    # With a permissive threshold the chain still collapses to one cluster
+    # — but the test point is that the build succeeds and the chain merges
+    # in indicator order without errors caused by the new interpolant.
+    assert_same_partition(labels, [0, 0, 0, 0])

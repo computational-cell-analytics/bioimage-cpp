@@ -22,9 +22,17 @@ namespace bioimage_cpp::graph::agglomeration {
 //
 // Set `num_clusters_stop = 0` or `num_edges_stop = 0` to disable the
 // respective count-based stop. The threshold stop is always active.
+//
+// Binning matches ``nifty::histogram::Histogram``:
+//   fbin(v) = (v - min) / (max - min) * (N - 1)
+// is the fractional bin index in ``[0, N - 1]``. Inserts split their weight
+// linearly between ``floor(fbin)`` and ``ceil(fbin)`` and the bin index
+// maps back to a value via ``b -> min + b / (N - 1) * (max - min)``.
+// Median computation reproduces nifty's quantile loop (see ``median_of``
+// below).
 class MalaClusterPolicy final : public ClusterPolicyBase {
 public:
-    using BinCount = std::uint32_t;
+    using BinCount = double;
 
     MalaClusterPolicy(
         std::vector<double> edge_indicators,
@@ -66,7 +74,7 @@ public:
                 ", number_of_edges=" + std::to_string(n_edges)
             );
         }
-        histograms_.assign(n_edges, std::vector<BinCount>(num_bins_, 0));
+        histograms_.assign(n_edges, std::vector<BinCount>(num_bins_, 0.0));
         active_edges_ = n_edges;
 
         std::vector<EdgeHeap::Entry> entries;
@@ -77,7 +85,7 @@ public:
             const auto v = static_cast<std::size_t>(uv.second);
             const auto edge_index = static_cast<std::size_t>(edge_id);
             const double indicator = initial_indicators_[edge_index];
-            histograms_[edge_index][bin_index(indicator)] = 1;
+            insert_into(histograms_[edge_index], indicator, 1.0);
             const double priority = indicator;
             auto &edge = dynamic_graph.edges[edge_index];
             edge.u = u;
@@ -141,43 +149,82 @@ public:
     // their priorities.
 
 private:
-    std::size_t bin_index(double value) const {
+    // Fractional bin index for ``value`` in ``[bin_min_, bin_max_]``,
+    // returned in ``[0, num_bins_ - 1]``. Matches nifty's
+    // ``Histogram::fbin``: a value at ``bin_max_`` lands exactly on bin
+    // index ``num_bins_ - 1`` rather than past the last bin.
+    double fbin(double value) const {
         if (value <= bin_min_) {
-            return 0;
+            return 0.0;
         }
         if (value >= bin_max_) {
-            return num_bins_ - 1;
+            return static_cast<double>(num_bins_ - 1);
         }
-        const double position = (value - bin_min_) / (bin_max_ - bin_min_);
-        auto index = static_cast<std::size_t>(position * static_cast<double>(num_bins_));
-        if (index >= num_bins_) {
-            index = num_bins_ - 1;
-        }
-        return index;
+        const double normalized =
+            (value - bin_min_) / (bin_max_ - bin_min_);
+        return normalized * static_cast<double>(num_bins_ - 1);
     }
 
-    double bin_center(std::size_t bin) const {
-        const double step = (bin_max_ - bin_min_) / static_cast<double>(num_bins_);
-        return bin_min_ + step * (static_cast<double>(bin) + 0.5);
+    // Map a fractional bin index back to a value in
+    // ``[bin_min_, bin_max_]``. Matches nifty's
+    // ``Histogram::fbinToValue``.
+    double bin_to_value(double fbin_value) const {
+        const double t = fbin_value / static_cast<double>(num_bins_ - 1);
+        return (1.0 - t) * bin_min_ + t * bin_max_;
     }
 
+    // Insert ``weight`` mass at ``value`` into ``histogram``, splitting
+    // linearly between the two surrounding integer bins (nifty's
+    // ``Histogram::insert``).
+    void insert_into(
+        std::vector<BinCount> &histogram, double value, double weight
+    ) const {
+        const double b = fbin(value);
+        const double low = std::floor(b);
+        const double high = std::ceil(b);
+        if (low + 0.5 >= high) {
+            histogram[static_cast<std::size_t>(low)] += weight;
+        } else {
+            const double w_low = high - b;
+            const double w_high = b - low;
+            histogram[static_cast<std::size_t>(low)] += weight * w_low;
+            histogram[static_cast<std::size_t>(high)] += weight * w_high;
+        }
+    }
+
+    // 0.5 quantile of the running histogram, reproducing the formula in
+    // ``nifty::histogram::quantiles`` byte-for-byte (note that nifty's
+    // ``binWidth`` is ``(bin_max - bin_min) / num_bins`` — *not*
+    // ``/(num_bins - 1)`` — and the formula mixes that into the bin-index
+    // axis; we follow it exactly for parity with nifty's MALA output).
     double median_of(const std::vector<BinCount> &histogram) const {
-        std::uint64_t total = 0;
+        double total = 0.0;
         for (const auto count : histogram) {
             total += count;
         }
-        if (total == 0) {
+        if (total == 0.0) {
             return bin_min_;
         }
-        const std::uint64_t half = (total + 1) / 2;
-        std::uint64_t cumulative = 0;
+        const double bin_width =
+            (bin_max_ - bin_min_) / static_cast<double>(num_bins_);
+        const double quant = 0.5 * total;
+        double csum = 0.0;
         for (std::size_t bin = 0; bin < histogram.size(); ++bin) {
-            cumulative += histogram[bin];
-            if (cumulative >= half) {
-                return bin_center(bin);
+            const double new_csum = csum + histogram[bin];
+            if (csum <= quant && new_csum >= quant) {
+                if (bin == 0) {
+                    return bin_to_value(0.0);
+                }
+                const double lbin =
+                    static_cast<double>(static_cast<long>(bin) - 1)
+                    + bin_width / 2.0;
+                const double m = histogram[bin];
+                const double c = csum - lbin * m;
+                return bin_to_value((quant - c) / m);
             }
+            csum = new_csum;
         }
-        return bin_center(histogram.size() - 1);
+        return bin_to_value(static_cast<double>(num_bins_ - 1));
     }
 
     std::vector<double> initial_indicators_;

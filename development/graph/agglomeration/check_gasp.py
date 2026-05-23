@@ -13,10 +13,15 @@ from _compatibility import load_problem, parser as base_parser, report, time_cal
 
 def make_parser() -> argparse.ArgumentParser:
     arg_parser = base_parser(__doc__ or "")
+    # ``abs_max`` is intentionally not compared against nifty: nifty has no
+    # direct sign-aware absolute-maximum linkage. The closest match is
+    # ``MutexWatershedSettings`` but it additionally installs cannot-link
+    # constraints, so the comparison is apples-to-oranges. Run the unit
+    # tests for ``abs_max`` coverage instead.
     arg_parser.add_argument(
         "--linkage",
         default="mean",
-        choices=["sum", "mean", "max", "min", "abs_max", "mutex_watershed"],
+        choices=["sum", "mean", "max", "min", "mutex_watershed"],
         help="GASP linkage rule.",
     )
     return arg_parser
@@ -38,7 +43,6 @@ def main() -> None:
         "sum": nagglo.SumSettings,
         "max": nagglo.MaxSettings,
         "min": nagglo.MinSettings,
-        "abs_max": nagglo.GeneralizedMeanSettings,
         "mutex_watershed": nagglo.MutexWatershedSettings,
     }[args.linkage]
 

@@ -1448,9 +1448,18 @@ Differences from nifty:
 - Both `float32` and `float64` inputs are accepted; computation runs in
   `float64` internally.
 - Tie-breaks follow the deterministic order of edge ids returned by
-  `UndirectedGraph`, which may differ in rare cases from nifty's. Final
-  partitions agree closely; byte-identical label equality is not
-  guaranteed.
+  `UndirectedGraph`, which may differ from nifty's. On inputs where many
+  edges share the same indicator value, this combines with the
+  hierarchical agglomeration's positive feedback loop (each tied merge
+  changes node sizes, which changes the harmonic size factor `sFac`,
+  which changes future priorities) to give cascading divergence. On the
+  external multicut problem sample C/medium, where 86% of indicator
+  values are non-unique, perturbing the indicators of a single bic run by
+  1e-9 random noise can change the final partition's adjusted Rand index
+  vs. its own unperturbed output by ~0.5 (the algorithm is chaotically
+  sensitive to tie-breaking under non-zero `size_regularizer`). Both
+  partitions are valid clusterings; partition agreement (VI, ARI) is the
+  appropriate comparison metric, not label equality.
 
 ### Projecting RAG Node Labels to Pixels
 
