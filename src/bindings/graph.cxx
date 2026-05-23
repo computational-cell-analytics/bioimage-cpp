@@ -9,6 +9,7 @@
 #include "bioimage_cpp/graph/grid_graph.hxx"
 #include "bioimage_cpp/graph/label_accumulation.hxx"
 #include "bioimage_cpp/graph/lifted_from_affinities.hxx"
+#include "bioimage_cpp/graph/agglomeration.hxx"
 #include "bioimage_cpp/graph/lifted_multicut.hxx"
 #include "bioimage_cpp/graph/lifted_multicut/fusion_move.hxx"
 #include "bioimage_cpp/graph/lifted_multicut/lifted_from_node_labels.hxx"
@@ -900,6 +901,201 @@ std::pair<UInt64Array, Int64Array> semantic_mutex_watershed_clustering_t(
     );
 }
 
+template <class WeightT>
+std::vector<double> array_1d_to_double_vector(
+    ConstArray1D<WeightT> array,
+    const char *argument_name,
+    const std::uint64_t expected_size
+) {
+    if (array.ndim() != 1) {
+        throw std::invalid_argument(std::string(argument_name) + " must be a 1D array");
+    }
+    if (array.shape(0) != static_cast<std::size_t>(expected_size)) {
+        throw std::invalid_argument(
+            std::string(argument_name) + " length must match expected size"
+        );
+    }
+    const auto *data = array.data();
+    std::vector<double> out(array.shape(0));
+    for (std::size_t index = 0; index < out.size(); ++index) {
+        out[index] = static_cast<double>(data[index]);
+    }
+    return out;
+}
+
+template <class WeightT>
+UInt64Array agglo_edge_weighted_t(
+    const Graph &graph,
+    ConstArray1D<WeightT> edge_indicators,
+    ConstArray1D<WeightT> edge_sizes,
+    ConstArray1D<WeightT> node_sizes,
+    const std::uint64_t num_clusters_stop,
+    const double size_regularizer
+) {
+    auto indicator_vector = array_1d_to_double_vector<WeightT>(
+        edge_indicators, "edge_indicators", graph.number_of_edges()
+    );
+    auto edge_size_vector = array_1d_to_double_vector<WeightT>(
+        edge_sizes, "edge_sizes", graph.number_of_edges()
+    );
+    auto node_size_vector = array_1d_to_double_vector<WeightT>(
+        node_sizes, "node_sizes", graph.number_of_nodes()
+    );
+
+    std::vector<std::uint64_t> labels;
+    {
+        nb::gil_scoped_release release;
+        graph::agglomeration::EdgeWeightedClusterPolicy policy(
+            std::move(indicator_vector),
+            std::move(edge_size_vector),
+            std::move(node_size_vector),
+            static_cast<std::size_t>(num_clusters_stop),
+            size_regularizer
+        );
+        labels = graph::agglomeration::agglomerative_clustering(graph, policy);
+    }
+    return vector_to_uint64_array(labels);
+}
+
+template <class WeightT>
+UInt64Array agglo_node_and_edge_weighted_t(
+    const Graph &graph,
+    ConstArray1D<WeightT> edge_indicators,
+    ConstArray1D<WeightT> edge_sizes,
+    ConstArray1D<WeightT> node_sizes,
+    ConstFloatingArray<WeightT> node_features,
+    const std::uint64_t num_clusters_stop,
+    const double size_regularizer,
+    const double beta
+) {
+    auto indicator_vector = array_1d_to_double_vector<WeightT>(
+        edge_indicators, "edge_indicators", graph.number_of_edges()
+    );
+    auto edge_size_vector = array_1d_to_double_vector<WeightT>(
+        edge_sizes, "edge_sizes", graph.number_of_edges()
+    );
+    auto node_size_vector = array_1d_to_double_vector<WeightT>(
+        node_sizes, "node_sizes", graph.number_of_nodes()
+    );
+
+    if (node_features.ndim() != 2) {
+        throw std::invalid_argument(
+            "node_features must be a 2D array of shape (n_nodes, n_channels)"
+        );
+    }
+    if (node_features.shape(0) != static_cast<std::size_t>(graph.number_of_nodes())) {
+        throw std::invalid_argument(
+            "node_features first dimension must equal graph.number_of_nodes"
+        );
+    }
+    const auto n_nodes = static_cast<std::size_t>(node_features.shape(0));
+    const auto n_channels = static_cast<std::size_t>(node_features.shape(1));
+    std::vector<std::vector<double>> features(n_nodes, std::vector<double>(n_channels));
+    const auto *feature_data = node_features.data();
+    for (std::size_t node = 0; node < n_nodes; ++node) {
+        for (std::size_t channel = 0; channel < n_channels; ++channel) {
+            features[node][channel] =
+                static_cast<double>(feature_data[node * n_channels + channel]);
+        }
+    }
+
+    std::vector<std::uint64_t> labels;
+    {
+        nb::gil_scoped_release release;
+        graph::agglomeration::NodeAndEdgeWeightedClusterPolicy policy(
+            std::move(indicator_vector),
+            std::move(edge_size_vector),
+            std::move(node_size_vector),
+            std::move(features),
+            static_cast<std::size_t>(num_clusters_stop),
+            size_regularizer,
+            beta
+        );
+        labels = graph::agglomeration::agglomerative_clustering(graph, policy);
+    }
+    return vector_to_uint64_array(labels);
+}
+
+template <class WeightT>
+UInt64Array agglo_mala_t(
+    const Graph &graph,
+    ConstArray1D<WeightT> edge_indicators,
+    const std::uint64_t num_bins,
+    const double bin_min,
+    const double bin_max,
+    const std::uint64_t num_clusters_stop,
+    const std::uint64_t num_edges_stop,
+    const double threshold
+) {
+    auto indicator_vector = array_1d_to_double_vector<WeightT>(
+        edge_indicators, "edge_indicators", graph.number_of_edges()
+    );
+
+    std::vector<std::uint64_t> labels;
+    {
+        nb::gil_scoped_release release;
+        graph::agglomeration::MalaClusterPolicy policy(
+            std::move(indicator_vector),
+            static_cast<std::size_t>(num_bins),
+            bin_min,
+            bin_max,
+            static_cast<std::size_t>(num_clusters_stop),
+            static_cast<std::size_t>(num_edges_stop),
+            threshold
+        );
+        labels = graph::agglomeration::agglomerative_clustering(graph, policy);
+    }
+    return vector_to_uint64_array(labels);
+}
+
+template <class WeightT>
+UInt64Array agglo_gasp_t(
+    const Graph &graph,
+    ConstArray1D<WeightT> edge_weights,
+    ConstArray1D<WeightT> edge_sizes,
+    ConstUInt8Array is_mergeable,
+    const std::uint64_t num_clusters_stop,
+    const int linkage
+) {
+    auto weight_vector = array_1d_to_double_vector<WeightT>(
+        edge_weights, "edge_weights", graph.number_of_edges()
+    );
+    auto edge_size_vector = array_1d_to_double_vector<WeightT>(
+        edge_sizes, "edge_sizes", graph.number_of_edges()
+    );
+
+    std::vector<std::uint8_t> mergeable_vector;
+    if (is_mergeable.ndim() == 1 && is_mergeable.shape(0) > 0) {
+        if (is_mergeable.shape(0) != graph.number_of_edges()) {
+            throw std::invalid_argument(
+                "is_mergeable length must match graph.number_of_edges"
+            );
+        }
+        const auto *data = is_mergeable.data();
+        mergeable_vector.assign(data, data + is_mergeable.shape(0));
+    }
+
+    if (linkage < 0 || linkage > 5) {
+        throw std::invalid_argument(
+            "linkage must be in [0, 5] (sum, mean, max, min, abs_max, mutex_watershed)"
+        );
+    }
+
+    std::vector<std::uint64_t> labels;
+    {
+        nb::gil_scoped_release release;
+        graph::agglomeration::GaspClusterPolicy policy(
+            std::move(weight_vector),
+            std::move(edge_size_vector),
+            std::move(mergeable_vector),
+            static_cast<std::size_t>(num_clusters_stop),
+            static_cast<graph::agglomeration::GaspLinkage>(linkage)
+        );
+        labels = graph::agglomeration::agglomerative_clustering(graph, policy);
+    }
+    return vector_to_uint64_array(labels);
+}
+
 UInt64Array multicut_fusion_move(
     const Graph &graph,
     ConstDoubleArray costs,
@@ -1742,6 +1938,73 @@ void bind_graph(nb::module_ &m) {
         .operator()<float>("_semantic_mutex_watershed_clustering_float32");
     register_semantic_mutex_watershed_clustering
         .operator()<double>("_semantic_mutex_watershed_clustering_float64");
+
+    const auto register_agglo_edge_weighted = [&m]<class WeightT>(const char *name) {
+        m.def(
+            name,
+            &agglo_edge_weighted_t<WeightT>,
+            nb::arg("graph"),
+            nb::arg("edge_indicators"),
+            nb::arg("edge_sizes"),
+            nb::arg("node_sizes"),
+            nb::arg("num_clusters_stop"),
+            nb::arg("size_regularizer")
+        );
+    };
+    register_agglo_edge_weighted.operator()<float>("_agglo_edge_weighted_float32");
+    register_agglo_edge_weighted.operator()<double>("_agglo_edge_weighted_float64");
+
+    const auto register_agglo_node_and_edge_weighted =
+        [&m]<class WeightT>(const char *name) {
+            m.def(
+                name,
+                &agglo_node_and_edge_weighted_t<WeightT>,
+                nb::arg("graph"),
+                nb::arg("edge_indicators"),
+                nb::arg("edge_sizes"),
+                nb::arg("node_sizes"),
+                nb::arg("node_features"),
+                nb::arg("num_clusters_stop"),
+                nb::arg("size_regularizer"),
+                nb::arg("beta")
+            );
+        };
+    register_agglo_node_and_edge_weighted
+        .operator()<float>("_agglo_node_and_edge_weighted_float32");
+    register_agglo_node_and_edge_weighted
+        .operator()<double>("_agglo_node_and_edge_weighted_float64");
+
+    const auto register_agglo_mala = [&m]<class WeightT>(const char *name) {
+        m.def(
+            name,
+            &agglo_mala_t<WeightT>,
+            nb::arg("graph"),
+            nb::arg("edge_indicators"),
+            nb::arg("num_bins"),
+            nb::arg("bin_min"),
+            nb::arg("bin_max"),
+            nb::arg("num_clusters_stop"),
+            nb::arg("num_edges_stop"),
+            nb::arg("threshold")
+        );
+    };
+    register_agglo_mala.operator()<float>("_agglo_mala_float32");
+    register_agglo_mala.operator()<double>("_agglo_mala_float64");
+
+    const auto register_agglo_gasp = [&m]<class WeightT>(const char *name) {
+        m.def(
+            name,
+            &agglo_gasp_t<WeightT>,
+            nb::arg("graph"),
+            nb::arg("edge_weights"),
+            nb::arg("edge_sizes"),
+            nb::arg("is_mergeable"),
+            nb::arg("num_clusters_stop"),
+            nb::arg("linkage")
+        );
+    };
+    register_agglo_gasp.operator()<float>("_agglo_gasp_float32");
+    register_agglo_gasp.operator()<double>("_agglo_gasp_float64");
 
     // Lifted multicut sub-solver hierarchy. Same shape as the multicut sub-
     // solver bindings — opaque to Python, used by future fusion-move drivers.

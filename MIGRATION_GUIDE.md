@@ -1387,6 +1387,80 @@ Notes:
   `ProposalGenerator` and provide your own `_build` returning a C++
   proposal-generator object if you need to extend the set.
 
+### Agglomerative Cluster Policies
+
+`bioimage_cpp.graph.agglomeration` provides hierarchical agglomerative
+clustering driven by a small set of policy classes, matching the policies
+in `nifty.graph.agglo`. Each policy is a max-heap-style driver (smaller
+edge indicator = stronger merge candidate, matching nifty's convention)
+with policy-specific priority computation, merge rule, and stopping
+criterion. All policies accept any `UndirectedGraph` subclass —
+`RegionAdjacencyGraph`, `GridGraph2D`/`GridGraph3D` included.
+
+Nifty:
+
+```python
+import nifty.graph.agglo as nagglo
+
+# Hierarchical, edge-weighted clustering.
+policy = nagglo.edgeWeightedClusterPolicy(
+    graph=graph,
+    edgeIndicators=edge_indicators,
+    edgeSizes=edge_sizes,
+    nodeSizes=node_sizes,
+    numberOfNodesStop=number_of_clusters_stop,
+    sizeRegularizer=0.5,
+)
+labels = nagglo.agglomerativeClustering(policy).run().result()
+```
+
+bioimage-cpp:
+
+```python
+labels = bic.graph.agglomeration.EdgeWeightedClusterPolicy(
+    num_clusters_stop=number_of_clusters_stop,
+    size_regularizer=0.5,
+).optimize(graph, edge_indicators, edge_sizes=edge_sizes, node_sizes=node_sizes)
+```
+
+Mapping:
+
+| Nifty | bioimage-cpp |
+| --- | --- |
+| `edgeWeightedClusterPolicy(...)` | `EdgeWeightedClusterPolicy(num_clusters_stop=, size_regularizer=).optimize(graph, edge_indicators, edge_sizes=, node_sizes=)` |
+| `nodeAndEdgeWeightedClusterPolicy(...)` | `NodeAndEdgeWeightedClusterPolicy(num_clusters_stop=, size_regularizer=, beta=).optimize(graph, edge_indicators, node_features, edge_sizes=, node_sizes=)` |
+| `malaClusterPolicy(...)` | `MalaClusterPolicy(num_bins=, bin_min=, bin_max=, num_clusters_stop=, num_edges_stop=, threshold=).optimize(graph, edge_indicators)` |
+| `gaspClusterPolicy(...)` (signed weights + linkage) | `GaspClusterPolicy(num_clusters_stop=, linkage=).optimize(graph, edge_weights, edge_sizes=, is_mergeable=)` |
+
+`GaspClusterPolicy` linkage strings map to the rules in Bailoni et al.'s
+GASP framework: `"sum"`, `"mean"`, `"max"`, `"min"`, `"abs_max"`,
+`"mutex_watershed"`. The `mutex_watershed` linkage treats a negative
+heap-top weight as a cannot-link constraint; the others apply the chosen
+linkage update without imposing hard constraints from signs. The
+optional `is_mergeable` mask marks edges that should be used only to
+install cluster-level cannot-link constraints.
+
+Differences from nifty:
+
+- `optimize` returns dense `uint64` node labels directly. Nifty exposes a
+  separate driver (`agglomerativeClustering(policy).run().result()`); the
+  underlying loop is the same.
+- Both `float32` and `float64` inputs are accepted; computation runs in
+  `float64` internally.
+- Tie-breaks follow the deterministic order of edge ids returned by
+  `UndirectedGraph`, which may differ from nifty's. On inputs where many
+  edges share the same indicator value, this combines with the
+  hierarchical agglomeration's positive feedback loop (each tied merge
+  changes node sizes, which changes the harmonic size factor `sFac`,
+  which changes future priorities) to give cascading divergence. On the
+  external multicut problem sample C/medium, where 86% of indicator
+  values are non-unique, perturbing the indicators of a single bic run by
+  1e-9 random noise can change the final partition's adjusted Rand index
+  vs. its own unperturbed output by ~0.5 (the algorithm is chaotically
+  sensitive to tie-breaking under non-zero `size_regularizer`). Both
+  partitions are valid clusterings; partition agreement (VI, ARI) is the
+  appropriate comparison metric, not label equality.
+
 ### Projecting RAG Node Labels to Pixels
 
 Nifty projects scalar node data back to pixels with
