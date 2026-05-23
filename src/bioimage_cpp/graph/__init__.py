@@ -385,7 +385,8 @@ def project_node_labels_to_pixels(
     )
 
 
-from . import features  # noqa: E402  (must follow class/function definitions)
+from . import agglomeration  # noqa: E402  (must follow class/function definitions)
+from . import features  # noqa: E402
 from . import lifted_multicut  # noqa: E402
 from . import multicut  # noqa: E402
 from . import mutex_watershed  # noqa: E402
@@ -396,6 +397,7 @@ __all__ = [
     "GridGraph3D",
     "RegionAdjacencyGraph",
     "UndirectedGraph",
+    "agglomeration",
     "breadth_first_search",
     "connected_components",
     "edge_weighted_watershed",
