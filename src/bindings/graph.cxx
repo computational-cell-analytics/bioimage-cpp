@@ -11,6 +11,7 @@
 #include "bioimage_cpp/graph/lifted_from_affinities.hxx"
 #include "bioimage_cpp/graph/lifted_multicut.hxx"
 #include "bioimage_cpp/graph/lifted_multicut/fusion_move.hxx"
+#include "bioimage_cpp/graph/lifted_multicut/lifted_from_node_labels.hxx"
 #include "bioimage_cpp/graph/multicut.hxx"
 #include "bioimage_cpp/graph/mutex_watershed.hxx"
 #include "bioimage_cpp/graph/multicut/fusion_move.hxx"
@@ -25,7 +26,9 @@
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
+#include <nanobind/stl/string.h>
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
 
@@ -33,6 +36,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -1162,6 +1166,58 @@ UInt64Array lifted_edges_from_affinities_t(
 }
 
 template <class LabelT>
+UInt64Array lifted_edges_from_node_labels_t(
+    const Graph &graph,
+    LabelArray<LabelT> node_labels,
+    const std::uint64_t graph_depth,
+    const std::string &mode,
+    std::optional<LabelT> ignore_label,
+    const std::size_t number_of_threads
+) {
+    if (node_labels.ndim() != 1) {
+        throw std::invalid_argument("node_labels must be a 1D array");
+    }
+    if (node_labels.shape(0) != graph.number_of_nodes()) {
+        throw std::invalid_argument(
+            "node_labels length must match graph number_of_nodes"
+        );
+    }
+    graph::lifted_multicut::LiftedNodeLabelMode mode_enum;
+    if (mode == "all") {
+        mode_enum = graph::lifted_multicut::LiftedNodeLabelMode::all;
+    } else if (mode == "same") {
+        mode_enum = graph::lifted_multicut::LiftedNodeLabelMode::same;
+    } else if (mode == "different") {
+        mode_enum = graph::lifted_multicut::LiftedNodeLabelMode::different;
+    } else {
+        throw std::invalid_argument(
+            "mode must be one of 'all', 'same', 'different', got '" + mode + "'"
+        );
+    }
+
+    ConstArrayView<LabelT> labels_view{
+        node_labels.data(),
+        {static_cast<std::ptrdiff_t>(node_labels.shape(0))},
+        {},
+    };
+
+    std::vector<bioimage_cpp::detail::Edge> lifted_edges;
+    {
+        nb::gil_scoped_release release;
+        lifted_edges = graph::lifted_multicut::lifted_edges_from_node_labels<LabelT>(
+            graph, labels_view, graph_depth, mode_enum, ignore_label, number_of_threads
+        );
+    }
+    auto result = make_uint64_array({lifted_edges.size(), 2});
+    auto *data = result.data();
+    for (std::size_t index = 0; index < lifted_edges.size(); ++index) {
+        data[2 * index] = lifted_edges[index].first;
+        data[2 * index + 1] = lifted_edges[index].second;
+    }
+    return result;
+}
+
+template <class LabelT>
 DoubleArray accumulate_lifted_affinity_features_t(
     LabelArray<LabelT> labels,
     ConstDoubleArray affinities,
@@ -1877,6 +1933,47 @@ void bind_graph(nb::module_ &m) {
         nb::arg("rag"),
         nb::arg("labels"),
         nb::arg("offsets"),
+        nb::arg("number_of_threads")
+    );
+
+    m.def(
+        "_lifted_edges_from_node_labels_uint32",
+        &lifted_edges_from_node_labels_t<std::uint32_t>,
+        nb::arg("graph"),
+        nb::arg("node_labels"),
+        nb::arg("graph_depth"),
+        nb::arg("mode"),
+        nb::arg("ignore_label"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_lifted_edges_from_node_labels_uint64",
+        &lifted_edges_from_node_labels_t<std::uint64_t>,
+        nb::arg("graph"),
+        nb::arg("node_labels"),
+        nb::arg("graph_depth"),
+        nb::arg("mode"),
+        nb::arg("ignore_label"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_lifted_edges_from_node_labels_int32",
+        &lifted_edges_from_node_labels_t<std::int32_t>,
+        nb::arg("graph"),
+        nb::arg("node_labels"),
+        nb::arg("graph_depth"),
+        nb::arg("mode"),
+        nb::arg("ignore_label"),
+        nb::arg("number_of_threads")
+    );
+    m.def(
+        "_lifted_edges_from_node_labels_int64",
+        &lifted_edges_from_node_labels_t<std::int64_t>,
+        nb::arg("graph"),
+        nb::arg("node_labels"),
+        nb::arg("graph_depth"),
+        nb::arg("mode"),
+        nb::arg("ignore_label"),
         nb::arg("number_of_threads")
     );
 

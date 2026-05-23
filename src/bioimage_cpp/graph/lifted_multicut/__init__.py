@@ -15,6 +15,9 @@ contribute to the energy via their cut status. This submodule exposes:
   :class:`GreedyAdditiveProposalGenerator` re-exported from
   :mod:`bioimage_cpp.graph.multicut` (the lifted fusion-move solver consumes
   them).
+- :func:`lifted_edges_from_node_labels` — discover lifted edges by combining
+  a BFS neighborhood on the base graph with a per-node label predicate
+  (port of ``nifty.distributed.liftedNeighborhoodFromNodeLabels``).
 """
 
 from __future__ import annotations
@@ -33,7 +36,111 @@ from .._shared import (
     _as_edge_costs,
     _as_node_labels,
     _as_uv_array,
+    _normalize_number_of_threads,
 )
+
+
+_LIFTED_EDGES_FROM_NODE_LABELS_BY_DTYPE = {
+    np.dtype("uint32"): _core._lifted_edges_from_node_labels_uint32,
+    np.dtype("uint64"): _core._lifted_edges_from_node_labels_uint64,
+    np.dtype("int32"): _core._lifted_edges_from_node_labels_int32,
+    np.dtype("int64"): _core._lifted_edges_from_node_labels_int64,
+}
+
+
+def lifted_edges_from_node_labels(
+    graph,
+    node_labels,
+    graph_depth: int,
+    *,
+    mode: str = "all",
+    ignore_label: int | None = None,
+    number_of_threads: int = 0,
+) -> np.ndarray:
+    """Discover lifted edges from a BFS neighborhood plus per-node labels.
+
+    For every source node ``u`` the BFS reports each node ``v`` reached within
+    ``graph_depth`` hops. The pair ``(u, v)`` (with ``u < v``) becomes a lifted
+    edge iff:
+
+    - the BFS hop distance is in ``[2, graph_depth]`` — base-graph edges
+      (distance 1) are always excluded;
+    - neither ``node_labels[u]`` nor ``node_labels[v]`` equals ``ignore_label``
+      (when ``ignore_label`` is not ``None``);
+    - the ``mode`` predicate is satisfied: ``'all'`` keeps every pair,
+      ``'same'`` keeps pairs with matching labels, ``'different'`` keeps the
+      complement.
+
+    Mirrors ``nifty.distributed.liftedNeighborhoodFromNodeLabels`` with the
+    following intentional differences: snake-case parameter names,
+    ``ignore_label`` defaults to ``None`` (no filtering), and node ``0`` is
+    iterated as a source (nifty's distributed variant skips it).
+
+    Parameters
+    ----------
+    graph:
+        :class:`bioimage_cpp.graph.UndirectedGraph` or
+        :class:`bioimage_cpp.graph.RegionAdjacencyGraph`.
+    node_labels:
+        1D array of length ``graph.number_of_nodes``. Supported dtypes:
+        ``uint32``, ``uint64``, ``int32``, ``int64``.
+    graph_depth:
+        Maximum BFS hop distance (inclusive). Must be ``>= 1``;
+        ``graph_depth == 1`` returns an empty array because base edges are
+        excluded by construction.
+    mode:
+        ``'all'``, ``'same'``, or ``'different'``.
+    ignore_label:
+        If set, drop every pair where either endpoint label equals this value.
+    number_of_threads:
+        ``0`` (default) selects the bioimage-cpp default thread count.
+
+    Returns
+    -------
+    np.ndarray
+        ``(n_lifted, 2)`` ``uint64`` array of ``(u, v)`` pairs with
+        ``u < v``, sorted lexicographically.
+    """
+    if mode not in ("all", "same", "different"):
+        raise ValueError(
+            f"mode must be one of 'all', 'same', 'different', got {mode!r}"
+        )
+    depth = int(graph_depth)
+    if depth < 1:
+        raise ValueError(f"graph_depth must be >= 1, got {depth}")
+
+    label_array = np.ascontiguousarray(np.asarray(node_labels))
+    if label_array.ndim != 1:
+        raise ValueError(
+            f"node_labels must be a 1D array, got ndim={label_array.ndim}"
+        )
+    if label_array.shape[0] != int(graph.number_of_nodes):
+        raise ValueError(
+            "node_labels length must match graph number_of_nodes, got "
+            f"node_labels length={label_array.shape[0]}, "
+            f"number_of_nodes={int(graph.number_of_nodes)}"
+        )
+
+    try:
+        run = _LIFTED_EDGES_FROM_NODE_LABELS_BY_DTYPE[label_array.dtype]
+    except KeyError as error:
+        supported = ", ".join(
+            str(dtype) for dtype in _LIFTED_EDGES_FROM_NODE_LABELS_BY_DTYPE
+        )
+        raise TypeError(
+            f"node_labels must have one of dtypes ({supported}), got "
+            f"dtype={label_array.dtype}"
+        ) from error
+
+    ignore_arg = None if ignore_label is None else int(ignore_label)
+    return run(
+        graph,
+        label_array,
+        depth,
+        mode,
+        ignore_arg,
+        _normalize_number_of_threads(number_of_threads),
+    )
 from ..multicut import (
     GreedyAdditiveProposalGenerator,
     ProposalGenerator,
@@ -555,6 +662,7 @@ __all__ = [
     "LiftedMulticutSolver",
     "ProposalGenerator",
     "WatershedProposalGenerator",
+    "lifted_edges_from_node_labels",
     "lifted_multicut_problem_path",
     "load_lifted_multicut_problem",
 ]
