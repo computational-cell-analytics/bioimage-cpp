@@ -1146,6 +1146,41 @@ lifted_features = bic.graph.features.lifted_affinity_features_complex(...)
 The output column conventions match the local-edge variants
 (`SIMPLE_EDGE_FEATURE_NAMES`, `COMPLEX_EDGE_FEATURE_NAMES`).
 
+#### Building lifted edges from per-node labels
+
+When the lifted edges come from semantic / class labels per RAG node rather
+than from long-range affinities, nifty offers
+`nifty.distributed.liftedNeighborhoodFromNodeLabels`. The bioimage-cpp
+equivalent lives under `bic.graph.lifted_multicut`:
+
+```python
+# nifty
+lifted_uvs = nifty.distributed.liftedNeighborhoodFromNodeLabels(
+    graph, node_labels, graphDepth=2, numberOfThreads=4,
+    mode='all', ignoreLabel=0,
+)
+
+# bioimage-cpp
+lifted_uvs = bic.graph.lifted_multicut.lifted_edges_from_node_labels(
+    graph, node_labels, graph_depth=2,
+    mode='all', ignore_label=0, number_of_threads=4,
+)
+```
+
+Both functions return an `(n_lifted, 2)` `uint64` array of `(u, v)` pairs
+with `u < v`, sorted lexicographically. The BFS hop distance is restricted
+to `[2, graph_depth]`, so base-graph edges are excluded. `mode='same'` /
+`'different'` filter by whether `node_labels[u] == node_labels[v]`;
+`ignore_label` drops every pair where either endpoint label matches.
+
+Intentional differences vs. nifty:
+
+- snake_case parameter names (`graph_depth`, `ignore_label`,
+  `number_of_threads`);
+- `ignore_label` defaults to `None` (no filtering) instead of `0`;
+- node `0` is iterated as a source (nifty's distributed variant has an
+  off-by-one that silently skips it).
+
 End-to-end pipeline (also in `examples/segmentation/lifted_multicut_from_affinities.py`):
 
 ```python
