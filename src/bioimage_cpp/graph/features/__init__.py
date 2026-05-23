@@ -13,6 +13,8 @@ Functions in this submodule compute edge-aligned feature vectors:
   :func:`grid_affinity_features_with_lifted` — weights for nearest-neighbor
   grid graphs (and optional long-range edges) computed directly from
   boundary maps / affinity channels.
+- :func:`accumulate_labels` — majority-vote of a second label volume per
+  RAG node (equivalent to nifty's ``gridRagAccumulateLabels``).
 """
 
 from __future__ import annotations
@@ -94,6 +96,34 @@ _GRID_AFFINITY_LIFTED_DISPATCH = {
     (3, "float32"): _core._grid_affinity_features_with_lifted_3d_float32,
     (3, "float64"): _core._grid_affinity_features_with_lifted_3d_float64,
 }
+
+
+_LABEL_DTYPES = (
+    np.dtype("uint32"),
+    np.dtype("uint64"),
+    np.dtype("int32"),
+    np.dtype("int64"),
+)
+
+
+def _accumulate_labels_dispatch():
+    suffix = {
+        np.dtype("uint32"): "uint32",
+        np.dtype("uint64"): "uint64",
+        np.dtype("int32"): "int32",
+        np.dtype("int64"): "int64",
+    }
+    dispatch = {}
+    for labels_dtype in _LABEL_DTYPES:
+        for other_dtype in _LABEL_DTYPES:
+            name = (
+                f"_accumulate_labels_{suffix[labels_dtype]}_{suffix[other_dtype]}"
+            )
+            dispatch[(labels_dtype, other_dtype)] = getattr(_core, name)
+    return dispatch
+
+
+_ACCUMULATE_LABELS_DISPATCH = _accumulate_labels_dispatch()
 
 
 def edge_map_features(
@@ -354,6 +384,94 @@ def grid_affinity_features_with_lifted(
     )
 
 
+def accumulate_labels(
+    rag,
+    labels: np.ndarray,
+    other_labels: np.ndarray,
+    *,
+    ignore_value: int | None = None,
+    number_of_threads: int = 0,
+) -> np.ndarray:
+    """Majority-vote of ``other_labels`` per RAG node.
+
+    For each node in ``rag``, returns the most frequent value of
+    ``other_labels`` across the pixels assigned to that node by the
+    over-segmentation ``labels``. This is the equivalent of nifty's
+    ``gridRagAccumulateLabels``.
+
+    Parameters
+    ----------
+    rag:
+        :class:`bioimage_cpp.graph.RegionAdjacencyGraph` built from ``labels``.
+    labels:
+        2D or 3D over-segmentation used to construct ``rag``. Supported
+        dtypes: ``uint32``, ``uint64``, ``int32``, ``int64``.
+    other_labels:
+        Secondary label volume with the same shape as ``labels``. Supported
+        dtypes: ``uint32``, ``uint64``, ``int32``, ``int64``.
+    ignore_value:
+        Optional. Pixels where ``other_labels`` equals this value are
+        excluded from the histogram. Set to ``0`` to reproduce nifty's
+        ``ignoreBackground=True``.
+    number_of_threads:
+        ``0`` (default) uses the library default; positive integers fix
+        the thread count.
+
+    Returns
+    -------
+    np.ndarray
+        1D array of length ``rag.number_of_nodes`` with the same dtype as
+        ``other_labels``. Nodes whose pixels are all ignored (or for which
+        no pixel contributes) get ``0``. Ties are broken by smaller label
+        id (deterministic).
+    """
+    label_array = _normalize_labels(labels)
+    if tuple(int(size) for size in rag.shape) != label_array.shape:
+        raise ValueError(
+            "rag shape must match labels shape, got "
+            f"rag shape={tuple(rag.shape)}, labels shape={label_array.shape}"
+        )
+
+    other_array = np.asarray(other_labels)
+    if other_array.dtype not in _LABEL_DTYPES:
+        supported = ", ".join(str(dtype) for dtype in _LABEL_DTYPES)
+        raise TypeError(
+            f"other_labels must have one of dtypes ({supported}), got "
+            f"dtype={other_array.dtype}"
+        )
+    if other_array.shape != label_array.shape:
+        raise ValueError(
+            "other_labels shape must match labels shape, got "
+            f"other_labels shape={other_array.shape}, "
+            f"labels shape={label_array.shape}"
+        )
+    other_array = np.ascontiguousarray(other_array)
+
+    if ignore_value is None:
+        has_ignore_value = False
+        ignore_scalar = other_array.dtype.type(0)
+    else:
+        info = np.iinfo(other_array.dtype)
+        ignore_int = int(ignore_value)
+        if ignore_int < info.min or ignore_int > info.max:
+            raise ValueError(
+                f"ignore_value={ignore_int} is not representable in "
+                f"other_labels dtype {other_array.dtype}"
+            )
+        has_ignore_value = True
+        ignore_scalar = other_array.dtype.type(ignore_int)
+
+    run = _ACCUMULATE_LABELS_DISPATCH[(label_array.dtype, other_array.dtype)]
+    return run(
+        rag,
+        label_array,
+        other_array,
+        bool(has_ignore_value),
+        ignore_scalar,
+        _normalize_number_of_threads(number_of_threads),
+    )
+
+
 def _accumulate_edge_map_features(
     rag,
     labels: np.ndarray,
@@ -462,6 +580,7 @@ def _accumulate_lifted_affinity_features(
 __all__ = [
     "COMPLEX_EDGE_FEATURE_NAMES",
     "SIMPLE_EDGE_FEATURE_NAMES",
+    "accumulate_labels",
     "affinity_features",
     "affinity_features_complex",
     "edge_map_features",

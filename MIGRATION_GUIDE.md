@@ -1420,6 +1420,48 @@ Notes:
 - `number_of_threads=0` uses the library default; pass a positive integer for a
   fixed thread count.
 
+### Accumulating Labels on a RAG
+
+Nifty's `gridRagAccumulateLabels` projects a second label volume onto a RAG
+by taking a per-node majority vote (commonly used to project a ground-truth
+segmentation onto an over-segmentation).
+
+Nifty:
+
+```python
+import nifty.graph.rag as nrag
+
+rag = nrag.gridRag(labels)
+node_labels = nrag.gridRagAccumulateLabels(rag, gt)
+# ignore label 0 in the ground truth (nifty's "ignoreBackground"):
+node_labels = nrag.gridRagAccumulateLabels(rag, gt, ignoreBackground=True)
+```
+
+bioimage-cpp:
+
+```python
+rag = bic.graph.region_adjacency_graph(labels)
+node_labels = bic.graph.features.accumulate_labels(rag, labels, gt)
+# arbitrary ignore value (covers nifty's ignoreBackground=True by passing 0):
+node_labels = bic.graph.features.accumulate_labels(
+    rag, labels, gt, ignore_value=0
+)
+```
+
+Notes:
+
+- `labels` must be the over-segmentation used to construct `rag`.
+- `other_labels` must have the same shape as `labels`. Supported dtypes for
+  both arrays: `uint32`, `uint64`, `int32`, `int64`; they may differ.
+- The output has length `rag.number_of_nodes` and the same dtype as
+  `other_labels`. Nodes whose pixels are all ignored receive `0`.
+- Ties in the majority vote are broken by smaller label id (deterministic).
+  Nifty's tie-breaking depends on `std::unordered_map` iteration order and
+  is therefore platform-dependent; `bic` resolves ties deterministically.
+- `ignore_value` is more general than nifty's boolean `ignoreBackground`:
+  pass `0` to reproduce `ignoreBackground=True`, or any other value to skip
+  arbitrary sentinels (e.g. `255` or `-1`).
+
 ### RAG Boundary and Affinity Features
 
 Nifty has RAG feature helpers such as `accumulateEdgeMeanAndLength`,
