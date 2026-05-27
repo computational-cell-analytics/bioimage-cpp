@@ -2,6 +2,7 @@
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/distance_transform.hxx"
+#include "bioimage_cpp/non_maximum_distance_suppression.hxx"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -13,6 +14,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace nb = nanobind;
@@ -187,6 +189,82 @@ nb::tuple distance_transform_uint8(
     return nb::make_tuple(distances_result, indices_result, vectors_result);
 }
 
+template <class PointT>
+nb::ndarray<nb::numpy, PointT, nb::c_contig> non_maximum_distance_suppression_impl(
+    nb::ndarray<nb::numpy, const float, nb::c_contig> distance_map,
+    nb::ndarray<nb::numpy, const PointT, nb::c_contig> points,
+    const std::size_t n_threads
+) {
+    (void)n_threads;  // Reserved for future parallelization; single-threaded.
+
+    if (distance_map.ndim() == 0) {
+        throw std::invalid_argument("distance_map must have ndim >= 1, got ndim=0");
+    }
+    if (points.ndim() != 2) {
+        throw std::invalid_argument(
+            "points must have ndim == 2, got ndim=" + std::to_string(points.ndim())
+        );
+    }
+    const auto coord_ndim = static_cast<std::size_t>(points.shape(1));
+    if (coord_ndim != distance_map.ndim()) {
+        throw std::invalid_argument(
+            "points.shape[1] must match distance_map ndim, got points.shape[1]=" +
+            std::to_string(coord_ndim) + ", distance_map.ndim()=" +
+            std::to_string(distance_map.ndim())
+        );
+    }
+
+    const auto map_shape = ndarray_shape(distance_map);
+    const auto n_points = static_cast<std::size_t>(points.shape(0));
+
+    // Bounds-check every coordinate before dropping the GIL.
+    const PointT *points_data = points.data();
+    for (std::size_t i = 0; i < n_points; ++i) {
+        for (std::size_t d = 0; d < coord_ndim; ++d) {
+            const PointT coord = points_data[i * coord_ndim + d];
+            if constexpr (std::is_signed_v<PointT>) {
+                if (coord < 0) {
+                    throw std::invalid_argument(
+                        "points coordinate out of bounds: points[" + std::to_string(i) +
+                        ", " + std::to_string(d) + "]=" + std::to_string(coord) +
+                        " is negative"
+                    );
+                }
+            }
+            if (static_cast<std::ptrdiff_t>(coord) >= map_shape[d]) {
+                throw std::invalid_argument(
+                    "points coordinate out of bounds: points[" + std::to_string(i) +
+                    ", " + std::to_string(d) + "]=" + std::to_string(coord) +
+                    " >= distance_map.shape[" + std::to_string(d) + "]=" +
+                    std::to_string(map_shape[d])
+                );
+            }
+        }
+    }
+
+    ConstArrayView<float> map_view{distance_map.data(), map_shape, {}};
+    ConstArrayView<PointT> points_view{points_data, ndarray_shape(points), {}};
+
+    std::vector<std::size_t> kept_indices;
+    {
+        nb::gil_scoped_release release;
+        distance::non_maximum_distance_suppression(map_view, points_view, kept_indices);
+    }
+
+    const std::size_t n_kept = kept_indices.size();
+    std::vector<std::size_t> out_shape{n_kept, coord_ndim};
+    auto output =
+        make_array<PointT, nb::ndarray<nb::numpy, PointT, nb::c_contig>>(out_shape);
+    PointT *out_data = output.data();
+    for (std::size_t k = 0; k < n_kept; ++k) {
+        const std::size_t i = kept_indices[k];
+        for (std::size_t d = 0; d < coord_ndim; ++d) {
+            out_data[k * coord_ndim + d] = points_data[i * coord_ndim + d];
+        }
+    }
+    return output;
+}
+
 } // namespace
 
 void bind_distance(nb::module_ &m) {
@@ -205,6 +283,33 @@ void bind_distance(nb::module_ &m) {
         "Distance transform for a C-contiguous uint8 binary array. Computes any\n"
         "combination of (distances, indices, vectors) in a single separable F&H\n"
         "sweep. Pre-allocated output buffers are written into directly."
+    );
+
+    const char *nms_doc =
+        "Non-maximum distance suppression of candidate points by a float32\n"
+        "distance map. For each point p_i, keeps the point with the largest\n"
+        "distance value within Euclidean distance distance_map[p_i] of p_i.\n"
+        "Returns the unique selected points (shape (K, ndim)) in ascending\n"
+        "input-index order. O(N^2) time and memory.";
+    m.def(
+        "_non_maximum_distance_suppression_int64",
+        &non_maximum_distance_suppression_impl<std::int64_t>,
+        nb::arg("distance_map"), nb::arg("points"), nb::arg("n_threads"), nms_doc
+    );
+    m.def(
+        "_non_maximum_distance_suppression_uint64",
+        &non_maximum_distance_suppression_impl<std::uint64_t>,
+        nb::arg("distance_map"), nb::arg("points"), nb::arg("n_threads"), nms_doc
+    );
+    m.def(
+        "_non_maximum_distance_suppression_int32",
+        &non_maximum_distance_suppression_impl<std::int32_t>,
+        nb::arg("distance_map"), nb::arg("points"), nb::arg("n_threads"), nms_doc
+    );
+    m.def(
+        "_non_maximum_distance_suppression_uint32",
+        &non_maximum_distance_suppression_impl<std::uint32_t>,
+        nb::arg("distance_map"), nb::arg("points"), nb::arg("n_threads"), nms_doc
     );
 }
 

@@ -215,3 +215,80 @@ def vector_difference_transform(
         return_vectors=True,
         number_of_threads=number_of_threads,
     )
+
+
+_NMS_DISPATCH = {
+    np.dtype(np.int64): _core._non_maximum_distance_suppression_int64,
+    np.dtype(np.uint64): _core._non_maximum_distance_suppression_uint64,
+    np.dtype(np.int32): _core._non_maximum_distance_suppression_int32,
+    np.dtype(np.uint32): _core._non_maximum_distance_suppression_uint32,
+}
+
+
+def non_maximum_distance_suppression(
+    distance_map: np.ndarray,
+    points: np.ndarray,
+    number_of_threads: int = 1,
+) -> np.ndarray:
+    """Filter candidate points by non-maximum suppression on a distance map.
+
+    For each input point ``p_i`` with distance value ``d_i =
+    distance_map[p_i]``, keep the point with the largest ``distance_map``
+    value among all points within Euclidean distance ``d_i`` of ``p_i``
+    (including ``p_i`` itself). The unique set of such "dominant" points is
+    returned, ordered by ascending input index. This mirrors
+    ``nifty.filters.nonMaximumDistanceSuppression``.
+
+    Parameters
+    ----------
+    distance_map
+        Float array of any ndim ``D``. Coerced to C-contiguous ``float32`` if
+        a different float dtype or layout is supplied.
+    points
+        Integer array of shape ``(N, D)``; each row is a coordinate into
+        ``distance_map`` in NumPy axis order. Supported dtypes:
+        ``int64``, ``uint64``, ``int32``, ``uint32``.
+    number_of_threads
+        Reserved for future parallelization; currently single-threaded.
+
+    Returns
+    -------
+    np.ndarray
+        Filtered subset of ``points`` with shape ``(K, D)`` and the same
+        dtype as ``points``. ``K <= N``.
+
+    Notes
+    -----
+    Uses an ``O(N^2)`` pairwise distance matrix internally; suitable for ``N``
+    up to roughly 30k points. For larger candidate sets, threshold the
+    distance map more aggressively before calling.
+    """
+    function = "non_maximum_distance_suppression"
+
+    distance_map = np.ascontiguousarray(distance_map, dtype=np.float32)
+    if distance_map.ndim < 1:
+        raise ValueError(
+            f"{function}: distance_map must have ndim >= 1, got ndim={distance_map.ndim}"
+        )
+
+    points = np.ascontiguousarray(points)
+    if points.ndim != 2:
+        raise ValueError(
+            f"{function}: points must have ndim == 2, got ndim={points.ndim}"
+        )
+    if points.shape[1] != distance_map.ndim:
+        raise ValueError(
+            f"{function}: points.shape[1] must equal distance_map.ndim "
+            f"({distance_map.ndim}), got points.shape[1]={points.shape[1]}"
+        )
+
+    dispatch = _NMS_DISPATCH.get(points.dtype)
+    if dispatch is None:
+        supported = ", ".join(str(dt) for dt in ("int64", "uint64", "int32", "uint32"))
+        raise TypeError(
+            f"{function}: points must have one of dtypes [{supported}], "
+            f"got dtype={points.dtype}"
+        )
+
+    n_threads = _normalize_threads(number_of_threads, function)
+    return dispatch(distance_map, points, n_threads)
