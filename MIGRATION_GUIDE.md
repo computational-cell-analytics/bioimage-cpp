@@ -2047,6 +2047,53 @@ Important differences:
   axis-0 coordinate `-1` and `0` on all other axes. The first row of
   `indices` will then contain `-1` everywhere.
 
+### Non-Maximum Distance Suppression
+
+`nifty.filters.nonMaximumDistanceSuppression` filters a set of candidate
+points using a distance map: each point's suppression radius is the distance
+value at its own location, and from every group of points that fall within
+one another's radius only the one with the largest distance value is kept.
+`bioimage-cpp` exposes the same algorithm as
+`bic.distance.non_maximum_distance_suppression`.
+
+nifty:
+
+```python
+from nifty.filters import nonMaximumDistanceSuppression
+
+# distanceMap: float32 array; points: uint64 array of shape (N, ndim)
+kept = nonMaximumDistanceSuppression(distanceMap, points)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+kept = bic.distance.non_maximum_distance_suppression(distance_map, points)
+```
+
+Name mapping:
+
+| nifty name | bioimage-cpp name |
+| --- | --- |
+| `nifty.filters.nonMaximumDistanceSuppression` | `non_maximum_distance_suppression` |
+
+Important differences:
+
+- Snake_case naming, consistent with the rest of `bic.distance`.
+- `points` may be `int64`, `uint64`, `int32`, or `uint32`; the returned array
+  has shape `(K, ndim)` and preserves the input `points` dtype (nifty always
+  returned `uint64`). Output rows are the retained points in ascending
+  input-index order.
+- `distance_map` is coerced to C-contiguous `float32` if needed. The
+  per-point radius is dynamic (the distance value at each point), matching
+  nifty; there is no fixed-radius mode.
+- The algorithm is otherwise identical to nifty, including its float
+  arithmetic, so results match element-for-element. It uses an O(N²)
+  pairwise distance matrix; threshold the distance map first to keep the
+  candidate count modest.
+
 ## I/O and Build Dependencies
 
 `bioimage-cpp` intentionally does not replace nifty or affogato I/O helpers.
