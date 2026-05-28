@@ -430,10 +430,17 @@ Important differences:
 - `graph.clone()` returns an independent deep copy. The C++ class is
   move-only (it owns a CSR adjacency buffer), so prefer this over
   reassignment-by-value.
-- `graph.freeze()` eagerly builds the internal adjacency. Call it after a
-  batch of `insert_edge` calls if you intend to hand the graph to multiple
-  reader threads, or if you want to ensure subsequent `node_adjacency`
-  reads carry no first-call rebuild cost.
+- The internal adjacency is built *lazily* on the first `node_adjacency`
+  read, and that lazy build is **not thread-safe**. The built-in
+  multi-threaded algorithms freeze the graph internally before fanning out, so
+  passing a graph straight into them is safe. But if you build a graph and then
+  share it across **your own** threads (concurrent `node_adjacency` reads, a
+  BFS, etc.), call `graph.freeze()` once on the construction thread first —
+  racing the first read across threads corrupts the adjacency (nondeterministic
+  results, possible crashes). `freeze()` eagerly builds the adjacency and is a
+  no-op once built; it also removes the first-call rebuild cost from later
+  `node_adjacency` reads. This applies to all graph types (`GridGraph2D`,
+  `GridGraph3D`, `RegionAdjacencyGraph`).
 
 Common method/property mapping:
 

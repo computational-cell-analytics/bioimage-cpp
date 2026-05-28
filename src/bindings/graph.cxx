@@ -1599,7 +1599,15 @@ void bind_graph(nb::module_ &m) {
             nb::arg("nodes")
         )
         .def("edges_from_node_list", &graph_edges_from_node_list, nb::arg("nodes"))
-        .def("freeze", &Graph::freeze)
+        .def(
+            "freeze",
+            &Graph::freeze,
+            "Build the internal adjacency representation now (it is otherwise "
+            "built lazily on first use). Call this on the construction thread "
+            "before sharing the graph with concurrent reader threads: the lazy "
+            "build is not thread-safe. No-op if already built; safe to call "
+            "repeatedly."
+        )
         .def("clone", &Graph::clone)
         .def_static(
             "from_edges",

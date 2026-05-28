@@ -238,3 +238,41 @@ def test_empty_graph():
         graph, labels, graph_depth=2, mode="all"
     )
     assert out.shape == (0, 2)
+
+
+def test_default_threading_is_deterministic_on_large_chain():
+    # Regression guard for a data race in the lazy CSR-adjacency rebuild: with
+    # default (multi-threaded) execution, every worker used to trigger the
+    # not-thread-safe rebuild concurrently on the first node_adjacency() read,
+    # corrupting the adjacency. That produced run-to-run varying counts and
+    # intermittent segfaults. A graph this size reliably exposes the race
+    # (a 10-node chain does not). The result must equal the single-threaded
+    # reference on every run.
+    n = 2000
+    graph = _make_chain(n)  # built via from_edges -> arrives "dirty"
+    labels = np.ones(n, dtype=np.uint64)
+    reference = bic.graph.lifted_multicut.lifted_edges_from_node_labels(
+        graph, labels, graph_depth=3, mode="all", number_of_threads=1
+    )
+    for _ in range(25):
+        out = bic.graph.lifted_multicut.lifted_edges_from_node_labels(
+            graph, labels, graph_depth=3, mode="all"  # default: multi-threaded
+        )
+        assert out.tolist() == reference.tolist()
+
+
+def test_default_threading_is_deterministic_on_rag():
+    # Same race, reached through the region_adjacency_graph construction path,
+    # which also returns a graph with a dirty (not-yet-built) adjacency.
+    n = 2000
+    segmentation = np.repeat(np.arange(n, dtype=np.uint32), 16).reshape(n, 4, 4)
+    rag = bic.graph.region_adjacency_graph(segmentation)
+    labels = np.ones(rag.numberOfNodes, dtype=np.uint64)
+    reference = bic.graph.lifted_multicut.lifted_edges_from_node_labels(
+        rag, labels, graph_depth=3, mode="all", number_of_threads=1
+    )
+    for _ in range(25):
+        out = bic.graph.lifted_multicut.lifted_edges_from_node_labels(
+            rag, labels, graph_depth=3, mode="all"  # default: multi-threaded
+        )
+        assert out.tolist() == reference.tolist()

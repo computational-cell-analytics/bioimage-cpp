@@ -60,6 +60,12 @@ std::vector<bioimage_cpp::detail::Edge> lifted_edges_from_node_labels(
         return {};
     }
 
+    // The CSR adjacency is rebuilt lazily on the first node_adjacency() read and
+    // that rebuild is not thread-safe. Freeze it on this thread before the
+    // parallel BFS fan-out below so worker threads only ever do const reads of
+    // an already-built adjacency (see the UndirectedGraph thread-safety notes).
+    graph.freeze();
+
     const auto n_threads = bioimage_cpp::detail::normalize_thread_count(
         number_of_threads, n_nodes
     );

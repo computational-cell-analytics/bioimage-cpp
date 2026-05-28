@@ -19,6 +19,20 @@ Algorithm domains live in dedicated submodules:
   (with and without semantic constraints).
 - :mod:`bioimage_cpp.graph.features` — edge-feature accumulation on RAGs and
   grid graphs.
+
+Thread safety
+-------------
+All graph types (:class:`UndirectedGraph`, :class:`GridGraph2D`,
+:class:`GridGraph3D`, :class:`RegionAdjacencyGraph`) build their internal
+adjacency representation *lazily*, on the first call that reads it. The
+built-in multi-threaded algorithms freeze the graph internally before fanning
+out, so passing a graph straight into them is safe and needs no extra step.
+
+If you build a graph yourself and then share it across **your own** threads
+(reading adjacency, running a BFS, etc. concurrently), call ``graph.freeze()``
+once on the construction thread first: the lazy build is not thread-safe, and
+racing the first read across threads corrupts the adjacency. ``freeze()`` is a
+no-op on an already-built graph.
 """
 
 from __future__ import annotations
@@ -46,6 +60,11 @@ class UndirectedGraph(_core.UndirectedGraph):
     ``0 .. number_of_nodes - 1``. Edges are inserted lazily and receive
     consecutive ids in insertion order. Re-inserting an existing undirected edge
     returns the existing edge id.
+
+    The adjacency representation is built lazily on first use. Before sharing a
+    freshly built graph across threads of your own, call :meth:`freeze` once on
+    the construction thread — see the module-level "Thread safety" note. The
+    built-in multi-threaded algorithms already freeze internally.
     """
 
     def insert_edges(self, uvs):
