@@ -77,6 +77,13 @@ public:
             return objective.labels();
         }
 
+        // Proposal generators may read graph.node_adjacency() concurrently in the
+        // stage-1 parallel region (the greedy-additive generator does, via
+        // DynamicGraph::reset). The lazy CSR rebuild is not thread-safe, and the
+        // warm-start below only freezes the graph for a singleton initial labeling,
+        // so freeze on this thread before fan-out. See UndirectedGraph thread-safety.
+        graph.freeze();
+
         // One workspace per worker thread; reused across the warm-start, every
         // pairwise fuse, and the stage-2 joint fuse.
         const auto effective_threads = ::bioimage_cpp::detail::normalize_thread_count(

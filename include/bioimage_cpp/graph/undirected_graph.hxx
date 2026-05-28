@@ -37,12 +37,22 @@ struct Adjacency {
 // `rebuild_adjacency_from_edges()` explicitly, which keeps reads cheap and
 // thread-safe.
 //
-// Thread safety: as long as a graph is "frozen" before being shared with
-// reader threads (no concurrent inserts, no first-read-from-dirty-state
-// race), reads of `node_adjacency` are safe to share across threads. The
-// lazy rebuild is not internally synchronized — call
-// `rebuild_adjacency_from_edges()` once on the construction thread before
-// fan-out if you built the graph via `insert_edge*`.
+// Thread safety: the lazy rebuild is not internally synchronized. If two
+// threads each take the first `node_adjacency` read on a still-dirty graph
+// they race on the rebuild — concurrently reallocating `adjacency_data_` and
+// overwriting `adjacency_offsets_` — which corrupts the CSR (garbage neighbor
+// ids, out-of-bounds reads) and intermittently segfaults. The rule:
+//
+//   Any algorithm that reads `node_adjacency` (directly, or via
+//   `breadth_first_search`, `extract_subgraph_from_nodes`, or a sub-solver
+//   such as `multicut::greedy_additive`'s `DynamicGraph::reset`) from
+//   `parallel_for_chunks` or other threads MUST `freeze()` the graph on the
+//   calling thread *before* the fan-out.
+//
+// Once frozen (or built via `from_sorted_unique_edges`, which rebuilds the CSR
+// eagerly), the graph has no mutable read path and is safe to share by
+// `const&` across reader threads. Graphs built incrementally via `insert_edge*`
+// (including the `from_edges` binding and `region_adjacency_graph`) start dirty.
 class UndirectedGraph {
 public:
     using NodeId = std::uint64_t;
@@ -139,6 +149,10 @@ public:
         return edges_;
     }
 
+    // Adjacency slice of `node`. The first call on a dirty graph triggers a
+    // non-thread-safe lazy CSR rebuild (mutable write through this `const`
+    // method); call `freeze()` on the construction thread before sharing the
+    // graph with concurrent readers. See the class-level thread-safety note.
     [[nodiscard]] AdjacencyList node_adjacency(const NodeId node) const {
         validate_node(node);
         ensure_adjacency_built();

@@ -60,6 +60,32 @@ new fusion-move / proposal-based / contraction-based solver:
 - `detail/threading.hxx::parallel_for_chunks` — the only threading primitive
   we use. New parallel solvers should not introduce alternatives.
 
+### Freeze graphs before parallel fan-out (thread-safety contract)
+
+`UndirectedGraph` (and its subclasses) build the CSR adjacency *lazily*: the
+first `node_adjacency` read on a graph built incrementally rebuilds it through
+a `mutable` write inside a `const` method, and that rebuild is **not
+thread-safe**. Graphs are "dirty" (not yet built) after `insert_edge`-based
+construction — this includes the `from_edges` binding, `region_adjacency_graph`,
+and `GridGraph` (which defers the build on purpose). `from_sorted_unique_edges`
+returns an already-frozen graph.
+
+Rule: **any algorithm that reads `node_adjacency` from `parallel_for_chunks`
+(or other threads) MUST call `graph.freeze()` on the calling thread before the
+fan-out.** "Reads `node_adjacency`" includes the indirect readers
+`breadth_first_search`, `extract_subgraph_from_nodes`, and the multicut
+sub-solver `greedy_additive` (via `DynamicGraph::reset`, which sizes per-node
+adjacency from `graph.node_adjacency(node)`). Edge-only iteration
+(`uv`, `uv_ids`, `number_of_edges`) and `find_edge` (edge-lookup hashmap) do
+*not* trigger the rebuild and need no freeze. Symptoms when this is missed:
+nondeterministic results for fixed input and intermittent segfaults.
+
+Canonical fixed call sites that already follow this (copy the pattern):
+`lifted_multicut/lifted_from_node_labels.hxx` and both
+`{multicut,lifted_multicut}/fusion_move.hxx::FusionMoveSolver::optimize`
+(the lifted driver freezes the *base* graph — its proposal generators read base
+adjacency, while its warm-start only touches the lifted graph).
+
 When porting fusion moves to a new objective (e.g. lifted multicut):
 
 1. The driver loop in `multicut/fusion_move.hxx::FusionMoveSolver::optimize`

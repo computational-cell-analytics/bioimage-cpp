@@ -309,3 +309,47 @@ def test_fusion_move_default_parallel_proposals_tracks_threads():
     )
     assert one_thread.number_of_parallel_proposals == 2
     assert four_threads.number_of_parallel_proposals == 4
+
+
+def test_greedy_proposals_parallel_is_deterministic_on_dirty_base_graph():
+    # Regression guard for the lazy-CSR-adjacency data race on the *base* graph.
+    # The greedy-additive proposal generator reads base_graph.node_adjacency()
+    # (via DynamicGraph::reset); with T>1 the parallel proposal slots used to
+    # race on the first rebuild of a not-yet-frozen base graph. Unlike the
+    # multicut driver, here the singleton warm-start only freezes the *lifted*
+    # graph, so the race is reachable from the default start. The solver now
+    # freezes the base graph before fan-out; the multi-threaded result must equal
+    # the single-threaded reference on every run.
+    #
+    # Note: a regression here can surface as a process crash (it is a data race),
+    # not just a value mismatch.
+    n = 2000
+    base_edges = np.array([[i, i + 1] for i in range(n - 1)], dtype=np.uint64)
+    base_costs = np.array(
+        [1.0 if i % 3 else -2.0 for i in range(n - 1)], dtype=np.float64
+    )
+    # A handful of lifted edges keeps the lifted graph small (fast warm-start)
+    # while the large base graph drives the parallel proposal generation.
+    lifted_uvs = np.array(
+        [[i, i + 5] for i in range(0, n - 5, 250)], dtype=np.uint64
+    )
+    lifted_costs = np.array([-3.0] * len(lifted_uvs), dtype=np.float64)
+    parallel_proposals = 4
+
+    def run(threads):
+        # Fresh base graph per run so each multi-threaded run starts dirty.
+        base = bic.graph.UndirectedGraph.from_edges(n, base_edges)
+        objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
+            base, base_costs, lifted_uvs=lifted_uvs, lifted_costs=lifted_costs
+        )
+        solver = bic.graph.lifted_multicut.FusionMoveLiftedMulticut(
+            proposal_generator=bic.graph.lifted_multicut.GreedyAdditiveProposalGenerator(seed=0),
+            number_of_threads=threads,
+            number_of_parallel_proposals=parallel_proposals,
+            number_of_iterations=3,
+        )
+        return solver.optimize(objective)
+
+    reference = run(1)
+    for _ in range(15):
+        np.testing.assert_array_equal(run(4), reference)

@@ -265,3 +265,42 @@ def test_runs_on_graph_without_negative_edges(chain_problem):
     labels = solver.optimize(objective)
     # All-positive costs → no cut.
     assert np.all(edge_cut_labels(graph, labels) == False)  # noqa: E712
+
+
+def test_greedy_proposals_parallel_is_deterministic_on_dirty_graph():
+    # Smoke-test the parallel greedy-additive-proposal path on a dirty graph
+    # with a non-singleton initial labeling (which skips the calling-thread
+    # warm-start that would otherwise freeze the graph). The lazy CSR rebuild
+    # is not thread-safe; the solver now freezes the graph before fan-out, so
+    # the multi-threaded result must equal the single-threaded reference on
+    # every run.
+    #
+    # Note: the multicut race is hard to trigger deterministically from Python
+    # (the calling thread typically wins the rebuild before OS-spawned worker
+    # threads attach for graphs of test-friendly size). The structurally
+    # identical race in the lifted-multicut twin
+    # (test_greedy_proposals_parallel_is_deterministic_on_dirty_base_graph) is
+    # the primary race detector and reliably segfaults without the fix.
+    n = 5000
+    edges = np.array([[i, i + 1] for i in range(n - 1)], dtype=np.uint64)
+    costs = np.array([1.0 if i % 3 else -2.0 for i in range(n - 1)], dtype=np.float64)
+    parallel_proposals = 4
+
+    def run(threads):
+        # Fresh graph per run so each multi-threaded run starts from a dirty
+        # (not-yet-built) adjacency, the state that triggers the race.
+        graph = bic.graph.UndirectedGraph.from_edges(n, edges)
+        objective = bic.graph.multicut.MulticutObjective(
+            graph, costs, initial_labels=np.zeros(n, dtype=np.uint64)
+        )
+        solver = bic.graph.multicut.FusionMoveMulticut(
+            proposal_generator=bic.graph.multicut.GreedyAdditiveProposalGenerator(seed=0),
+            number_of_threads=threads,
+            number_of_parallel_proposals=parallel_proposals,
+            number_of_iterations=3,
+        )
+        return solver.optimize(objective)
+
+    reference = run(1)
+    for _ in range(25):
+        np.testing.assert_array_equal(run(4), reference)
