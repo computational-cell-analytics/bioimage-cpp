@@ -899,6 +899,18 @@ Important differences:
   `grid_affinity_features_with_lifted(...)`, which returns local graph weights
   plus explicit long-range `uv_ids` and weights for lifted multicut or mutex
   watershed style workflows.
+- Nifty's `projectEdgeIdsToPixels` and `projectEdgeIdsToPixelsWithOffsets` map
+  to `graph.project_edge_ids_to_pixels()` and
+  `graph.project_edge_ids_to_pixels_with_offsets(offsets, *, strides=None, mask=None)`
+  on `GridGraph2D` / `GridGraph3D`. The basic form returns an `int64` array of
+  shape `(ndim, *graph.shape)` with each grid edge id written at its pivot
+  pixel and `-1` elsewhere. The offsets form returns
+  `(array, n_valid)`: an `int64` array of shape `(len(offsets), *graph.shape)`
+  whose non-`-1` entries are a sequential counter over the in-bounds (and
+  filter-accepted) targets, plus the total count. `strides` keeps only coords
+  aligned along every axis; `mask` keeps only coords where a boolean array
+  of shape `(len(offsets), *graph.shape)` is true. Like in nifty, `strides`
+  and `mask` are mutually exclusive — passing both raises `ValueError`.
 - The three grid feature functions preserve `float32` and `float64` input
   dtype end-to-end (no internal copy to `float64`); other dtypes are
   promoted to `float64`. Output weight arrays match the input dtype.

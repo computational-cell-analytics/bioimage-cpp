@@ -172,6 +172,139 @@ def test_grid_graph_freeze_is_idempotent_and_safe_to_call_repeatedly():
     assert _adjacency_pairs(graph.node_adjacency(4)) == {(1, 1), (7, 4), (3, 8), (5, 9)}
 
 
+def _bounds_ok(coord, offset, shape):
+    return all(0 <= coord[d] + offset[d] < shape[d] for d in range(len(shape)))
+
+
+def test_project_edge_ids_to_pixels_2d_writes_each_edge_at_its_pivot():
+    graph = bic.graph.GridGraph2D((2, 3))
+    out = graph.project_edge_ids_to_pixels()
+
+    assert out.shape == (2, 2, 3)
+    assert out.dtype == np.int64
+    # Exactly graph.number_of_edges valid entries; the rest stay -1.
+    assert int((out != -1).sum()) == graph.number_of_edges
+    # Every edge id appears exactly once, at the slot
+    # (edge_axis, *edge_coordinates(edge)).
+    for edge in range(graph.number_of_edges):
+        axis = graph.edge_axis(edge)
+        pivot = tuple(int(c) for c in graph.edge_coordinates(edge))
+        assert out[(axis,) + pivot] == edge
+    # Slots on the "missing" row/column for each spanning axis stay -1.
+    np.testing.assert_array_equal(out[0, 1, :], -1)
+    np.testing.assert_array_equal(out[1, :, 2], -1)
+
+
+def test_project_edge_ids_to_pixels_3d_round_trip_through_edge_coordinates():
+    graph = bic.graph.GridGraph3D((2, 2, 2))
+    out = graph.project_edge_ids_to_pixels()
+
+    assert out.shape == (3, 2, 2, 2)
+    assert int((out != -1).sum()) == graph.number_of_edges
+    for edge in range(graph.number_of_edges):
+        axis = graph.edge_axis(edge)
+        pivot = tuple(int(c) for c in graph.edge_coordinates(edge))
+        assert out[(axis,) + pivot] == edge
+
+
+def test_project_edge_ids_to_pixels_with_offsets_2d_numbers_in_bounds_targets():
+    graph = bic.graph.GridGraph2D((2, 3))
+    offsets = [(1, 0), (0, 1), (2, 0), (0, -1)]
+    out, n_valid = graph.project_edge_ids_to_pixels_with_offsets(offsets)
+
+    assert out.shape == (4, 2, 3)
+    assert out.dtype == np.int64
+
+    # Walk (off_idx, *coord) in C-order, predict counter, compare to output.
+    expected = np.full((4, 2, 3), -1, dtype=np.int64)
+    counter = 0
+    for off_idx, offset in enumerate(offsets):
+        for r in range(2):
+            for c in range(3):
+                if _bounds_ok((r, c), offset, (2, 3)):
+                    expected[off_idx, r, c] = counter
+                    counter += 1
+    np.testing.assert_array_equal(out, expected)
+    assert n_valid == counter
+    # Offset (2, 0) on a height-2 grid is never in bounds.
+    np.testing.assert_array_equal(out[2], -1)
+
+
+def test_project_edge_ids_to_pixels_with_offsets_3d_long_range_offset_partially_out_of_bounds():
+    graph = bic.graph.GridGraph3D((3, 2, 2))
+    offsets = [(2, 0, 0), (0, 1, 0)]
+    out, n_valid = graph.project_edge_ids_to_pixels_with_offsets(offsets)
+
+    assert out.shape == (2, 3, 2, 2)
+    # Offset (2, 0, 0): valid only when z + 2 < 3, i.e. z == 0 — that's 4 entries.
+    # Offset (0, 1, 0): valid when y + 1 < 2, i.e. y == 0 — that's 3 * 1 * 2 = 6 entries.
+    assert n_valid == 4 + 6
+    # Sequential numbering: entries in C-order are 0..n_valid-1, rest are -1.
+    valid = out[out != -1]
+    np.testing.assert_array_equal(valid, np.arange(n_valid, dtype=np.int64))
+
+
+def test_project_edge_ids_to_pixels_with_offsets_strides_filter_keeps_aligned_coords():
+    graph = bic.graph.GridGraph2D((4, 4))
+    offsets = [(1, 0), (0, 1)]
+    out, n_valid = graph.project_edge_ids_to_pixels_with_offsets(
+        offsets, strides=(2, 2)
+    )
+
+    # Strides (2, 2) keep only (r, c) with r%2 == c%2 == 0: (0,0), (0,2),
+    # (2,0), (2,2). All four are in bounds for both offsets — 8 entries.
+    assert n_valid == 8
+    valid = out[out != -1]
+    np.testing.assert_array_equal(valid, np.arange(8, dtype=np.int64))
+    # Non-aligned coords are -1.
+    for r in range(4):
+        for c in range(4):
+            if r % 2 != 0 or c % 2 != 0:
+                assert out[0, r, c] == -1
+                assert out[1, r, c] == -1
+
+
+def test_project_edge_ids_to_pixels_with_offsets_mask_filter_keeps_true_positions():
+    graph = bic.graph.GridGraph2D((2, 3))
+    offsets = [(1, 0), (0, 1)]
+    mask = np.zeros((2, 2, 3), dtype=bool)
+    mask[0, 0, 1] = True  # (off=0, coord=(0,1)) — target (1,1) in bounds
+    mask[1, 1, 0] = True  # (off=1, coord=(1,0)) — target (1,1) in bounds
+    mask[1, 0, 2] = True  # (off=1, coord=(0,2)) — target (0,3) OUT OF BOUNDS
+    out, n_valid = graph.project_edge_ids_to_pixels_with_offsets(
+        offsets, mask=mask
+    )
+
+    # The out-of-bounds entry is suppressed even though the mask says true.
+    assert n_valid == 2
+    expected = np.full((2, 2, 3), -1, dtype=np.int64)
+    expected[0, 0, 1] = 0
+    expected[1, 1, 0] = 1
+    np.testing.assert_array_equal(out, expected)
+
+
+def test_project_edge_ids_to_pixels_with_offsets_rejects_strides_and_mask_together():
+    graph = bic.graph.GridGraph2D((2, 3))
+    mask = np.zeros((1, 2, 3), dtype=bool)
+    with pytest.raises(ValueError, match="strides and mask"):
+        graph.project_edge_ids_to_pixels_with_offsets(
+            [(1, 0)], strides=(1, 1), mask=mask
+        )
+
+
+def test_project_edge_ids_to_pixels_with_offsets_validates_shapes():
+    graph = bic.graph.GridGraph2D((2, 3))
+    with pytest.raises(ValueError, match=r"offsets\[0\] must have length 2"):
+        graph.project_edge_ids_to_pixels_with_offsets([(1, 0, 0)])
+    with pytest.raises(ValueError, match="strides must have length 2"):
+        graph.project_edge_ids_to_pixels_with_offsets([(1, 0)], strides=(1,))
+    with pytest.raises(ValueError, match="strides must be positive"):
+        graph.project_edge_ids_to_pixels_with_offsets([(1, 0)], strides=(0, 1))
+    with pytest.raises(ValueError, match="mask shape must be"):
+        bad_mask = np.zeros((1, 2, 4), dtype=bool)
+        graph.project_edge_ids_to_pixels_with_offsets([(1, 0)], mask=bad_mask)
+
+
 def test_grid_graph_rejects_invalid_shapes_and_coordinates():
     with pytest.raises(ValueError, match="length 2"):
         bic.graph.GridGraph2D((2, 3, 4))
