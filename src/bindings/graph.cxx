@@ -5,6 +5,7 @@
 #include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/edge_weighted_watershed.hxx"
 #include "bioimage_cpp/graph/feature_accumulation.hxx"
+#include "bioimage_cpp/graph/grid_edge_projection.hxx"
 #include "bioimage_cpp/graph/grid_features.hxx"
 #include "bioimage_cpp/graph/grid_graph.hxx"
 #include "bioimage_cpp/graph/label_accumulation.hxx"
@@ -277,6 +278,120 @@ std::int64_t grid_offset_target(
         return -1;
     }
     return static_cast<std::int64_t>(target);
+}
+
+template <std::size_t D>
+Int64Array grid_project_edge_ids_to_pixels(const graph::GridGraph<D> &graph) {
+    const auto &shape = graph.shape();
+    std::vector<std::size_t> out_shape(D + 1);
+    out_shape[0] = D;
+    for (std::size_t d = 0; d < D; ++d) {
+        out_shape[d + 1] = shape[d];
+    }
+    auto result = make_int64_array(out_shape);
+
+    std::size_t total = 1;
+    for (const auto axis_size : out_shape) {
+        total *= axis_size;
+    }
+    auto *data = result.data();
+    std::fill(data, data + total, static_cast<std::int64_t>(-1));
+
+    std::vector<std::ptrdiff_t> view_shape(out_shape.size());
+    for (std::size_t i = 0; i < out_shape.size(); ++i) {
+        view_shape[i] = static_cast<std::ptrdiff_t>(out_shape[i]);
+    }
+    ArrayView<std::int64_t> view{data, view_shape, {}};
+
+    {
+        nb::gil_scoped_release release;
+        graph::project_edge_ids_to_pixels<D>(graph, view);
+    }
+    return result;
+}
+
+template <std::size_t D>
+nb::tuple grid_project_edge_ids_to_pixels_with_offsets(
+    const graph::GridGraph<D> &graph,
+    const std::vector<std::vector<std::ptrdiff_t>> &offsets,
+    const std::optional<std::vector<std::ptrdiff_t>> &strides,
+    const std::optional<ConstUInt8Array> &mask
+) {
+    if (strides.has_value() && mask.has_value()) {
+        throw std::invalid_argument("strides and mask cannot be given together");
+    }
+
+    std::vector<std::array<std::ptrdiff_t, D>> off_arr(offsets.size());
+    for (std::size_t i = 0; i < offsets.size(); ++i) {
+        if (offsets[i].size() != D) {
+            throw std::invalid_argument(
+                "each offset must have length matching graph ndim"
+            );
+        }
+        for (std::size_t d = 0; d < D; ++d) {
+            off_arr[i][d] = offsets[i][d];
+        }
+    }
+
+    const auto &shape = graph.shape();
+    std::vector<std::size_t> out_shape(D + 1);
+    out_shape[0] = offsets.size();
+    for (std::size_t d = 0; d < D; ++d) {
+        out_shape[d + 1] = shape[d];
+    }
+    auto result = make_int64_array(out_shape);
+
+    std::vector<std::ptrdiff_t> view_shape(out_shape.size());
+    for (std::size_t i = 0; i < out_shape.size(); ++i) {
+        view_shape[i] = static_cast<std::ptrdiff_t>(out_shape[i]);
+    }
+    ArrayView<std::int64_t> view{result.data(), view_shape, {}};
+
+    std::uint64_t n_valid = 0;
+    if (strides.has_value()) {
+        if (strides->size() != D) {
+            throw std::invalid_argument(
+                "strides must have length matching graph ndim"
+            );
+        }
+        std::array<std::ptrdiff_t, D> stride_arr{};
+        for (std::size_t d = 0; d < D; ++d) {
+            stride_arr[d] = (*strides)[d];
+        }
+        nb::gil_scoped_release release;
+        n_valid = graph::project_edge_ids_to_pixels_with_offsets<D>(
+            graph, off_arr, stride_arr, view
+        );
+    } else if (mask.has_value()) {
+        const auto &m = *mask;
+        if (m.ndim() != D + 1 || m.shape(0) != offsets.size()) {
+            throw std::invalid_argument(
+                "mask shape must be (n_offsets, *graph.shape)"
+            );
+        }
+        for (std::size_t d = 0; d < D; ++d) {
+            if (m.shape(d + 1) != shape[d]) {
+                throw std::invalid_argument(
+                    "mask shape must be (n_offsets, *graph.shape)"
+                );
+            }
+        }
+        std::vector<std::ptrdiff_t> mask_shape(m.ndim());
+        for (std::size_t i = 0; i < m.ndim(); ++i) {
+            mask_shape[i] = static_cast<std::ptrdiff_t>(m.shape(i));
+        }
+        ConstArrayView<std::uint8_t> mview{m.data(), mask_shape, {}};
+        nb::gil_scoped_release release;
+        n_valid = graph::project_edge_ids_to_pixels_with_offsets<D>(
+            graph, off_arr, mview, view
+        );
+    } else {
+        nb::gil_scoped_release release;
+        n_valid = graph::project_edge_ids_to_pixels_with_offsets<D>(
+            graph, off_arr, view
+        );
+    }
+    return nb::make_tuple(result, n_valid);
 }
 
 template <class T, std::size_t D>
@@ -1654,6 +1769,14 @@ void bind_graph(nb::module_ &m) {
         .def("edge_axis", &GridGraph2D::edge_axis, nb::arg("edge"))
         .def("edge_coordinates", &grid_edge_coordinates<2>, nb::arg("edge"))
         .def("offset_target", &grid_offset_target<2>, nb::arg("node"), nb::arg("offset"))
+        .def("project_edge_ids_to_pixels", &grid_project_edge_ids_to_pixels<2>)
+        .def(
+            "project_edge_ids_to_pixels_with_offsets",
+            &grid_project_edge_ids_to_pixels_with_offsets<2>,
+            nb::arg("offsets"),
+            nb::arg("strides") = std::nullopt,
+            nb::arg("mask") = std::nullopt
+        )
         .def_prop_ro("numberOfDimensions", &GridGraph2D::ndim)
         .def("nodeId", &grid_node_id<2>, nb::arg("coordinate"))
         .def("edgeAxis", &GridGraph2D::edge_axis, nb::arg("edge"))
@@ -1670,6 +1793,14 @@ void bind_graph(nb::module_ &m) {
         .def("edge_axis", &GridGraph3D::edge_axis, nb::arg("edge"))
         .def("edge_coordinates", &grid_edge_coordinates<3>, nb::arg("edge"))
         .def("offset_target", &grid_offset_target<3>, nb::arg("node"), nb::arg("offset"))
+        .def("project_edge_ids_to_pixels", &grid_project_edge_ids_to_pixels<3>)
+        .def(
+            "project_edge_ids_to_pixels_with_offsets",
+            &grid_project_edge_ids_to_pixels_with_offsets<3>,
+            nb::arg("offsets"),
+            nb::arg("strides") = std::nullopt,
+            nb::arg("mask") = std::nullopt
+        )
         .def_prop_ro("numberOfDimensions", &GridGraph3D::ndim)
         .def("nodeId", &grid_node_id<3>, nb::arg("coordinate"))
         .def("edgeAxis", &GridGraph3D::edge_axis, nb::arg("edge"))

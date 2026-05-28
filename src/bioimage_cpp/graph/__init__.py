@@ -106,6 +106,39 @@ class UndirectedGraph(_core.UndirectedGraph):
         return cls.from_edges(number_of_nodes, uvs)
 
 
+def _normalize_projection_offsets(offsets, ndim: int) -> list[list[int]]:
+    normalized: list[list[int]] = []
+    for index, offset in enumerate(offsets):
+        values = [int(v) for v in offset]
+        if len(values) != ndim:
+            raise ValueError(
+                f"offsets[{index}] must have length {ndim}, got length={len(values)}"
+            )
+        normalized.append(values)
+    return normalized
+
+
+def _normalize_projection_strides(strides, ndim: int) -> list[int]:
+    values = [int(v) for v in strides]
+    if len(values) != ndim:
+        raise ValueError(
+            f"strides must have length {ndim}, got length={len(values)}"
+        )
+    if any(v <= 0 for v in values):
+        raise ValueError("strides must be positive")
+    return values
+
+
+def _normalize_projection_mask(mask, n_offsets: int, shape: tuple[int, ...]) -> np.ndarray:
+    array = np.asarray(mask)
+    expected = (n_offsets, *shape)
+    if array.shape != expected:
+        raise ValueError(
+            f"mask shape must be {expected}, got shape={array.shape}"
+        )
+    return np.ascontiguousarray(array.astype(np.uint8, copy=False))
+
+
 class GridGraph2D(_core.GridGraph2D):
     """Regular 2D nearest-neighbor grid graph.
 
@@ -127,6 +160,54 @@ class GridGraph2D(_core.GridGraph2D):
 
     def offsetTarget(self, node: int, offset):
         return self.offset_target(node, offset)
+
+    def project_edge_ids_to_pixels(self) -> np.ndarray:
+        """Project edge ids onto a per-pixel array of shape ``(2, *shape)``.
+
+        Returns an ``int64`` array initialised to ``-1``. For every grid edge
+        with spanning axis ``d`` and pivot (smaller-endpoint) coordinate
+        ``c``, sets ``out[d, *c] = edge_id``. Slots where the pivot lies at
+        the last index of axis ``d`` remain ``-1``.
+        """
+        return super().project_edge_ids_to_pixels()
+
+    def project_edge_ids_to_pixels_with_offsets(
+        self,
+        offsets,
+        *,
+        strides=None,
+        mask=None,
+    ) -> tuple[np.ndarray, int]:
+        """Enumerate lifted edges defined by per-channel ``offsets``.
+
+        Walks ``(offset_idx, *coord)`` in C-order over
+        ``(len(offsets), *shape)``. For every coord whose target
+        ``coord + offsets[offset_idx]`` is in bounds (and survives the
+        optional ``strides`` or ``mask`` filter), writes a sequential
+        counter starting at 0; rejected slots get ``-1``.
+
+        ``strides`` and ``mask`` are mutually exclusive. ``strides`` keeps
+        only coords where every ``coord[d] % strides[d] == 0``; ``mask``
+        keeps only coords where ``mask[offset_idx, *coord]`` is true.
+
+        Returns ``(array, n_valid)`` — the ``int64`` array and the total
+        number of valid entries written. The counter is **not** a graph
+        edge id; it indexes into the implicit array of lifted edges.
+        """
+        if strides is not None and mask is not None:
+            raise ValueError("strides and mask cannot be given together")
+        offsets = _normalize_projection_offsets(offsets, 2)
+        normalized_strides = (
+            None if strides is None else _normalize_projection_strides(strides, 2)
+        )
+        normalized_mask = (
+            None
+            if mask is None
+            else _normalize_projection_mask(mask, len(offsets), tuple(self.shape))
+        )
+        return super().project_edge_ids_to_pixels_with_offsets(
+            offsets, normalized_strides, normalized_mask
+        )
 
 
 class GridGraph3D(_core.GridGraph3D):
@@ -150,6 +231,42 @@ class GridGraph3D(_core.GridGraph3D):
 
     def offsetTarget(self, node: int, offset):
         return self.offset_target(node, offset)
+
+    def project_edge_ids_to_pixels(self) -> np.ndarray:
+        """Project edge ids onto a per-pixel array of shape ``(3, *shape)``.
+
+        See :meth:`GridGraph2D.project_edge_ids_to_pixels` for the
+        semantics; the only difference is the leading dimension matches the
+        graph rank.
+        """
+        return super().project_edge_ids_to_pixels()
+
+    def project_edge_ids_to_pixels_with_offsets(
+        self,
+        offsets,
+        *,
+        strides=None,
+        mask=None,
+    ) -> tuple[np.ndarray, int]:
+        """Enumerate lifted edges defined by per-channel ``offsets``.
+
+        See :meth:`GridGraph2D.project_edge_ids_to_pixels_with_offsets` for
+        the semantics; the only difference is the input shape.
+        """
+        if strides is not None and mask is not None:
+            raise ValueError("strides and mask cannot be given together")
+        offsets = _normalize_projection_offsets(offsets, 3)
+        normalized_strides = (
+            None if strides is None else _normalize_projection_strides(strides, 3)
+        )
+        normalized_mask = (
+            None
+            if mask is None
+            else _normalize_projection_mask(mask, len(offsets), tuple(self.shape))
+        )
+        return super().project_edge_ids_to_pixels_with_offsets(
+            offsets, normalized_strides, normalized_mask
+        )
 
 
 RegionAdjacencyGraph = _core.RegionAdjacencyGraph
