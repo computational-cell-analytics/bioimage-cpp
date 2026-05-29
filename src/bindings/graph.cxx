@@ -24,6 +24,7 @@
 #include "bioimage_cpp/graph/proposal_generator.hxx"
 #include "bioimage_cpp/graph/proposal_generators/greedy_additive_multicut.hxx"
 #include "bioimage_cpp/graph/proposal_generators/watershed.hxx"
+#include "bioimage_cpp/graph/rag_coordinates.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
@@ -1337,6 +1338,75 @@ Rag region_adjacency_graph_t(
 }
 
 template <class T>
+graph::RagCoordinates rag_coordinates_t(
+    const Rag &rag,
+    LabelArray<T> labels,
+    const std::size_t number_of_threads
+) {
+    std::vector<std::ptrdiff_t> shape(labels.ndim());
+    for (std::size_t axis = 0; axis < labels.ndim(); ++axis) {
+        shape[axis] = static_cast<std::ptrdiff_t>(labels.shape(axis));
+    }
+
+    ConstArrayView<T> labels_view{
+        labels.data(),
+        shape,
+        {},
+    };
+
+    nb::gil_scoped_release release;
+    return graph::RagCoordinates(rag, labels_view, number_of_threads);
+}
+
+UInt64Array rag_coordinates_storage_lengths(const graph::RagCoordinates &coords) {
+    return vector_to_uint64_array(coords.storage_lengths());
+}
+
+UInt64Array rag_coordinates_edge_coordinates(
+    const graph::RagCoordinates &coords,
+    const std::uint64_t edge,
+    const int edge_direction
+) {
+    const auto flat = coords.edge_coordinates(edge, edge_direction);
+    const auto ndim = coords.ndim();
+    const std::size_t n_points = ndim == 0 ? 0 : flat.size() / ndim;
+    auto result = make_uint64_array({n_points, ndim});
+    std::copy(flat.begin(), flat.end(), result.data());
+    return result;
+}
+
+template <class V>
+TypedArray<V> rag_coordinates_edges_to_volume(
+    const graph::RagCoordinates &coords,
+    ConstFloatingArray<V> edge_values,
+    const int edge_direction,
+    const V ignore_value
+) {
+    if (edge_values.ndim() != 1) {
+        throw std::invalid_argument("edge_values must be a 1D array");
+    }
+    std::vector<V> values(
+        edge_values.data(), edge_values.data() + edge_values.shape(0)
+    );
+
+    const auto &shape = coords.shape();
+    std::vector<std::size_t> out_shape(shape.size());
+    std::vector<std::ptrdiff_t> view_shape(shape.size());
+    for (std::size_t axis = 0; axis < shape.size(); ++axis) {
+        out_shape[axis] = static_cast<std::size_t>(shape[axis]);
+        view_shape[axis] = static_cast<std::ptrdiff_t>(shape[axis]);
+    }
+    auto result = make_typed_array<V>(out_shape);
+    ArrayView<V> view{result.data(), view_shape, {}};
+
+    {
+        nb::gil_scoped_release release;
+        coords.edges_to_volume(values, view, edge_direction, ignore_value);
+    }
+    return result;
+}
+
+template <class T>
 std::vector<std::ptrdiff_t> ndarray_shape(LabelArray<T> array) {
     std::vector<std::ptrdiff_t> shape(array.ndim());
     for (std::size_t axis = 0; axis < array.ndim(); ++axis) {
@@ -1810,6 +1880,46 @@ void bind_graph(nb::module_ &m) {
     nb::class_<Rag, Graph>(m, "RegionAdjacencyGraph")
         .def_prop_ro("shape", &Rag::shape);
 
+    nb::class_<graph::RagCoordinates>(m, "RagCoordinates")
+        .def_prop_ro("ndim", &graph::RagCoordinates::ndim)
+        .def_prop_ro("shape", &graph::RagCoordinates::shape)
+        .def_prop_ro("number_of_edges", &graph::RagCoordinates::number_of_edges)
+        .def("storage_lengths", &rag_coordinates_storage_lengths)
+        .def(
+            "edge_coordinates",
+            &rag_coordinates_edge_coordinates,
+            nb::arg("edge"),
+            nb::arg("edge_direction")
+        )
+        .def(
+            "_edges_to_volume_float32",
+            &rag_coordinates_edges_to_volume<float>,
+            nb::arg("edge_values"),
+            nb::arg("edge_direction"),
+            nb::arg("ignore_value")
+        )
+        .def(
+            "_edges_to_volume_float64",
+            &rag_coordinates_edges_to_volume<double>,
+            nb::arg("edge_values"),
+            nb::arg("edge_direction"),
+            nb::arg("ignore_value")
+        )
+        .def(
+            "_edges_to_volume_uint32",
+            &rag_coordinates_edges_to_volume<std::uint32_t>,
+            nb::arg("edge_values"),
+            nb::arg("edge_direction"),
+            nb::arg("ignore_value")
+        )
+        .def(
+            "_edges_to_volume_uint64",
+            &rag_coordinates_edges_to_volume<std::uint64_t>,
+            nb::arg("edge_values"),
+            nb::arg("edge_direction"),
+            nb::arg("ignore_value")
+        );
+
     const auto register_grid_boundary = [&m]<class T, std::size_t D>(const char *name) {
         m.def(
             name,
@@ -2227,6 +2337,39 @@ void bind_graph(nb::module_ &m) {
         nb::arg("labels"),
         nb::arg("number_of_threads"),
         "Build a region adjacency graph for int64 labels."
+    );
+
+    m.def(
+        "_rag_coordinates_uint32",
+        &rag_coordinates_t<std::uint32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("number_of_threads"),
+        "Build RAG edge coordinates for uint32 labels."
+    );
+    m.def(
+        "_rag_coordinates_uint64",
+        &rag_coordinates_t<std::uint64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("number_of_threads"),
+        "Build RAG edge coordinates for uint64 labels."
+    );
+    m.def(
+        "_rag_coordinates_int32",
+        &rag_coordinates_t<std::int32_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("number_of_threads"),
+        "Build RAG edge coordinates for int32 labels."
+    );
+    m.def(
+        "_rag_coordinates_int64",
+        &rag_coordinates_t<std::int64_t>,
+        nb::arg("rag"),
+        nb::arg("labels"),
+        nb::arg("number_of_threads"),
+        "Build RAG edge coordinates for int64 labels."
     );
 
     m.def(

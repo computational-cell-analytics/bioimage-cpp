@@ -1513,6 +1513,56 @@ Notes:
 - `number_of_threads=0` uses the library default; pass a positive integer for a
   fixed thread count.
 
+### Mapping RAG Edges to Pixel Coordinates
+
+Nifty's `ragCoordinates` scans the label volume once and caches, per edge, the
+pixel coordinates of the boundary between the two adjacent regions, so that
+per-edge values (e.g. edge probabilities) can be painted back onto a volume.
+
+Nifty:
+
+```python
+import nifty.graph.rag as nrag
+
+rag = nrag.gridRag(labels)
+rag_coords = nrag.ragCoordinates(rag)
+storage = rag_coords.storageLengths()
+volume = rag_coords.edgesToVolume(edge_values, edgeDirection=0)
+```
+
+bioimage-cpp:
+
+```python
+rag = bic.graph.region_adjacency_graph(labels)
+rag_coords = bic.graph.rag_coordinates(rag, labels)
+
+storage = rag_coords.storage_lengths()
+coords = rag_coords.edge_coordinates(edge_id)          # (n_points, ndim)
+volume = rag_coords.edges_to_volume(edge_values, edge_direction=0)
+```
+
+Notes:
+
+- `labels` must be the over-segmentation used to construct `rag`, and is passed
+  explicitly (nifty's RAG holds an internal reference to it; ours does not).
+  Supported label dtypes: `uint32`, `uint64`, `int32`, `int64`.
+- A boundary "contact" is a pair of directly adjacent pixels with different
+  labels. Each contact contributes two coordinates to its edge: the
+  lower-coordinate pixel followed by its `+axis` neighbor. `storage_lengths`
+  therefore reports `2 * n_contacts` per edge, and coordinates are stored in
+  scan order (NumPy axis order, C-contiguous).
+- `edge_direction` selects which side(s) to report / paint: `0` = both (default),
+  `1` = lower-coordinate pixel only, `2` = higher-coordinate pixel only.
+- `edges_to_volume` returns a volume of the label shape and dtype matching
+  `edge_values` (supported: `float32`, `float64`, `uint32`, `uint64`).
+  Non-boundary pixels are set to `ignore_value`. Painting is sequential in
+  ascending edge id, so where several edges' boundaries coincide on a pixel the
+  highest edge id wins — a deterministic, race-free rule (nifty's parallel
+  `edgesToVolume` does not guarantee a tie-break order).
+- The cached object can be reused across many `edges_to_volume` calls without
+  re-scanning the labels. `number_of_threads=0` (on `rag_coordinates`) uses the
+  library default.
+
 ### Accumulating Labels on a RAG
 
 Nifty's `gridRagAccumulateLabels` projects a second label volume onto a RAG

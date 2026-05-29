@@ -272,6 +272,94 @@ class GridGraph3D(_core.GridGraph3D):
 RegionAdjacencyGraph = _core.RegionAdjacencyGraph
 
 
+class RagCoordinates:
+    """Mapping from RAG edges to the pixel coordinates of region boundaries.
+
+    Created via :func:`rag_coordinates`. The label volume is scanned once at
+    construction and the per-edge boundary coordinates are cached, so the same
+    object can be reused across many :meth:`edges_to_volume` calls.
+
+    Each boundary "contact" — a pair of directly adjacent pixels with different
+    labels — contributes two coordinates to its edge: the lower-coordinate pixel
+    and its ``+axis`` neighbor. The ``edge_direction`` argument selects which
+    side(s) are reported: ``0`` = both (default), ``1`` = lower-side only,
+    ``2`` = higher-side only.
+    """
+
+    def __init__(self, core):
+        self._core = core
+
+    @property
+    def ndim(self) -> int:
+        return self._core.ndim
+
+    @property
+    def shape(self):
+        return self._core.shape
+
+    @property
+    def number_of_edges(self) -> int:
+        return self._core.number_of_edges
+
+    def storage_lengths(self) -> np.ndarray:
+        """Number of stored boundary points per edge (``2 * n_contacts``)."""
+        return self._core.storage_lengths()
+
+    def edge_coordinates(self, edge: int, *, edge_direction: int = 0) -> np.ndarray:
+        """Boundary coordinates of one edge as an ``(n_points, ndim)`` array."""
+        if edge_direction not in (0, 1, 2):
+            raise ValueError("edge_direction must be 0, 1, or 2")
+        return self._core.edge_coordinates(int(edge), int(edge_direction))
+
+    def edges_to_volume(
+        self,
+        edge_values,
+        *,
+        edge_direction: int = 0,
+        ignore_value=0,
+    ) -> np.ndarray:
+        """Paint per-edge values onto a volume of the label shape.
+
+        Every pixel is set to ``ignore_value`` and then each selected boundary
+        point receives its edge's value. ``edge_values`` is a 1D array of length
+        ``number_of_edges``; supported dtypes are ``float32``, ``float64``,
+        ``uint32`` and ``uint64``. The returned volume has the same dtype.
+
+        Painting is in ascending edge id, so where several edges' boundaries
+        share a pixel the highest edge id wins (deterministic).
+        """
+        if edge_direction not in (0, 1, 2):
+            raise ValueError("edge_direction must be 0, 1, or 2")
+        values = np.asarray(edge_values)
+        try:
+            method_name = _EDGES_TO_VOLUME_BY_DTYPE[values.dtype]
+        except KeyError as error:
+            supported = ", ".join(str(dtype) for dtype in _EDGES_TO_VOLUME_BY_DTYPE)
+            raise TypeError(
+                f"edge_values must have one of dtypes ({supported}), "
+                f"got dtype={values.dtype}"
+            ) from error
+        if values.ndim != 1:
+            raise ValueError("edge_values must be a 1D array")
+        if values.shape[0] != self.number_of_edges:
+            raise ValueError("edge_values length must match number_of_edges")
+        method = getattr(self._core, method_name)
+        return method(
+            np.ascontiguousarray(values),
+            int(edge_direction),
+            values.dtype.type(ignore_value),
+        )
+
+    def storageLengths(self) -> np.ndarray:
+        return self.storage_lengths()
+
+    def edgeCoordinates(self, edge: int, *, edge_direction: int = 0) -> np.ndarray:
+        return self.edge_coordinates(edge, edge_direction=edge_direction)
+
+    def edgesToVolume(self, edge_values, **kwargs) -> np.ndarray:
+        return self.edges_to_volume(edge_values, **kwargs)
+
+
 def undirected_graph(number_of_nodes: int) -> UndirectedGraph:
     """Create an :class:`UndirectedGraph`."""
     return UndirectedGraph(number_of_nodes)
@@ -307,6 +395,22 @@ _REGION_ADJACENCY_GRAPH_BY_DTYPE = {
     np.dtype("uint64"): _core._region_adjacency_graph_uint64,
     np.dtype("int32"): _core._region_adjacency_graph_int32,
     np.dtype("int64"): _core._region_adjacency_graph_int64,
+}
+
+
+_RAG_COORDINATES_BY_DTYPE = {
+    np.dtype("uint32"): _core._rag_coordinates_uint32,
+    np.dtype("uint64"): _core._rag_coordinates_uint64,
+    np.dtype("int32"): _core._rag_coordinates_int32,
+    np.dtype("int64"): _core._rag_coordinates_int64,
+}
+
+
+_EDGES_TO_VOLUME_BY_DTYPE = {
+    np.dtype("float32"): "_edges_to_volume_float32",
+    np.dtype("float64"): "_edges_to_volume_float64",
+    np.dtype("uint32"): "_edges_to_volume_uint32",
+    np.dtype("uint64"): "_edges_to_volume_uint64",
 }
 
 
@@ -485,6 +589,43 @@ def region_adjacency_graph(
     return run(np.ascontiguousarray(array), number_of_threads)
 
 
+def rag_coordinates(
+    rag: RegionAdjacencyGraph,
+    labels: np.ndarray,
+    *,
+    number_of_threads: int = 0,
+) -> RagCoordinates:
+    """Map RAG edges to the pixel coordinates of the region boundaries.
+
+    Scans ``labels`` (the over-segmentation used to construct ``rag``) once and
+    caches, per edge, the boundary coordinates between the two adjacent regions.
+    The returned :class:`RagCoordinates` exposes :meth:`~RagCoordinates.storage_lengths`,
+    :meth:`~RagCoordinates.edge_coordinates`, and
+    :meth:`~RagCoordinates.edges_to_volume`.
+    """
+    array = np.asarray(labels)
+    if array.ndim not in (2, 3):
+        raise ValueError(f"labels must be a 2D or 3D array, got ndim={array.ndim}")
+    if tuple(int(size) for size in rag.shape) != array.shape:
+        raise ValueError(
+            "rag shape must match labels shape, got "
+            f"rag shape={tuple(rag.shape)}, labels shape={array.shape}"
+        )
+
+    dtype = array.dtype
+    try:
+        run = _RAG_COORDINATES_BY_DTYPE[dtype]
+    except KeyError as error:
+        supported = ", ".join(str(dtype) for dtype in _RAG_COORDINATES_BY_DTYPE)
+        raise TypeError(
+            f"labels must have one of dtypes ({supported}), got dtype={dtype}"
+        ) from error
+
+    number_of_threads = _normalize_number_of_threads(number_of_threads)
+    core = run(rag, np.ascontiguousarray(array), number_of_threads)
+    return RagCoordinates(core)
+
+
 def project_node_labels_to_pixels(
     rag: RegionAdjacencyGraph,
     labels: np.ndarray,
@@ -531,6 +672,7 @@ from . import mutex_watershed  # noqa: E402
 __all__ = [
     "GridGraph2D",
     "GridGraph3D",
+    "RagCoordinates",
     "RegionAdjacencyGraph",
     "UndirectedGraph",
     "agglomeration",
@@ -543,6 +685,7 @@ __all__ = [
     "multicut",
     "mutex_watershed",
     "project_node_labels_to_pixels",
+    "rag_coordinates",
     "region_adjacency_graph",
     "undirected_graph",
 ]
