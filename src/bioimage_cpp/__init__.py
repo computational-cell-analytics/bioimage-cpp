@@ -17,7 +17,21 @@ It is not very thoroughly tested and may contain bugs.
 
 ## Installation
 
-TODO: document once on pip / conda
+The `bioimage_cpp` library is available on PyPI and can be installed via pip:
+```bash
+pip install bioimage-cpp
+```
+
+Additional dependencies for tests / data downloads can be installed via `pip install bioimage-cpp[test]` /  `pip install bioimage-cpp[data]` respectively.
+
+We will make it available on conda-forge as soon as possible.
+
+You can also install this library from source as follows:
+```
+git clone https://github.com/computational-cell-analytics/bioimage-cpp
+cd bioimage-cpp
+pip install -e .
+```
 
 ## Functionality
 
