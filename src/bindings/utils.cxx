@@ -2,12 +2,14 @@
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/mesh_smoothing.hxx"
+#include "bioimage_cpp/run_length.hxx"
 #include "bioimage_cpp/take_dict.hxx"
 
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -151,6 +153,35 @@ std::pair<OutputArray<V>, OutputArray<V>> smooth_mesh_t(
     return {std::move(out_verts), std::move(out_normals)};
 }
 
+template <class T>
+OutputArray<std::int64_t> compute_rle_t(InputArray<T> mask) {
+    std::vector<std::ptrdiff_t> view_shape(mask.ndim());
+    for (std::size_t axis = 0; axis < mask.ndim(); ++axis) {
+        view_shape[axis] = static_cast<std::ptrdiff_t>(mask.shape(axis));
+    }
+
+    ConstArrayView<T> input{
+        mask.data(),
+        view_shape,
+        {},
+    };
+
+    std::vector<std::int64_t> counts;
+    {
+        nb::gil_scoped_release release;
+        counts = compute_rle<T>(input);
+    }
+
+    auto *data = new std::int64_t[counts.size()];
+    std::copy(counts.begin(), counts.end(), data);
+    nb::capsule owner(data, [](void *p) noexcept {
+        delete[] static_cast<std::int64_t *>(p);
+    });
+
+    std::size_t shape[1] = {counts.size()};
+    return OutputArray<std::int64_t>(data, 1, shape, owner);
+}
+
 } // namespace
 
 void bind_utils(nb::module_ &m) {
@@ -202,6 +233,20 @@ void bind_utils(nb::module_ &m) {
         nb::arg("n_threads"),
         "Laplacian smoothing of a triangular mesh with float64 vertices and normals."
     );
+    m.def("_compute_rle_bool", &compute_rle_t<bool>, nb::arg("mask"),
+          "COCO-style binary run-length encoding of a contiguous bool array.");
+    m.def("_compute_rle_uint8", &compute_rle_t<std::uint8_t>, nb::arg("mask"),
+          "COCO-style binary run-length encoding of a contiguous uint8 array.");
+    m.def("_compute_rle_uint16", &compute_rle_t<std::uint16_t>, nb::arg("mask"),
+          "COCO-style binary run-length encoding of a contiguous uint16 array.");
+    m.def("_compute_rle_uint32", &compute_rle_t<std::uint32_t>, nb::arg("mask"),
+          "COCO-style binary run-length encoding of a contiguous uint32 array.");
+    m.def("_compute_rle_uint64", &compute_rle_t<std::uint64_t>, nb::arg("mask"),
+          "COCO-style binary run-length encoding of a contiguous uint64 array.");
+    m.def("_compute_rle_int32", &compute_rle_t<std::int32_t>, nb::arg("mask"),
+          "COCO-style binary run-length encoding of a contiguous int32 array.");
+    m.def("_compute_rle_int64", &compute_rle_t<std::int64_t>, nb::arg("mask"),
+          "COCO-style binary run-length encoding of a contiguous int64 array.");
 }
 
 } // namespace bioimage_cpp::bindings

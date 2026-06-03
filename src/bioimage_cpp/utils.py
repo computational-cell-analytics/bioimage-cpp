@@ -24,6 +24,16 @@ _SMOOTH_MESH_BY_DTYPE = {
     np.dtype("float64"): _core._smooth_mesh_float64,
 }
 
+_COMPUTE_RLE_BY_DTYPE = {
+    np.dtype("bool"): _core._compute_rle_bool,
+    np.dtype("uint8"): _core._compute_rle_uint8,
+    np.dtype("uint16"): _core._compute_rle_uint16,
+    np.dtype("uint32"): _core._compute_rle_uint32,
+    np.dtype("uint64"): _core._compute_rle_uint64,
+    np.dtype("int32"): _core._compute_rle_int32,
+    np.dtype("int64"): _core._compute_rle_int64,
+}
+
 _COUNT_TABLE_DTYPE = np.dtype([("label", np.uint64), ("count", np.uint64)])
 _OVERLAP_TABLE_DTYPE = np.dtype(
     [("label_a", np.uint64), ("label_b", np.uint64), ("count", np.uint64)]
@@ -307,6 +317,47 @@ def take_dict(relabeling: Mapping[Any, Any], to_relabel: np.ndarray) -> np.ndarr
         raise
 
 
+def compute_rle(mask: np.ndarray) -> np.ndarray:
+    """Compute the COCO-style binary run-length encoding of an array.
+
+    The array is flattened in C-order and interpreted as binary (zero vs.
+    nonzero). The returned run lengths always start with a run of zeros and then
+    alternate (zeros, ones, zeros, ...); if the first element is nonzero a
+    leading ``0`` is emitted. An empty array yields an empty result.
+
+    This is the equivalent of ``nifty.tools.computeRLE``. Unlike nifty, which
+    returns a Python list, this returns a NumPy ``int64`` array.
+
+    Parameters
+    ----------
+    mask:
+        NumPy array with dtype ``bool``, ``uint8``, ``uint16``, ``uint32``,
+        ``uint64``, ``int32``, or ``int64``. Non-contiguous inputs are copied to
+        a contiguous array before calling the C++ kernel.
+
+    Returns
+    -------
+    np.ndarray
+        1-D ``int64`` array of run lengths.
+
+    Raises
+    ------
+    TypeError
+        If ``mask`` has an unsupported dtype.
+    """
+    array = np.asarray(mask)
+    dtype = array.dtype
+    try:
+        run = _COMPUTE_RLE_BY_DTYPE[dtype]
+    except KeyError as error:
+        supported = ", ".join(str(dtype) for dtype in _COMPUTE_RLE_BY_DTYPE)
+        raise TypeError(
+            f"mask must have one of dtypes ({supported}), got dtype={dtype}"
+        ) from error
+
+    return run(np.ascontiguousarray(array))
+
+
 def smooth_mesh(
     verts: np.ndarray,
     normals: np.ndarray,
@@ -473,6 +524,7 @@ __all__ = [
     "BlockWithHalo",
     "SegmentationOverlap",
     "UnionFind",
+    "compute_rle",
     "segmentation_overlap",
     "smooth_mesh",
     "take_dict",
