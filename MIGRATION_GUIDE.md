@@ -770,6 +770,31 @@ Notes:
 - Every value in the input must be present in the mapping.
 - Non-contiguous inputs are copied before entering C++.
 
+### Run-Length Encoding
+
+`nifty.tools.computeRLE` computes the COCO-style binary run-length encoding of an
+array. Use `bic.utils.compute_rle`:
+
+```python
+import nifty.tools as nt
+
+mask = np.array([[0, 0, 1], [1, 1, 0], [0, 1, 1]], dtype=np.uint8)
+
+rle = nt.computeRLE(mask)            # nifty: Python list [2, 3, 2, 2]
+rle = bic.utils.compute_rle(mask)    # bioimage-cpp: np.int64 array([2, 3, 2, 2])
+```
+
+Notes:
+
+- The array is flattened in **C-order** and interpreted as binary
+  (zero vs. nonzero). Counts always start with a run of zeros and then
+  alternate; a leading `0` is emitted when the first element is nonzero.
+- Supported input dtypes are `bool`, `uint8`, `uint16`, `uint32`, `uint64`,
+  `int32`, and `int64`.
+- **Behavioral difference:** nifty returns a Python `list`; `bioimage-cpp`
+  returns a 1-D NumPy `int64` array.
+- Non-contiguous inputs are copied before entering C++.
+
 ### Edge-Weighted Watershed
 
 Nifty:
