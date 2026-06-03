@@ -22,16 +22,32 @@ The `bioimage_cpp` library is available on PyPI and can be installed via pip:
 pip install bioimage-cpp
 ```
 
+Or via conda-forge:
+```bash
+conda install -c conda-forge bioimage-cpp
+```
+
 Additional dependencies for tests / data downloads can be installed via `pip install bioimage-cpp[test]` /  `pip install bioimage-cpp[data]` respectively.
 
-We will make it available on conda-forge as soon as possible.
+You can also install this library from source. The build requires C++20 (GCC >= 10 or Clang >= 13).
 
-You can also install this library from source as follows:
-```
+If your system already has a C++20-capable compiler, clone and build directly:
+```bash
 git clone https://github.com/computational-cell-analytics/bioimage-cpp
 cd bioimage-cpp
 pip install -e .
 ```
+
+On systems with an older compiler (e.g. many HPC clusters ship GCC 8), install a modern one from conda-forge alongside the build dependencies, and point `CC`/`CXX` at it:
+```bash
+conda install gcc_linux-64 gxx_linux-64 scikit-build-core nanobind -c conda-forge -y
+export CC=x86_64-conda-linux-gnu-gcc
+export CXX=x86_64-conda-linux-gnu-g++
+pip install --no-build-isolation -e .
+```
+
+The `--no-build-isolation` flag reuses the `scikit-build-core` and `nanobind` already installed in your environment.
+Re-run the same command after any C++ source change to rebuild.
 
 ## Functionality
 
