@@ -2,6 +2,7 @@
 
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -19,23 +20,44 @@ struct BfsEntry {
 };
 
 // Reusable scratch state for `breadth_first_search`. Reset via `reset(graph)`
-// before each call so the visited-flag and distance buffers grow once and stay
+// before each call so the visited and distance buffers grow once and stay
 // allocated across many BFS invocations on the same graph.
+//
+// Visited tracking uses a per-call generation stamp rather than a boolean
+// buffer cleared each call: `reset` just increments the generation (O(1)),
+// doing a full clear only on the rare 32-bit wraparound. This matters for the
+// "k-hop neighborhood from every node" pattern, where an O(N)-per-call clear
+// would otherwise make the whole sweep O(N^2). `distance_` is sized but not
+// cleared; it is written before being read for every visited node.
 class BfsWorkspace {
 public:
     BfsWorkspace() = default;
 
     void reset(const UndirectedGraph &graph) {
         const auto n_nodes = static_cast<std::size_t>(graph.number_of_nodes());
-        visited_.assign(n_nodes, 0);
-        distance_.assign(n_nodes, 0);
+        if (visited_.size() != n_nodes) {
+            visited_.assign(n_nodes, 0);
+            generation_ = 0;
+        }
+        distance_.resize(n_nodes);
+        if (generation_ == std::numeric_limits<std::uint32_t>::max()) {
+            std::fill(visited_.begin(), visited_.end(), std::uint32_t{0});
+            generation_ = 0;
+        }
+        ++generation_;
     }
 
-    [[nodiscard]] std::vector<unsigned char> &visited() { return visited_; }
+    [[nodiscard]] bool is_visited(const std::uint64_t node) const {
+        return visited_[static_cast<std::size_t>(node)] == generation_;
+    }
+    void mark_visited(const std::uint64_t node) {
+        visited_[static_cast<std::size_t>(node)] = generation_;
+    }
     [[nodiscard]] std::vector<std::uint64_t> &distance() { return distance_; }
 
 private:
-    std::vector<unsigned char> visited_;
+    std::vector<std::uint32_t> visited_;
+    std::uint32_t generation_ = 0;
     std::vector<std::uint64_t> distance_;
 };
 
@@ -71,13 +93,12 @@ inline std::vector<BfsEntry> breadth_first_search(
         );
     }
     workspace.reset(graph);
-    auto &visited = workspace.visited();
     auto &distance = workspace.distance();
 
     std::vector<BfsEntry> result;
     std::queue<std::uint64_t> queue;
     queue.push(source);
-    visited[static_cast<std::size_t>(source)] = 1;
+    workspace.mark_visited(source);
     distance[static_cast<std::size_t>(source)] = 0;
     if (include_source) {
         result.push_back({source, 0});
@@ -93,10 +114,10 @@ inline std::vector<BfsEntry> breadth_first_search(
         const auto next_distance = node_distance + 1;
         for (const auto adjacency : graph.node_adjacency(node)) {
             const auto neighbor = adjacency.node;
-            if (visited[static_cast<std::size_t>(neighbor)] != 0) {
+            if (workspace.is_visited(neighbor)) {
                 continue;
             }
-            visited[static_cast<std::size_t>(neighbor)] = 1;
+            workspace.mark_visited(neighbor);
             distance[static_cast<std::size_t>(neighbor)] = next_distance;
             result.push_back({neighbor, next_distance});
             queue.push(neighbor);

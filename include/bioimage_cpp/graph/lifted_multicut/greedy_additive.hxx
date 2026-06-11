@@ -19,7 +19,9 @@ struct GreedyAdditiveWorkspace {
     void reset(const UndirectedGraph &lifted_graph) {
         dynamic_graph.reset(lifted_graph);
         union_find.reset(static_cast<std::size_t>(lifted_graph.number_of_nodes()));
-        heap.reset_capacity(static_cast<std::size_t>(lifted_graph.number_of_edges()));
+        // The heap is sized by detail::initialize_dynamic_graph, which every
+        // caller runs immediately after reset(); resizing it here too would
+        // wipe the locator vector twice.
     }
 };
 
