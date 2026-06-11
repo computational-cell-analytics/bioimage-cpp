@@ -24,12 +24,22 @@ template <class V1, class V2>
 inline void argsort_by_first(V1 &v1, V2 &v2, const bool ascending = true) {
     std::vector<std::size_t> idx(v1.size());
     std::iota(idx.begin(), idx.end(), 0);
+    // Break ties on the primary key by original index so the ordering is a
+    // total order. std::sort is unstable, so without this tie-break equal keys
+    // (e.g. equal counts when sorting label entries) would be reordered
+    // nondeterministically across runs / STL implementations.
     if (ascending) {
         std::sort(idx.begin(), idx.end(),
-                  [&v1](std::size_t a, std::size_t b) { return v1[a] < v1[b]; });
+                  [&v1](std::size_t a, std::size_t b) {
+                      if (v1[a] != v1[b]) return v1[a] < v1[b];
+                      return a < b;
+                  });
     } else {
         std::sort(idx.begin(), idx.end(),
-                  [&v1](std::size_t a, std::size_t b) { return v1[a] > v1[b]; });
+                  [&v1](std::size_t a, std::size_t b) {
+                      if (v1[a] != v1[b]) return v1[a] > v1[b];
+                      return a < b;
+                  });
     }
     reorder_inplace(v1, idx);
     reorder_inplace(v2, idx);

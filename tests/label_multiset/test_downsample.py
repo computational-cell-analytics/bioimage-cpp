@@ -123,3 +123,21 @@ def test_downsample_restrict_set_keeps_top_k():
     assert ids.tolist() == [0]
     assert counts.tolist() == [15]
     assert ms_top1.argmax.tolist() == [0]
+
+
+def test_downsample_restrict_set_count_tie_is_deterministic():
+    # Two labels with equal counts (8 each). With restrict_set=1 and a count
+    # tie, the argmax / retained entry must be deterministic: the smaller id
+    # wins (the sort breaks ties by id). Run twice to confirm stability.
+    labels = np.empty((4, 4), dtype=np.uint64)
+    labels[:2, :] = 1
+    labels[2:, :] = 2
+    ms_full = multiset_from_labels(labels, (1, 1))
+    b = Blocking([0, 0], [4, 4], [4, 4])
+    results = []
+    for _ in range(2):
+        ms_top1 = downsample_multiset(ms_full, b, restrict_set=1)
+        ids, counts = ms_top1.entry(0)
+        results.append((ms_top1.argmax.tolist(), ids.tolist(), counts.tolist()))
+    assert results[0] == results[1]
+    assert results[0] == ([1], [1], [8])

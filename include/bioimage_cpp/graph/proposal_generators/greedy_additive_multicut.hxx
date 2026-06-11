@@ -54,7 +54,7 @@ public:
             weight_stop_,
             node_num_stop_,
             true,
-            seed_ + static_cast<int>(call_count_),
+            mixed_seed(seed_, call_count_),
             sigma_
         );
         ++call_count_;
@@ -65,6 +65,23 @@ public:
     }
 
 private:
+    // Mix the base seed and the call counter so proposals from different
+    // (slot, iteration) cells never realign. A plain `seed_ + call_count_`
+    // collided with the per-slot `seed + slot` offset applied by the fusion-move
+    // driver (slot 0 at iteration i+1 reused the seed of slot 1 at iteration i),
+    // recomputing identical proposals and shrinking effective diversity. A
+    // SplitMix64 finalizer over the packed (seed, counter) pair removes the
+    // linearity.
+    static int mixed_seed(const int base, const std::size_t counter) {
+        std::uint64_t z =
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(base)) << 32) |
+            static_cast<std::uint64_t>(static_cast<std::uint32_t>(counter));
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z = z ^ (z >> 31);
+        return static_cast<int>(static_cast<std::uint32_t>(z));
+    }
+
     const UndirectedGraph &graph_;
     std::vector<double> edge_costs_;
     double sigma_;
