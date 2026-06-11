@@ -43,11 +43,11 @@ void require_order(int order, const char *name, const char *function) {
     }
 }
 
-void require_non_negative_window(double window_ratio, const char *function) {
-    if (window_ratio < 0.0) {
+void require_non_negative_window(double window_size, const char *function) {
+    if (window_size < 0.0) {
         throw std::invalid_argument(
-            std::string(function) + ": window_ratio must be >= 0 (0 selects the "
-            "default), got " + std::to_string(window_ratio)
+            std::string(function) + ": window_size must be >= 0 (0 selects the "
+            "default), got " + std::to_string(window_size)
         );
     }
 }
@@ -476,21 +476,21 @@ void bind_filters(nb::module_ &m) {
     m.def(
         "_gaussian_smoothing_2d_float32", &gaussian_smoothing_2d,
         nb::arg("image"), nb::arg("sigma_y"), nb::arg("sigma_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "2D Gaussian smoothing on a float32 (ny, nx) image with anisotropic sigma."
     );
     m.def(
         "_gaussian_smoothing_3d_float32", &gaussian_smoothing_3d,
         nb::arg("image"),
         nb::arg("sigma_z"), nb::arg("sigma_y"), nb::arg("sigma_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "3D Gaussian smoothing on a float32 (nz, ny, nx) image with anisotropic sigma."
     );
     m.def(
         "_gaussian_derivative_2d_float32", &gaussian_derivative_2d,
         nb::arg("image"), nb::arg("sigma_y"), nb::arg("sigma_x"),
         nb::arg("order_y"), nb::arg("order_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "2D Gaussian derivative on a float32 (ny, nx) image with per-axis order."
     );
     m.def(
@@ -498,39 +498,39 @@ void bind_filters(nb::module_ &m) {
         nb::arg("image"),
         nb::arg("sigma_z"), nb::arg("sigma_y"), nb::arg("sigma_x"),
         nb::arg("order_z"), nb::arg("order_y"), nb::arg("order_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "3D Gaussian derivative on a float32 (nz, ny, nx) image with per-axis order."
     );
     m.def(
         "_gaussian_gradient_magnitude_2d_float32", &gaussian_gradient_magnitude_2d,
         nb::arg("image"), nb::arg("sigma_y"), nb::arg("sigma_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "Gradient magnitude of a Gaussian-smoothed 2D float32 image."
     );
     m.def(
         "_gaussian_gradient_magnitude_3d_float32", &gaussian_gradient_magnitude_3d,
         nb::arg("image"),
         nb::arg("sigma_z"), nb::arg("sigma_y"), nb::arg("sigma_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "Gradient magnitude of a Gaussian-smoothed 3D float32 image."
     );
     m.def(
         "_laplacian_of_gaussian_2d_float32", &laplacian_of_gaussian_2d,
         nb::arg("image"), nb::arg("sigma_y"), nb::arg("sigma_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "Laplacian of Gaussian on a 2D float32 image."
     );
     m.def(
         "_laplacian_of_gaussian_3d_float32", &laplacian_of_gaussian_3d,
         nb::arg("image"),
         nb::arg("sigma_z"), nb::arg("sigma_y"), nb::arg("sigma_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "Laplacian of Gaussian on a 3D float32 image."
     );
     m.def(
         "_hessian_of_gaussian_eigenvalues_2d_float32", &hessian_of_gaussian_eigenvalues_2d,
         nb::arg("image"), nb::arg("sigma_y"), nb::arg("sigma_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "Eigenvalues of the Hessian of Gaussian on a 2D float32 image. "
         "Output shape: (ny, nx, 2), sorted descending along the trailing axis."
     );
@@ -538,7 +538,7 @@ void bind_filters(nb::module_ &m) {
         "_hessian_of_gaussian_eigenvalues_3d_float32", &hessian_of_gaussian_eigenvalues_3d,
         nb::arg("image"),
         nb::arg("sigma_z"), nb::arg("sigma_y"), nb::arg("sigma_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "Eigenvalues of the Hessian of Gaussian on a 3D float32 image. "
         "Output shape: (nz, ny, nx, 3), sorted descending along the trailing axis."
     );
@@ -547,7 +547,7 @@ void bind_filters(nb::module_ &m) {
         nb::arg("image"),
         nb::arg("sigma_inner_y"), nb::arg("sigma_inner_x"),
         nb::arg("sigma_outer_y"), nb::arg("sigma_outer_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "Eigenvalues of the structure tensor on a 2D float32 image. "
         "Output shape: (ny, nx, 2), sorted descending along the trailing axis."
     );
@@ -556,7 +556,7 @@ void bind_filters(nb::module_ &m) {
         nb::arg("image"),
         nb::arg("sigma_inner_z"), nb::arg("sigma_inner_y"), nb::arg("sigma_inner_x"),
         nb::arg("sigma_outer_z"), nb::arg("sigma_outer_y"), nb::arg("sigma_outer_x"),
-        nb::arg("window_ratio") = 0.0,
+        nb::arg("window_size") = 0.0,
         "Eigenvalues of the structure tensor on a 3D float32 image. "
         "Output shape: (nz, ny, nx, 3), sorted descending along the trailing axis."
     );

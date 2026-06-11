@@ -6,6 +6,16 @@
 
 namespace bioimage_cpp::detail {
 
+// Total number of elements in a row-major array of the given shape (the product
+// of the per-axis extents). Shape entries are assumed non-negative.
+inline std::size_t number_of_elements(const std::vector<std::ptrdiff_t> &shape) {
+    std::size_t total = 1;
+    for (const auto extent : shape) {
+        total *= static_cast<std::size_t>(extent);
+    }
+    return total;
+}
+
 // C-order strides for a row-major array of the given shape, in units of array
 // elements (not bytes). The innermost (last) axis has stride 1.
 inline std::vector<std::ptrdiff_t> c_order_strides(const std::vector<std::ptrdiff_t> &shape) {

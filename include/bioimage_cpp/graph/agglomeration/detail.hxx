@@ -93,8 +93,9 @@ inline std::size_t agglo_merge_dynamic_nodes(
             if (new_priority != current_priority) {
                 edge.weight = new_priority;
                 // The edge may have been previously popped via kRejectEdge
-                // (GASP cannot-link), in which case it is no longer in the
-                // heap. Use push_or_change to handle both cases.
+                // (GASP cannot-link). In that case it must stay out of the heap
+                // (re-adding it would let it be re-popped and merged), so only
+                // update the priority when the edge is still present.
                 if (heap.contains(removed_edge_id)) {
                     heap.change(removed_edge_id, new_priority);
                 }

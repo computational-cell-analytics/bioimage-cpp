@@ -1,13 +1,13 @@
 #pragma once
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/detail/threading.hxx"
 #include "bioimage_cpp/graph/node_label_projection.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 
 #include <cstddef>
 #include <cstdint>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -16,15 +16,6 @@
 namespace bioimage_cpp::graph {
 
 namespace detail_label_accumulation {
-
-inline std::size_t number_of_pixels(const std::vector<std::ptrdiff_t> &shape) {
-    return static_cast<std::size_t>(std::accumulate(
-        shape.begin(),
-        shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    ));
-}
 
 // Combined (node, other) histogram key. A single map per thread keyed by this
 // pair avoids the n_threads * n_nodes map-of-maps (one std::unordered_map per
@@ -104,7 +95,7 @@ void accumulate_labels(
         throw std::invalid_argument("labels contain a node id outside the rag");
     }
 
-    const auto n_pixels = detail_label_accumulation::number_of_pixels(labels.shape);
+    const auto n_pixels = bioimage_cpp::detail::number_of_elements(labels.shape);
     const auto n_threads = detail::normalize_thread_count(number_of_threads, n_pixels);
 
     std::vector<detail_label_accumulation::NodeOtherHistogram<OtherT>> per_thread(n_threads);

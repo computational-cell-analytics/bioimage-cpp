@@ -88,15 +88,6 @@ inline double percentile(std::vector<double> &values, const double percentile) {
     return (1.0 - weight) * lower + weight * upper;
 }
 
-inline std::size_t number_of_pixels(const std::vector<std::ptrdiff_t> &shape) {
-    return static_cast<std::size_t>(std::accumulate(
-        shape.begin(),
-        shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    ));
-}
-
 inline void require_same_spatial_shape(
     const std::vector<std::ptrdiff_t> &labels_shape,
     const std::vector<std::ptrdiff_t> &data_shape,
@@ -370,6 +361,11 @@ void scan_affinity_3d_chunk(
     }
 }
 
+// Combine per-thread partial statistics. count/min/max/percentile results are
+// exact regardless of thread count; the floating-point sum / sum-of-squares
+// (and hence mean / std) can differ in the last ULP between thread counts,
+// because each thread sums a different subset of pixels. Float feature values
+// are therefore bit-reproducible only for a fixed thread count.
 template <class Stats>
 std::vector<Stats> merge_stats(
     std::vector<std::vector<Stats>> &per_thread_stats,
