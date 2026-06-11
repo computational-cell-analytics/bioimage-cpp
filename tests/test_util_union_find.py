@@ -141,3 +141,33 @@ def test_bulk_merge_rejects_three_columns():
     uf = bic.utils.UnionFind(3)
     with pytest.raises(Exception, match=r"\(N, 2\)"):
         uf.merge(np.zeros((2, 3), dtype=np.uint64))
+
+
+def test_scalar_find_rejects_out_of_range_node():
+    uf = bic.utils.UnionFind(3)
+    with pytest.raises(ValueError, match="out of range"):
+        uf.find(3)
+
+
+def test_scalar_merge_rejects_out_of_range_node():
+    uf = bic.utils.UnionFind(3)
+    with pytest.raises(ValueError, match="out of range"):
+        uf.merge(0, 5)
+
+
+def test_merge_to_rejects_out_of_range_node():
+    uf = bic.utils.UnionFind(3)
+    with pytest.raises(ValueError, match="out of range"):
+        uf.merge_to(7, 0)
+
+
+def test_bulk_find_rejects_out_of_range_node():
+    uf = bic.utils.UnionFind(3)
+    with pytest.raises(ValueError, match="out of range"):
+        uf.find(np.array([0, 1, 9], dtype=np.uint64))
+
+
+def test_bulk_merge_rejects_out_of_range_node():
+    uf = bic.utils.UnionFind(3)
+    with pytest.raises(ValueError, match="out of range"):
+        uf.merge(np.array([[0, 1], [2, 8]], dtype=np.uint64))

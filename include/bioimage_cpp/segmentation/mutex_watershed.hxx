@@ -78,13 +78,6 @@ void mutex_watershed_grid(
     ));
     const auto spatial_strides = detail::c_order_strides(spatial_shape);
 
-    std::vector<std::ptrdiff_t> offset_strides(number_of_channels, 0);
-    for (std::size_t channel = 0; channel < number_of_channels; ++channel) {
-        for (std::size_t axis = 0; axis < spatial_ndim; ++axis) {
-            offset_strides[channel] += offsets[channel][axis] * spatial_strides[axis];
-        }
-    }
-
     const auto number_of_edges = number_of_nodes * number_of_channels;
     std::vector<WeightedGridEdge<T>> edge_order;
     edge_order.reserve(static_cast<std::size_t>(number_of_edges));
@@ -108,8 +101,13 @@ void mutex_watershed_grid(
         const auto channel = static_cast<std::size_t>(edge_id / number_of_nodes);
         const auto u = edge_id % number_of_nodes;
 
-        const auto v_signed = static_cast<std::int64_t>(u) + static_cast<std::int64_t>(offset_strides[channel]);
-        const auto v = static_cast<std::uint64_t>(v_signed);
+        // Bounds-check the neighbor per axis rather than relying solely on the
+        // valid_edges mask: this keeps the kernel memory-safe and rejects edges
+        // that would wrap across a row/plane boundary.
+        std::uint64_t v = 0;
+        if (!detail::valid_offset_target(u, offsets[channel], spatial_shape, spatial_strides, v)) {
+            continue;
+        }
         std::uint64_t root_u = sets.find(u);
         std::uint64_t root_v = sets.find(v);
         if (root_u == root_v) {

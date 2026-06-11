@@ -105,13 +105,6 @@ void semantic_mutex_watershed_grid(
     ));
     const auto spatial_strides = detail::c_order_strides(spatial_shape);
 
-    std::vector<std::ptrdiff_t> offset_strides(number_of_offsets, 0);
-    for (std::size_t channel = 0; channel < number_of_offsets; ++channel) {
-        for (std::size_t axis = 0; axis < spatial_ndim; ++axis) {
-            offset_strides[channel] += offsets[channel][axis] * spatial_strides[axis];
-        }
-    }
-
     struct WeightedGridEdge {
         T weight;
         std::uint64_t id;
@@ -155,9 +148,12 @@ void semantic_mutex_watershed_grid(
             continue;
         }
 
-        const auto v_signed = static_cast<std::int64_t>(u) +
-            static_cast<std::int64_t>(offset_strides[channel]);
-        const auto v = static_cast<std::uint64_t>(v_signed);
+        // Bounds-check the neighbor per axis (see mutex_watershed_grid): keeps
+        // the kernel memory-safe and rejects edges that wrap across a boundary.
+        std::uint64_t v = 0;
+        if (!detail::valid_offset_target(u, offsets[channel], spatial_shape, spatial_strides, v)) {
+            continue;
+        }
         const auto root_u = sets.find(u);
         const auto root_v = sets.find(v);
         if (root_u == root_v) {

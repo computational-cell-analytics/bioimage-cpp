@@ -18,6 +18,18 @@ using EdgeArray = nb::ndarray<nb::numpy, const std::uint64_t, nb::c_contig>;
 using NodeArray = nb::ndarray<nb::numpy, const std::uint64_t, nb::c_contig, nb::ndim<1>>;
 using OutputArray = nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig>;
 
+// UnionFind::find/merge/merge_to index their parent/rank vectors without a
+// bounds check (intentionally, for the hot path). Validate node ids at the
+// binding boundary so out-of-range ids raise a clear error instead of UB.
+void check_node(const util::UnionFind &uf, const std::uint64_t node, const char *name) {
+    if (node >= uf.size()) {
+        throw std::invalid_argument(
+            std::string(name) + " out of range: got " + name + "="
+            + std::to_string(node) + ", size=" + std::to_string(uf.size())
+        );
+    }
+}
+
 void merge_edges(
     util::UnionFind &uf,
     EdgeArray edges
@@ -39,6 +51,11 @@ void merge_edges(
     const auto n_edges = edges.shape(0);
     const auto *data = edges.data();
 
+    for (std::size_t i = 0; i < n_edges; ++i) {
+        check_node(uf, data[2 * i], "edge endpoint");
+        check_node(uf, data[2 * i + 1], "edge endpoint");
+    }
+
     {
         nb::gil_scoped_release release;
         for (std::size_t i = 0; i < n_edges; ++i) {
@@ -49,10 +66,14 @@ void merge_edges(
 
 OutputArray find_nodes(util::UnionFind &uf, NodeArray nodes) {
     const auto n = nodes.shape(0);
+    const auto *input = nodes.data();
+    for (std::size_t i = 0; i < n; ++i) {
+        check_node(uf, input[i], "node");
+    }
+
     auto *out = new std::uint64_t[n]();
     nb::capsule owner(out, [](void *p) noexcept { delete[] static_cast<std::uint64_t *>(p); });
 
-    const auto *input = nodes.data();
     {
         nb::gil_scoped_release release;
         for (std::size_t i = 0; i < n; ++i) {
@@ -62,6 +83,23 @@ OutputArray find_nodes(util::UnionFind &uf, NodeArray nodes) {
 
     std::size_t shape[1] = {n};
     return OutputArray(out, 1, shape, owner);
+}
+
+std::uint64_t find_node(util::UnionFind &uf, const std::uint64_t node) {
+    check_node(uf, node, "node");
+    return uf.find(node);
+}
+
+std::uint64_t merge_pair(util::UnionFind &uf, const std::uint64_t first, const std::uint64_t second) {
+    check_node(uf, first, "first");
+    check_node(uf, second, "second");
+    return uf.merge(first, second);
+}
+
+std::uint64_t merge_to_node(util::UnionFind &uf, const std::uint64_t stable, const std::uint64_t removed) {
+    check_node(uf, stable, "stable");
+    check_node(uf, removed, "removed");
+    return uf.merge_to(stable, removed);
 }
 
 OutputArray element_labeling(util::UnionFind &uf) {
@@ -98,7 +136,7 @@ void bind_util(nb::module_ &m) {
         )
         .def(
             "find",
-            &util::UnionFind::find,
+            &find_node,
             nb::arg("node"),
             "Return the (path-compressed) root of `node`."
         )
@@ -110,7 +148,7 @@ void bind_util(nb::module_ &m) {
         )
         .def(
             "merge",
-            &util::UnionFind::merge,
+            &merge_pair,
             nb::arg("first"),
             nb::arg("second"),
             "Union the sets containing `first` and `second`. Returns the new root."
@@ -123,7 +161,7 @@ void bind_util(nb::module_ &m) {
         )
         .def(
             "merge_to",
-            &util::UnionFind::merge_to,
+            &merge_to_node,
             nb::arg("stable"),
             nb::arg("removed"),
             "Union the sets containing `stable` and `removed`, forcing "
