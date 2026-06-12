@@ -105,6 +105,10 @@ void semantic_mutex_watershed_grid(
     ));
     const auto spatial_strides = detail::c_order_strides(spatial_shape);
 
+    // Precondition: `valid_edges` is 0 for every out-of-bounds / boundary-
+    // wrapping spatial edge (guaranteed by the Python wrapper), so the neighbor
+    // flat index uses a single precomputed stride add per edge rather than a
+    // per-axis bounds check in this hot loop.
     std::vector<std::ptrdiff_t> offset_strides(number_of_offsets, 0);
     for (std::size_t channel = 0; channel < number_of_offsets; ++channel) {
         for (std::size_t axis = 0; axis < spatial_ndim; ++axis) {

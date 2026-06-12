@@ -109,6 +109,9 @@ public:
 
     void reset() override {
         generator_.seed(static_cast<std::mt19937::result_type>(seed_));
+        // std::normal_distribution caches a second Box-Muller deviate; clear it
+        // so a reset generator is bytewise identical to a freshly constructed one.
+        noise_.reset();
     }
 
 private:

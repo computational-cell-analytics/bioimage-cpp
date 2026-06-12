@@ -89,7 +89,12 @@ inline ProfileTimerNull make_profile_timer(NullProfiler &profiler, const char *n
 } // namespace bioimage_cpp::detail
 
 #define BIOIMAGE_PROFILE_INIT(var) ::bioimage_cpp::detail::Profiler var;
-#define BIOIMAGE_PROFILE_SCOPE(var, name) auto _bp_##__LINE__ = ::bioimage_cpp::detail::make_profile_timer(var, name);
+// Two-level indirection so __LINE__ is expanded before the token paste; without
+// it every BIOIMAGE_PROFILE_SCOPE in a translation unit would declare the same
+// identifier `_bp___LINE__`, breaking two scopes in one block.
+#define BIOIMAGE_PROFILE_CONCAT_(a, b) a##b
+#define BIOIMAGE_PROFILE_CONCAT(a, b) BIOIMAGE_PROFILE_CONCAT_(a, b)
+#define BIOIMAGE_PROFILE_SCOPE(var, name) auto BIOIMAGE_PROFILE_CONCAT(_bp_, __LINE__) = ::bioimage_cpp::detail::make_profile_timer(var, name);
 #define BIOIMAGE_PROFILE_REPORT(var) (var).report();
 
 #else

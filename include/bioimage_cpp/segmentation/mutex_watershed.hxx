@@ -78,6 +78,11 @@ void mutex_watershed_grid(
     ));
     const auto spatial_strides = detail::c_order_strides(spatial_shape);
 
+    // Precondition: `valid_edges` must be 0 for every out-of-bounds / boundary-
+    // wrapping edge (the Python wrapper guarantees this). Given that, the
+    // neighbor flat index can be computed with a single precomputed stride add
+    // per edge instead of a per-axis bounds check, which matters in this hot
+    // loop (a per-axis valid_offset_target check measured ~17% slower on 3D).
     std::vector<std::ptrdiff_t> offset_strides(number_of_channels, 0);
     for (std::size_t channel = 0; channel < number_of_channels; ++channel) {
         for (std::size_t axis = 0; axis < spatial_ndim; ++axis) {

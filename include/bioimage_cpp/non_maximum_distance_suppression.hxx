@@ -81,7 +81,9 @@ inline void non_maximum_distance_suppression(
     const auto strides = bioimage_cpp::detail::c_order_strides(distance_map.shape);
     const auto n = static_cast<std::size_t>(n_points);
 
-    // Precompute flat index and distance value at each point.
+    // Precompute flat index and distance value at each point. Point coordinates
+    // are validated against distance_map bounds in the binding layer before this
+    // is called (see bindings/distance.cxx).
     std::vector<float> point_dist(n);
     for (std::size_t i = 0; i < n; ++i) {
         const auto *row =

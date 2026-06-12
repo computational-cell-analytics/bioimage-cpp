@@ -109,7 +109,10 @@ inline std::ptrdiff_t round_to_flat_index(
         } else if (clipped > grid.upper[axis]) {
             clipped = grid.upper[axis];
         }
-        const auto coord = static_cast<std::ptrdiff_t>(std::nearbyint(clipped));
+        // Round half up, matching the nearest-neighbor convention in
+        // transformation/affine.hxx and segmentation/watershed.hxx.
+        // std::nearbyint would honor the FP rounding mode (round-half-to-even).
+        const auto coord = static_cast<std::ptrdiff_t>(std::floor(clipped + 0.5f));
         flat += coord * grid.strides[axis];
     }
     return flat;

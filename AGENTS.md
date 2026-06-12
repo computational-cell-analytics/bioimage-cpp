@@ -24,10 +24,10 @@ Required in the environment: `scikit-build-core`, `cmake>=3.21`, `ninja`, `nanob
 
 Before introducing union-finds, priority queues, edge hashing, stride math, threading helpers, or label relabeling, check `include/bioimage_cpp/detail/`:
 
-- `detail/union_find.hxx` — `UnionFind` (path compression + union by rank). `find`, `merge`, `merge_to`, `unite_roots`.
+- `util/union_find.hxx` — `UnionFind` (namespace `bioimage_cpp::util`, not `detail`; path compression + union by rank). `find`, `merge`, `merge_to`, `unite_roots`.
 - `detail/indexed_heap.hxx` — addressable max-heap with mutable priorities. `DenseIndexedHeap` (vector-backed locator, integer keys in `[0, N)`) and `SparseIndexedHeap` (hashmap-backed, arbitrary keys).
 - `detail/edge_hash.hxx` — `Edge`, `edge_key`, `EdgeHash` for hashing unordered node pairs.
-- `detail/grid.hxx` — `c_order_strides`, `valid_offset_target`, `is_valid_grid_edge` for row-major grid offsets.
+- `detail/grid.hxx` — `number_of_elements`, `c_order_strides`, `valid_offset_target`, `is_valid_grid_edge` for row-major grid shapes/offsets.
 - `detail/relabel.hxx` — `dense_relabel` to map arbitrary labels onto `[0, k)` preserving first-occurrence order.
 - `detail/threading.hxx` — `normalize_thread_count`, `parallel_for_chunks(n_threads, n_items, chunk)`.
 

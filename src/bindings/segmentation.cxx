@@ -392,11 +392,7 @@ nb::tuple relabel_sequential_t(
         inverse_owner
     );
 
-    return nb::make_tuple(
-        nb::cast(relabeled_array),
-        nb::cast(forward_array),
-        nb::cast(inverse_array)
-    );
+    return nb::make_tuple(relabeled_array, forward_array, inverse_array);
 }
 
 template <class InT>

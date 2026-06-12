@@ -1,13 +1,13 @@
 #pragma once
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/detail/threading.hxx"
 #include "bioimage_cpp/graph/node_label_projection.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
 
 #include <cstddef>
 #include <cstdint>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -16,15 +16,6 @@
 namespace bioimage_cpp::graph {
 
 namespace detail_label_accumulation {
-
-inline std::size_t number_of_pixels(const std::vector<std::ptrdiff_t> &shape) {
-    return static_cast<std::size_t>(std::accumulate(
-        shape.begin(),
-        shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    ));
-}
 
 template <class LabelT, class OtherT>
 void scan_chunk(
@@ -78,7 +69,7 @@ void accumulate_labels(
         throw std::invalid_argument("labels contain a node id outside the rag");
     }
 
-    const auto n_pixels = detail_label_accumulation::number_of_pixels(labels.shape);
+    const auto n_pixels = bioimage_cpp::detail::number_of_elements(labels.shape);
     const auto n_threads = detail::normalize_thread_count(number_of_threads, n_pixels);
 
     std::vector<std::vector<std::unordered_map<OtherT, std::uint64_t>>> per_thread(
@@ -103,7 +94,10 @@ void accumulate_labels(
     );
 
     // Merge per-thread histograms and pick majority per node in one pass over
-    // nodes. This is embarrassingly parallel across nodes.
+    // nodes. This is embarrassingly parallel across nodes. (A single combined
+    // (node, other) hashmap per thread was tried and was 3-15x slower — a giant
+    // map probed per pixel plus a serial argmax — so the per-node map-of-maps
+    // with a parallel merge stays.)
     const auto node_threads = detail::normalize_thread_count(number_of_threads, number_of_nodes);
     bioimage_cpp::detail::parallel_for_chunks(
         node_threads,

@@ -33,6 +33,20 @@ def test_two_close_points_keeps_higher_value():
     assert out.tolist() == [[5, 5]]
 
 
+def test_out_of_range_point_coordinate_raises():
+    dm = np.zeros((10, 10), dtype=np.float32)
+    pts = np.array([[5, 5], [5, 12]], dtype=np.int64)
+    with pytest.raises(ValueError, match="out of bounds"):
+        nms(dm, pts)
+
+
+def test_negative_point_coordinate_raises():
+    dm = np.zeros((10, 10), dtype=np.float32)
+    pts = np.array([[-1, 5]], dtype=np.int64)
+    with pytest.raises(ValueError, match="out of bounds"):
+        nms(dm, pts)
+
+
 def test_two_far_points_both_survive():
     dm = np.zeros((20, 20), dtype=np.float32)
     dm[2, 2] = 1.0
