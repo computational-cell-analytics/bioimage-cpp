@@ -4,6 +4,7 @@
 
 #include <nanobind/ndarray.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -30,6 +31,21 @@ void check_node(const util::UnionFind &uf, const std::uint64_t node, const char 
     }
 }
 
+// Bulk variant: a single max-scan over the ids (vectorizable, one pass) instead
+// of a per-element branch, so validating a large id array stays cheap.
+void check_nodes(const util::UnionFind &uf, const std::uint64_t *data, std::size_t count, const char *name) {
+    if (count == 0) {
+        return;
+    }
+    const auto max_node = *std::max_element(data, data + count);
+    if (max_node >= uf.size()) {
+        throw std::invalid_argument(
+            std::string(name) + " out of range: got " + name + "="
+            + std::to_string(max_node) + ", size=" + std::to_string(uf.size())
+        );
+    }
+}
+
 void merge_edges(
     util::UnionFind &uf,
     EdgeArray edges
@@ -51,10 +67,7 @@ void merge_edges(
     const auto n_edges = edges.shape(0);
     const auto *data = edges.data();
 
-    for (std::size_t i = 0; i < n_edges; ++i) {
-        check_node(uf, data[2 * i], "edge endpoint");
-        check_node(uf, data[2 * i + 1], "edge endpoint");
-    }
+    check_nodes(uf, data, 2 * n_edges, "edge endpoint");
 
     {
         nb::gil_scoped_release release;
@@ -67,9 +80,7 @@ void merge_edges(
 OutputArray find_nodes(util::UnionFind &uf, NodeArray nodes) {
     const auto n = nodes.shape(0);
     const auto *input = nodes.data();
-    for (std::size_t i = 0; i < n; ++i) {
-        check_node(uf, input[i], "node");
-    }
+    check_nodes(uf, input, n, "node");
 
     auto *out = new std::uint64_t[n]();
     nb::capsule owner(out, [](void *p) noexcept { delete[] static_cast<std::uint64_t *>(p); });
