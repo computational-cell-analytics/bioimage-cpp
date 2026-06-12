@@ -199,6 +199,65 @@ wheel still loads on SSE2-only CPUs. Expected speedup at 1T: ~20–30 %, less
 at 8T due to closer-to-bandwidth saturation. Estimated effort: half a day
 plus a careful microbenchmark of `vpgatherdd` cost on the target CPUs.
 
+## Interleaved (channel-last) layout + hand-written AVX2 FMA (rolled back, 2026-06-12)
+
+This implemented the two top "remaining" ideas below and measured them. **Net
+result: no win; small regression. Rolled back.** Documented here so the avenue
+is not re-attempted without new information.
+
+The idea, in two composable stages:
+
+1. **Channel-last (interleaved) flow buffer.** The input is channel-first
+   (`channels[axis] = flow.data + axis*n_pixels`), so the `D` components at one
+   position are gathers from regions `n_pixels` floats apart — in theory `D`
+   distinct cache lines per corner. A one-time `O(N)` transpose into a
+   `std::vector<float>` where a voxel's components sit at `[v*VS + axis]` makes
+   each corner touch one line and yield all `D` components. `compute_corners`
+   is unchanged (its offset is already the voxel flat index); only the sampler
+   multiplies by the voxel stride `VS`.
+2. **Hand-written AVX2+FMA sampler for 3D** on that interleaved buffer, with
+   `VS = 4` padding so each corner loads as one 128-bit vector. Lane-wise FMA
+   accumulates the weighted `D`-vector across the 8 corners — **no gather**
+   (the rejected approach above). Runtime-dispatched via
+   `__builtin_cpu_supports`, per-function `__attribute__((target("avx2,fma")))`,
+   scalar fallback for MSVC/arm64/non-AVX2. No CMake/global-arch-flag change.
+
+The codegen was confirmed ideal via `objdump`: 8× `vfmadd132ps` each fusing a
+128-bit load (`(%rdi,%rax,1)`) with a `vbroadcastss` weight, zero gather
+instructions. So the SIMD path was real and optimal — and still no faster than
+scalar.
+
+Measurements (3D fixture, warm, min of 8 runs, same session, same machine as
+the headline numbers):
+
+```
+variant                          1T min     8T min
+channel-first (baseline)         5.33 s     1.357 s
+interleaved VS=3 (no pad, scalar) 5.44 s    1.46 s
+interleaved VS=4 (scalar)        5.56 s     1.42 s
+interleaved VS=4 + AVX2 FMA      5.58 s     1.46 s
+```
+
+Conclusions:
+
+- **The loop is memory-latency bound, as the roofline diagnosis said.**
+  Cutting the corner sum from 24 scalar mul-adds to 8 packed FMAs changes the
+  ALU count, not the load latency, so it does nothing. The 8 corner loads are
+  independent, so the out-of-order engine already overlaps them (high MLP);
+  channel-first's three independent channel loads overlap too.
+- **Channel-first already has good locality.** A 64-byte line holds 16
+  consecutive-x voxels of one channel; a trilinear cell's x-pair lives on one
+  line. Interleaving with `VS=4` cuts that to 4 voxels/line — *worse* density —
+  which is why VS=4 lost ~0.12 s/1T to VS=3. But even VS=3 (no waste, same
+  144 MB footprint) did not beat channel-first.
+- **Padding `VS=4` also costs +33 % flow memory** (144 → 192 MB for the 3D
+  fixture) for the AVX2 path's aligned 4-wide load.
+- The differences are partly inside this laptop's **±~8 % thermal-throttle
+  noise** (baseline 1T alone ranged 5.33–5.85 s across the session, 8T
+  1.357–1.59 s). That noise floor exceeds the expected gain of any remaining
+  micro-optimization, so small wins cannot be validated on this host — they
+  need a fixed-clock machine with `perf` counters.
+
 ## What was tried and rejected
 
 - **Per-thread density scatter buffers** — scatter is <1 % of runtime,
@@ -212,25 +271,36 @@ plus a careful microbenchmark of `vpgatherdd` cost on the target CPUs.
 - **Half-precision (fp16) flow storage** — would halve memory traffic, but
   the kernel isn't bandwidth-bound (see diagnosis), and it's a breaking API
   change.
+- **Interleaved channel-last layout + hand-written AVX2 FMA** — implemented and
+  measured 2026-06-12 (see the dedicated section above). No win, small
+  regression, rolled back. The SIMD path was confirmed optimal in codegen yet
+  did not beat scalar — the loop is load-latency bound, not ALU bound.
 
 ## What remains worth trying
 
-In rough order of expected return on effort:
+In rough order of expected return on effort. **Note (2026-06-12):** items 1 and
+2 below were implemented and measured — they gave no speedup (see "Interleaved
+layout + AVX2 FMA" above). They are kept here only with that caveat; the live
+candidate is now (3), and (4) is the prerequisite for evaluating it.
 
-1. **Hand-written AVX2 (and SSE2-fallback) intrinsics for the corner sum**
-   inside a runtime-dispatched specialization. Plausible 20–30 % at 1T. The
-   plumbing scaffolding is documented above in the SIMD section.
-2. **SoA position layout** (`vector<float> pos_x, pos_y, pos_z` instead of
-   `vector<array<float,3>>`). Lets the autovectorizer batch the clip + step
-   + convergence check across N particles. Pairs naturally with (1).
-3. **Reduce gather miss latency** via batch prefetching: prefetch the
-   next-K particles' corner cache lines before computing the current one.
-   Likely modest gain; needs profiling.
+1. ~~Hand-written AVX2 intrinsics for the corner sum~~ — **tried, no win.** The
+   corner sum on an interleaved buffer compiled to 8 packed FMAs with no
+   gathers, and was no faster than scalar: the loop waits on the 8 corner
+   loads, not the arithmetic.
+2. ~~SoA position layout~~ — its only rationale was enabling the SIMD in (1);
+   with (1) shown not to help, SoA's batched clip/step/convergence has nothing
+   to pay for the extra coordinate gather/scatter. Not pursued separately.
+3. **Reduce load latency** via software prefetching: prefetch the next-K
+   particles' corner cache lines before computing the current one. This is the
+   one lever that targets the actual (latency) bottleneck, and it works on the
+   existing channel-first layout — no relayout needed. Expected gain is modest
+   and **cannot be validated on the current laptop** (its ±~8 % thermal noise
+   floor swamps it); needs a fixed-clock host.
 4. **A real `perf stat`** run on a host where `linux-perf-tools` is
    installed, to confirm where cycles actually go (front-end, back-end
-   memory, back-end core, retired-FMA-ratio). The streaming-probe upper
-   bound is necessary but not sufficient — counter data would localise the
-   bottleneck precisely.
+   memory, back-end core, retired-FMA-ratio) and to provide a low-noise
+   measurement environment in which (3) could actually be evaluated. The
+   streaming-probe upper bound is necessary but not sufficient.
 
 ## Reproducing these measurements
 
