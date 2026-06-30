@@ -408,3 +408,124 @@ def test_invalid_inputs_raise():
         bic.transformation.affine_transform(data, _matrix(2), bounding_box=(slice(None, None, 2), slice(None)))
     with pytest.raises(TypeError, match="dtype"):
         bic.transformation.affine_transform(np.zeros((4, 4), dtype=np.bool_), _matrix(2))
+
+
+# ---------------------------------------------------------------------------
+# map_coordinates
+# ---------------------------------------------------------------------------
+
+_ALL_DTYPES = [
+    np.uint8, np.uint16, np.uint32, np.uint64,
+    np.int8, np.int16, np.int32, np.int64,
+    np.float32, np.float64,
+]
+
+
+def _affine_coords(matrix, shape):
+    """The (ndim, *shape) coordinate field that reproduces `matrix` as an explicit deformation."""
+    ndim = len(shape)
+    grid = np.indices(shape, dtype=np.float64)
+    coords = np.empty_like(grid)
+    for d in range(ndim):
+        acc = np.full(shape, matrix[d, ndim], dtype=np.float64)
+        for k in range(ndim):
+            acc = acc + matrix[d, k] * grid[k]
+        coords[d] = acc
+    return coords
+
+
+@pytest.mark.parametrize("order", [0, 1, 2, 3, 4, 5])
+@pytest.mark.parametrize("dtype", _ALL_DTYPES)
+def test_map_coordinates_matches_affine_2d(order, dtype):
+    # A coordinate field built from an affine matrix must reproduce affine_transform exactly: same
+    # interpolation backend, so the results are bit-identical for every order and dtype.
+    data = (np.arange(5 * 7) % 17).astype(dtype).reshape(5, 7)
+    matrix = _matrix(2, translation=[0.5, -1.25])
+    coords = _affine_coords(matrix, data.shape)
+    got = bic.transformation.map_coordinates(data, coords, order=order, fill_value=0)
+    ref = bic.transformation.affine_transform(data, matrix, order=order, fill_value=0)
+    np.testing.assert_array_equal(got, ref)
+
+
+@pytest.mark.parametrize("order", [0, 1, 2, 3, 4, 5])
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16, np.int32, np.float32, np.float64])
+def test_map_coordinates_matches_affine_3d(order, dtype):
+    data = (np.arange(4 * 5 * 6) % 13).astype(dtype).reshape(4, 5, 6)
+    matrix = _matrix(3, translation=[0.25, -0.5, 1.0])
+    coords = _affine_coords(matrix, data.shape)
+    got = bic.transformation.map_coordinates(data, coords, order=order, fill_value=0)
+    ref = bic.transformation.affine_transform(data, matrix, order=order, fill_value=0)
+    np.testing.assert_array_equal(got, ref)
+
+
+@pytest.mark.parametrize("order", [0, 1])
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_map_coordinates_matches_scipy(order, ndim):
+    sp = pytest.importorskip("scipy.ndimage")
+    rng = np.random.default_rng(0)
+    shape = (9, 11) if ndim == 2 else (6, 7, 8)
+    data = rng.random(shape).astype(np.float64)
+    # random source coordinates strictly inside the volume, so boundary handling is not involved.
+    coords = np.stack([rng.uniform(1.0, s - 2.0, size=shape) for s in shape])
+    got = bic.transformation.map_coordinates(data, coords, order=order)
+    ref = sp.map_coordinates(data, coords, order=order, mode="nearest", prefilter=False)
+    np.testing.assert_allclose(got, ref, atol=1e-6)
+
+
+@pytest.mark.parametrize("order", [0, 1, 3])
+@pytest.mark.parametrize("shape", [(5, 7), (4, 5, 6)])
+def test_map_coordinates_identity_round_trip(order, shape):
+    # Sampling at the integer grid reproduces the input exactly for the interpolating orders.
+    data = np.arange(int(np.prod(shape)), dtype=np.float32).reshape(shape)
+    coords = np.indices(shape, dtype=np.float64)
+    got = bic.transformation.map_coordinates(data, coords, order=order, fill_value=-1)
+    np.testing.assert_array_equal(got, data)
+
+
+@pytest.mark.parametrize("order", [0, 1, 3])
+def test_map_coordinates_out_of_bounds_uses_fill(order):
+    data = np.arange(16, dtype=np.float32).reshape(4, 4)
+    coords = np.full((2, 3, 3), -50.0)  # every output voxel maps far outside the input
+    got = bic.transformation.map_coordinates(data, coords, order=order, fill_value=7.0)
+    np.testing.assert_array_equal(got, np.full((3, 3), 7.0, dtype=np.float32))
+
+
+def test_map_coordinates_writes_into_out():
+    data = np.arange(20, dtype=np.float64).reshape(4, 5)
+    coords = np.indices(data.shape, dtype=np.float64)
+    out = np.empty(data.shape, dtype=np.float64)
+    returned = bic.transformation.map_coordinates(data, coords, order=1, out=out)
+    assert returned is out
+    np.testing.assert_array_equal(out, data)
+
+
+def test_map_coordinates_accepts_noncontiguous_coordinates():
+    data = np.arange(20, dtype=np.float64).reshape(4, 5)
+    matrix = _matrix(2, translation=[0.5, 0.5])
+    coords = _affine_coords(matrix, data.shape)
+    noncontig = np.asfortranarray(coords)  # coerced to contiguous float64 internally
+    assert not noncontig.flags.c_contiguous
+    got = bic.transformation.map_coordinates(data, noncontig, order=1)
+    ref = bic.transformation.affine_transform(data, matrix, order=1)
+    np.testing.assert_array_equal(got, ref)
+
+
+def test_map_coordinates_invalid_inputs_raise():
+    data = np.zeros((4, 5), dtype=np.float32)
+    good = np.indices(data.shape).astype(np.float64)
+    with pytest.raises(ValueError, match="2D or 3D"):
+        bic.transformation.map_coordinates(np.zeros((4,), dtype=np.float32), np.zeros((1, 4)))
+    with pytest.raises(ValueError, match="order"):
+        bic.transformation.map_coordinates(data, good, order=6)
+    # coordinates must have ndim == data.ndim + 1
+    with pytest.raises(ValueError, match="ndim"):
+        bic.transformation.map_coordinates(data, np.zeros((2, 4), dtype=np.float64))
+    # coordinates leading axis must equal data ndim
+    with pytest.raises(ValueError, match=r"shape\[0\]"):
+        bic.transformation.map_coordinates(data, np.zeros((3, 4, 5), dtype=np.float64))
+    with pytest.raises(TypeError, match="dtype"):
+        bic.transformation.map_coordinates(np.zeros((4, 5), dtype=np.bool_), good)
+    with pytest.raises(ValueError, match="shape"):
+        bic.transformation.map_coordinates(data, good, out=np.empty((3, 3), dtype=np.float32))
+    with pytest.raises(TypeError, match="dtype"):
+        bic.transformation.map_coordinates(data, good, out=np.empty((4, 5), dtype=np.float64))
