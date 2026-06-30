@@ -36,6 +36,32 @@ _AFFINE_3D_BY_DTYPE = {
     np.dtype("float64"): _core._affine_transform_3d_float64,
 }
 
+_MAP_COORDINATES_2D_BY_DTYPE = {
+    np.dtype("uint8"): _core._map_coordinates_2d_uint8,
+    np.dtype("uint16"): _core._map_coordinates_2d_uint16,
+    np.dtype("uint32"): _core._map_coordinates_2d_uint32,
+    np.dtype("uint64"): _core._map_coordinates_2d_uint64,
+    np.dtype("int8"): _core._map_coordinates_2d_int8,
+    np.dtype("int16"): _core._map_coordinates_2d_int16,
+    np.dtype("int32"): _core._map_coordinates_2d_int32,
+    np.dtype("int64"): _core._map_coordinates_2d_int64,
+    np.dtype("float32"): _core._map_coordinates_2d_float32,
+    np.dtype("float64"): _core._map_coordinates_2d_float64,
+}
+
+_MAP_COORDINATES_3D_BY_DTYPE = {
+    np.dtype("uint8"): _core._map_coordinates_3d_uint8,
+    np.dtype("uint16"): _core._map_coordinates_3d_uint16,
+    np.dtype("uint32"): _core._map_coordinates_3d_uint32,
+    np.dtype("uint64"): _core._map_coordinates_3d_uint64,
+    np.dtype("int8"): _core._map_coordinates_3d_int8,
+    np.dtype("int16"): _core._map_coordinates_3d_int16,
+    np.dtype("int32"): _core._map_coordinates_3d_int32,
+    np.dtype("int64"): _core._map_coordinates_3d_int64,
+    np.dtype("float32"): _core._map_coordinates_3d_float32,
+    np.dtype("float64"): _core._map_coordinates_3d_float64,
+}
+
 
 def _normalize_matrix(matrix, ndim: int) -> np.ndarray:
     array = np.asarray(matrix, dtype=np.float64)
@@ -339,4 +365,84 @@ def affine_transform(
     typed_fill = _normalize_fill_value(fill_value, dtype)
     output = _validate_or_allocate_out(out, output_shape, dtype)
     run(contiguous, normalized_matrix, starts, output, order, typed_fill)
+    return output
+
+
+def _normalize_coordinates(coordinates, ndim: int) -> tuple[np.ndarray, tuple[int, ...]]:
+    array = np.ascontiguousarray(coordinates, dtype=np.float64)
+    if array.ndim != ndim + 1:
+        raise ValueError(
+            f"coordinates must have ndim={ndim + 1} (a leading axis of length {ndim} plus the "
+            f"output shape), got ndim={array.ndim}"
+        )
+    if array.shape[0] != ndim:
+        raise ValueError(
+            f"coordinates.shape[0] must equal the data dimension {ndim}, got {array.shape[0]}"
+        )
+    output_shape = tuple(int(s) for s in array.shape[1:])
+    return array, output_shape
+
+
+def map_coordinates(
+    data: np.ndarray,
+    coordinates,
+    *,
+    order: int = 1,
+    fill_value: Number = 0,
+    out: np.ndarray | None = None,
+) -> np.ndarray:
+    """Resample a 2D or 3D array at explicit, per-output-voxel source coordinates.
+
+    Like ``scipy.ndimage.map_coordinates``, but specialized to a same-rank resampling: for each
+    output voxel the source coordinate to sample is read from ``coordinates`` and the input is
+    interpolated there. ``coordinates`` has shape ``(ndim, *output_shape)`` in NumPy axis order, so
+    ``coordinates[d]`` holds the axis-``d`` source coordinate of every output voxel. The output has
+    the same number of dimensions as ``data`` (a 2D or 3D resampling), so ``output_shape`` =
+    ``coordinates.shape[1:]`` has ``ndim`` entries. This is the deformation-field counterpart of
+    :func:`affine_transform` (which derives the same per-voxel source coordinate from an affine
+    matrix) and shares its interpolation backend.
+
+    Supported interpolation orders match :func:`affine_transform`:
+
+    - ``0`` — nearest neighbour.
+    - ``1`` — linear (bi-/tri-linear).
+    - ``2`` — quadratic B-spline (3 taps per axis).
+    - ``3`` — local Keys cubic convolution (4 taps; Catmull-Rom, ``a=-0.5``); reproduces input
+      exactly at integer coordinates.
+    - ``4`` — quartic B-spline (5 taps per axis).
+    - ``5`` — quintic B-spline (6 taps per axis).
+
+    Orders ``2``, ``4``, ``5`` evaluate the cardinal B-spline kernel directly on the input samples
+    (no prefilter); they are low-pass smoothing, not interpolating. See :func:`affine_transform`
+    for the full discussion.
+
+    The output preserves the input dtype; integer outputs round to nearest and clamp to the dtype
+    range. Coordinates that map outside the input contribute ``fill_value``.
+
+    Pass a pre-allocated, C-contiguous, writable NumPy array as ``out`` to write the result in
+    place; it must have shape ``coordinates.shape[1:]`` and dtype equal to ``data.dtype``.
+    """
+    array = np.asarray(data)
+    if array.ndim not in (2, 3):
+        raise ValueError(f"data must be 2D or 3D, got ndim={array.ndim}")
+
+    order = int(order)
+    if order not in (0, 1, 2, 3, 4, 5):
+        raise ValueError(f"order must be in 0..5, got {order}")
+
+    table = _MAP_COORDINATES_2D_BY_DTYPE if array.ndim == 2 else _MAP_COORDINATES_3D_BY_DTYPE
+    dtype = array.dtype
+    try:
+        run = table[dtype]
+    except KeyError as error:
+        supported = ", ".join(str(name) for name in table)
+        raise TypeError(
+            f"data must have one of dtypes ({supported}), got dtype={dtype}"
+        ) from error
+
+    coords, output_shape = _normalize_coordinates(coordinates, array.ndim)
+    contiguous = np.ascontiguousarray(array)
+    typed_fill = _normalize_fill_value(fill_value, dtype)
+    output = _validate_or_allocate_out(out, output_shape, dtype)
+    run(contiguous, coords, output, order, typed_fill)
     return output

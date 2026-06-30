@@ -3,6 +3,7 @@
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/transformation/affine.hxx"
+#include "bioimage_cpp/transformation/coordinate.hxx"
 
 #include <nanobind/ndarray.h>
 
@@ -113,6 +114,86 @@ void bind_affine_for_dtype(nb::module_ &m, const char *name_2d, const char *name
     );
 }
 
+template <std::size_t D, class T>
+OutputArray<T> map_coordinates_t(
+    ConstArray<T> input,
+    MatrixArray coordinates,
+    OutputArray<T> output,
+    const int order,
+    const T fill_value
+) {
+    if (input.ndim() != D) {
+        throw std::invalid_argument(
+            "input must have ndim=" + std::to_string(D) +
+            ", got ndim=" + std::to_string(input.ndim())
+        );
+    }
+    if (output.ndim() != D) {
+        throw std::invalid_argument(
+            "output must have ndim=" + std::to_string(D) +
+            ", got ndim=" + std::to_string(output.ndim())
+        );
+    }
+    if (coordinates.ndim() != D + 1) {
+        throw std::invalid_argument(
+            "coordinates must have ndim=" + std::to_string(D + 1) +
+            ", got ndim=" + std::to_string(coordinates.ndim())
+        );
+    }
+
+    const auto input_shape = shape_of(input);
+    const auto input_strides = detail::c_order_strides(input_shape);
+    const auto coordinates_shape = shape_of(coordinates);
+    const auto coordinates_strides = detail::c_order_strides(coordinates_shape);
+    const auto output_shape = shape_of(output);
+    const auto output_strides = detail::c_order_strides(output_shape);
+
+    ConstArrayView<T> input_view{input.data(), input_shape, input_strides};
+    ArrayView<T> output_view{output.data(), output_shape, output_strides};
+    ConstArrayView<double> coordinates_view{
+        coordinates.data(), coordinates_shape, coordinates_strides
+    };
+
+    {
+        nb::gil_scoped_release release;
+        if constexpr (D == 2) {
+            transformation::map_coordinates_2d<T>(
+                input_view, output_view, coordinates_view, order, fill_value
+            );
+        } else {
+            transformation::map_coordinates_3d<T>(
+                input_view, output_view, coordinates_view, order, fill_value
+            );
+        }
+    }
+
+    return output;
+}
+
+template <class T>
+void bind_map_coordinates_for_dtype(nb::module_ &m, const char *name_2d, const char *name_3d) {
+    m.def(
+        name_2d,
+        &map_coordinates_t<2, T>,
+        nb::arg("input"),
+        nb::arg("coordinates"),
+        nb::arg("output"),
+        nb::arg("order"),
+        nb::arg("fill_value"),
+        "Apply a 2D coordinate-based resampling into a pre-allocated NumPy array."
+    );
+    m.def(
+        name_3d,
+        &map_coordinates_t<3, T>,
+        nb::arg("input"),
+        nb::arg("coordinates"),
+        nb::arg("output"),
+        nb::arg("order"),
+        nb::arg("fill_value"),
+        "Apply a 3D coordinate-based resampling into a pre-allocated NumPy array."
+    );
+}
+
 } // namespace
 
 void bind_transformation(nb::module_ &m) {
@@ -145,6 +226,37 @@ void bind_transformation(nb::module_ &m) {
     );
     bind_affine_for_dtype<double>(
         m, "_affine_transform_2d_float64", "_affine_transform_3d_float64"
+    );
+
+    bind_map_coordinates_for_dtype<std::uint8_t>(
+        m, "_map_coordinates_2d_uint8", "_map_coordinates_3d_uint8"
+    );
+    bind_map_coordinates_for_dtype<std::uint16_t>(
+        m, "_map_coordinates_2d_uint16", "_map_coordinates_3d_uint16"
+    );
+    bind_map_coordinates_for_dtype<std::uint32_t>(
+        m, "_map_coordinates_2d_uint32", "_map_coordinates_3d_uint32"
+    );
+    bind_map_coordinates_for_dtype<std::uint64_t>(
+        m, "_map_coordinates_2d_uint64", "_map_coordinates_3d_uint64"
+    );
+    bind_map_coordinates_for_dtype<std::int8_t>(
+        m, "_map_coordinates_2d_int8", "_map_coordinates_3d_int8"
+    );
+    bind_map_coordinates_for_dtype<std::int16_t>(
+        m, "_map_coordinates_2d_int16", "_map_coordinates_3d_int16"
+    );
+    bind_map_coordinates_for_dtype<std::int32_t>(
+        m, "_map_coordinates_2d_int32", "_map_coordinates_3d_int32"
+    );
+    bind_map_coordinates_for_dtype<std::int64_t>(
+        m, "_map_coordinates_2d_int64", "_map_coordinates_3d_int64"
+    );
+    bind_map_coordinates_for_dtype<float>(
+        m, "_map_coordinates_2d_float32", "_map_coordinates_3d_float32"
+    );
+    bind_map_coordinates_for_dtype<double>(
+        m, "_map_coordinates_2d_float64", "_map_coordinates_3d_float64"
     );
 }
 

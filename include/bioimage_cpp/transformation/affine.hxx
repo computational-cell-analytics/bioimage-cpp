@@ -495,6 +495,40 @@ inline double cubic_3d(
     return value;
 }
 
+// Dispatch to the per-voxel sampler for the requested interpolation order. Shared by the affine and
+// map_coordinates kernels so the interpolation backend lives in exactly one place. `order` must be in
+// 0..5 (validated by the public entry points before the sampling loop).
+template <class T>
+inline double sample_2d(
+    const T *data, std::ptrdiff_t in_h, std::ptrdiff_t in_w,
+    double cy, double cx, const int order, double fill
+) {
+    switch (order) {
+        case 0: return nearest_2d(data, in_h, in_w, cy, cx, fill);
+        case 1: return linear_2d(data, in_h, in_w, cy, cx, fill);
+        case 2: return bspline_2d<2>(data, in_h, in_w, cy, cx, fill);
+        case 3: return cubic_2d(data, in_h, in_w, cy, cx, fill);
+        case 4: return bspline_2d<4>(data, in_h, in_w, cy, cx, fill);
+        default: return bspline_2d<5>(data, in_h, in_w, cy, cx, fill);  // 5
+    }
+}
+
+template <class T>
+inline double sample_3d(
+    const T *data,
+    std::ptrdiff_t in_d, std::ptrdiff_t in_h, std::ptrdiff_t in_w,
+    double cz, double cy, double cx, const int order, double fill
+) {
+    switch (order) {
+        case 0: return nearest_3d(data, in_d, in_h, in_w, cz, cy, cx, fill);
+        case 1: return linear_3d(data, in_d, in_h, in_w, cz, cy, cx, fill);
+        case 2: return bspline_3d<2>(data, in_d, in_h, in_w, cz, cy, cx, fill);
+        case 3: return cubic_3d(data, in_d, in_h, in_w, cz, cy, cx, fill);
+        case 4: return bspline_3d<4>(data, in_d, in_h, in_w, cz, cy, cx, fill);
+        default: return bspline_3d<5>(data, in_d, in_h, in_w, cz, cy, cx, fill);  // 5
+    }
+}
+
 } // namespace detail
 
 // ----- 2D entry point -------------------------------------------------------
@@ -554,27 +588,7 @@ void affine_transform_2d(
         double cy = row_y;
         double cx = row_x;
         for (std::ptrdiff_t j = 0; j < out_w; ++j) {
-            double value;
-            switch (order) {
-                case 0:
-                    value = detail::nearest_2d(in_data, in_h, in_w, cy, cx, fill);
-                    break;
-                case 1:
-                    value = detail::linear_2d(in_data, in_h, in_w, cy, cx, fill);
-                    break;
-                case 2:
-                    value = detail::bspline_2d<2>(in_data, in_h, in_w, cy, cx, fill);
-                    break;
-                case 3:
-                    value = detail::cubic_2d(in_data, in_h, in_w, cy, cx, fill);
-                    break;
-                case 4:
-                    value = detail::bspline_2d<4>(in_data, in_h, in_w, cy, cx, fill);
-                    break;
-                default:  // 5
-                    value = detail::bspline_2d<5>(in_data, in_h, in_w, cy, cx, fill);
-                    break;
-            }
+            const double value = detail::sample_2d(in_data, in_h, in_w, cy, cx, order, fill);
             *out_ptr++ = detail::to_output<T>(value);
             cy += m01;
             cx += m11;
@@ -655,33 +669,8 @@ void affine_transform_3d(
             double cy = row_y;
             double cx = row_x;
             for (std::ptrdiff_t j = 0; j < out_w; ++j) {
-                double value;
-                switch (order) {
-                    case 0:
-                        value = detail::nearest_3d(in_data, in_d, in_h, in_w,
-                                                   cz, cy, cx, fill);
-                        break;
-                    case 1:
-                        value = detail::linear_3d(in_data, in_d, in_h, in_w,
-                                                  cz, cy, cx, fill);
-                        break;
-                    case 2:
-                        value = detail::bspline_3d<2>(in_data, in_d, in_h, in_w,
-                                                      cz, cy, cx, fill);
-                        break;
-                    case 3:
-                        value = detail::cubic_3d(in_data, in_d, in_h, in_w,
-                                                 cz, cy, cx, fill);
-                        break;
-                    case 4:
-                        value = detail::bspline_3d<4>(in_data, in_d, in_h, in_w,
-                                                      cz, cy, cx, fill);
-                        break;
-                    default:  // 5
-                        value = detail::bspline_3d<5>(in_data, in_d, in_h, in_w,
-                                                      cz, cy, cx, fill);
-                        break;
-                }
+                const double value = detail::sample_3d(in_data, in_d, in_h, in_w,
+                                                       cz, cy, cx, order, fill);
                 *out_ptr++ = detail::to_output<T>(value);
                 cz += m02;
                 cy += m12;
