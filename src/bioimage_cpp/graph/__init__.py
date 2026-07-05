@@ -19,6 +19,9 @@ Algorithm domains live in dedicated submodules:
   (with and without semantic constraints).
 - :mod:`bioimage_cpp.graph.features` — edge-feature accumulation on RAGs and
   grid graphs.
+- :mod:`bioimage_cpp.graph.distributed` — low-level per-block extraction and
+  whole-volume merge primitives for building RAGs and edge features on volumes
+  too large to hold in memory (block iteration and I/O are left to the caller).
 
 Thread safety
 -------------
@@ -663,6 +666,7 @@ def project_node_labels_to_pixels(
 
 
 from . import agglomeration  # noqa: E402  (must follow class/function definitions)
+from . import distributed  # noqa: E402
 from . import features  # noqa: E402
 from . import lifted_multicut  # noqa: E402
 from . import multicut  # noqa: E402
@@ -678,6 +682,7 @@ __all__ = [
     "agglomeration",
     "breadth_first_search",
     "connected_components",
+    "distributed",
     "edge_weighted_watershed",
     "features",
     "grid_graph",

@@ -490,6 +490,54 @@ Notes:
   endpoint ids.
 - Non-contiguous labels are copied to contiguous memory before entering C++.
 
+### Distributed Region Adjacency Graphs and Features
+
+For volumes too large to hold in memory, `nifty.distributed` builds a RAG and
+its edge features block by block and merges the results. `bioimage-cpp` provides
+the equivalent **low-level primitives** under `bic.graph.distributed`; the
+orchestration nifty bundles (iterating blocks, sizing halos, and serializing the
+per-block subgraphs/features to zarr/N5/HDF5) is intentionally left to the
+caller, since I/O and block scheduling belong in Python.
+
+The primitives assume **globally consistent labels** (a segment has the same id
+in every block — as after a stitched distributed watershed). A block owns the
+pixel-pairs whose reference pixel lies in its inner (non-halo) box, so the
+caller reads each block with a halo (≥1 on the forward faces for the region
+graph / an edge map; ≥ `max |offset|` per side for affinities) and passes the
+owned box as `own_begin` / `own_shape` (e.g. from `bic.utils.Blocking`'s
+`get_block_with_halo(...).inner_block_local`).
+
+```python
+d = bic.graph.distributed
+
+# per block (labels read with a halo):
+edges = d.block_region_adjacency_edges(labels_block, own_begin, own_shape)
+block_edges, block_stats = d.block_edge_map_stats(labels_block, edge_map_block, own_begin, own_shape)
+block_edges, block_stats = d.block_affinity_stats(labels_block, aff_block, offsets, own_begin, own_shape)
+
+# merge the graph, then build the global graph:
+global_edges = d.merge_edges([edges_block_0, edges_block_1, ...])
+graph = bic.graph.UndirectedGraph.from_unique_edges(number_of_nodes, global_edges)
+
+# fold per-block features onto the global edges, then finalize:
+acc = d.empty_edge_stats(graph.number_of_edges)
+for be, bs in per_block_stats:
+    acc = d.merge_block_edge_stats(graph, acc, be, bs)
+features = d.finalize_edge_features(acc, compute_complex_features=True)
+```
+
+Notes:
+
+- Blocked results reproduce the whole-volume `region_adjacency_graph` /
+  `features.*_features` exactly for `size`, `min` and `max`, and to
+  floating-point tolerance for `mean` / `std` (the running sums depend on thread
+  count and merge order).
+- **Median and percentiles are not distributable.** The distributed complex
+  output is the moment subset `[mean, std, min, max, size]` — the corresponding
+  columns of the in-core 12-column complex features.
+- Making per-block-local ids globally consistent (label stitching) is a separate
+  step and is not part of these primitives.
+
 ### Breadth-First Search
 
 Nifty has an internal `BreadthFirstSearch` template used during lifted-edge

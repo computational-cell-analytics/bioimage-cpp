@@ -2,6 +2,7 @@
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/edge_hash.hxx"
+#include "bioimage_cpp/detail/label_cast.hxx"
 #include "bioimage_cpp/detail/threading.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
@@ -41,20 +42,11 @@ private:
 
 namespace detail {
 
+using bioimage_cpp::detail::checked_label_to_node;
 using bioimage_cpp::detail::Edge;
 using bioimage_cpp::detail::EdgeHash;
 using bioimage_cpp::detail::edge_key;
 using bioimage_cpp::detail::normalize_thread_count;
-
-template <class T>
-std::uint64_t checked_label_to_node(const T value) {
-    if constexpr (std::is_signed_v<T>) {
-        if (value < 0) {
-            throw std::invalid_argument("labels must not contain negative values");
-        }
-    }
-    return static_cast<std::uint64_t>(value);
-}
 
 template <class T>
 std::uint64_t max_label(const ConstArrayView<T> &labels) {
