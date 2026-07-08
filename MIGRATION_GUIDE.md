@@ -2188,6 +2188,81 @@ Important differences:
   pairwise distance matrix; threshold the distance map first to keep the
   candidate count modest.
 
+## scikit-fmm
+
+`scikit-fmm` computes geodesic distances on regular grids with the fast
+marching method. `bioimage-cpp` groups geodesic distances under `bic.distance`
+with two operations — a **distance field** to a set of sources, and the full
+**pairwise distance matrix** between a set of points — for two geometry types:
+regular-grid **masks** (the scikit-fmm equivalent) and triangle **meshes**
+(which scikit-fmm does not support; the reference for those is the exact MMP
+algorithm in `pygeodesic`).
+
+> **Status:** the C++ solvers are not implemented yet. The functions below are
+> present and validate their arguments, but calling a well-formed input
+> currently raises `RuntimeError("... not yet implemented")`. This section
+> documents the intended API and behaviour.
+
+scikit-fmm:
+
+```python
+import numpy as np
+import skfmm
+
+# Distance from a set of seed voxels, constrained to a mask (domain).
+phi = np.ones(mask.shape)
+phi[tuple(sources.T)] = -1            # zero contour marks the seeds
+phi = np.ma.MaskedArray(phi, ~mask)   # obstacles / outside-domain
+field = np.abs(skfmm.distance(phi, dx=sampling))
+# Weighted (travel-time) variant:
+tt = skfmm.travel_time(phi, speed, dx=sampling)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+# masks (regular grid); sources/points are (n, ndim) int64 voxel coordinates
+field = bic.distance.geodesic_distance_field(mask, sources, sampling=None,
+                                             speed=None)      # -> mask.shape, float64
+matrix = bic.distance.geodesic_distances(mask, points)       # -> (N, N) float64
+
+# surfaces (triangle mesh); sources/points are 1-D int64 vertex indices
+field = bic.distance.geodesic_distance_field_mesh(vertices, faces, sources,
+                                                  speed=None) # -> (n_vertices,) float64
+matrix = bic.distance.geodesic_distances_mesh(vertices, faces, points)  # -> (N, N) float64
+```
+
+Name mapping:
+
+| scikit-fmm / pygeodesic | bioimage-cpp name |
+| --- | --- |
+| `skfmm.distance` / `skfmm.travel_time` (from seed voxels, masked) | `geodesic_distance_field` |
+| pairwise via repeated `skfmm.distance` | `geodesic_distances` |
+| `pygeodesic … geodesicDistances(sources, None)` | `geodesic_distance_field_mesh` |
+| `pygeodesic … geodesicDistances` (pairwise) | `geodesic_distances_mesh` |
+
+Important differences:
+
+- Explicit, geometry-specific functions rather than a level-set encoding: the
+  domain is passed directly as a `mask` (nonzero = inside) or as a
+  `(vertices, faces)` mesh, and the sources are given as coordinates / vertex
+  indices instead of being baked into a signed `phi`.
+- Outputs are `float64`. Voxels outside the mask and points/vertices
+  unreachable from any source are `+inf`; pairwise matrices are symmetric with
+  a zero diagonal.
+- `sampling` (per-axis voxel spacing, scalar or per-axis) maps to scikit-fmm's
+  `dx` and applies to masks only — meshes carry real vertex coordinates.
+- `speed` is optional (`None` = unit-speed geodesic distance). When supplied it
+  generalizes to a weighted travel time, matching `skfmm.travel_time`; for
+  masks it has the mask's shape, for meshes it is per-vertex.
+- `number_of_threads` follows the `bic.distance` convention (`1` default,
+  `0` = hardware concurrency); the pairwise solves parallelize over sources.
+- Mesh geodesics are true surface (2-manifold) distances, validated against the
+  exact MMP algorithm in `pygeodesic`, not the grid fast-marching used for
+  masks. See `development/distance/` for the reference oracles.
+
 ## I/O and Build Dependencies
 
 `bioimage-cpp` intentionally does not replace nifty or affogato I/O helpers.

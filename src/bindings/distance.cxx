@@ -1,8 +1,10 @@
 #include "distance.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
-#include "bioimage_cpp/distance_transform.hxx"
-#include "bioimage_cpp/non_maximum_distance_suppression.hxx"
+#include "bioimage_cpp/distance/distance_transform.hxx"
+#include "bioimage_cpp/distance/non_maximum_distance_suppression.hxx"
+#include "bioimage_cpp/distance/geodesic_mask.hxx"
+#include "bioimage_cpp/distance/geodesic_mesh.hxx"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -25,6 +27,9 @@ namespace {
 using UInt8Input = nb::ndarray<nb::numpy, const std::uint8_t, nb::c_contig>;
 using FloatArray = nb::ndarray<nb::numpy, float, nb::c_contig>;
 using Int32Array = nb::ndarray<nb::numpy, std::int32_t, nb::c_contig>;
+using Int64Input = nb::ndarray<nb::numpy, const std::int64_t, nb::c_contig>;
+using DoubleInput = nb::ndarray<nb::numpy, const double, nb::c_contig>;
+using DoubleArray = nb::ndarray<nb::numpy, double, nb::c_contig>;
 
 template <class Array>
 std::vector<std::ptrdiff_t> ndarray_shape(const Array &array) {
@@ -265,6 +270,221 @@ nb::ndarray<nb::numpy, PointT, nb::c_contig> non_maximum_distance_suppression_im
     return output;
 }
 
+// ---------------------------------------------------------------------------
+// Geodesic distances (masks + meshes). Interface only for now: the core
+// functions throw "not yet implemented" until the solvers land, but the full
+// Python -> binding -> core path is wired and validated here.
+// ---------------------------------------------------------------------------
+
+// Build a ConstArrayView<double> over an optional speed ndarray, checking its
+// shape against `expected`. Returns nullptr when no speed was supplied.
+struct OptionalSpeed {
+    ConstArrayView<double> view;
+    const ConstArrayView<double> *ptr = nullptr;
+};
+
+OptionalSpeed make_optional_speed(
+    const std::optional<DoubleInput> &speed,
+    const std::vector<std::ptrdiff_t> &shape
+) {
+    OptionalSpeed result;
+    if (speed.has_value()) {
+        check_buffer_shape("speed", ndarray_shape(*speed), size_t_shape(shape));
+        result.view = ConstArrayView<double>{speed->data(), shape, {}};
+        result.ptr = &result.view;
+    }
+    return result;
+}
+
+DoubleArray geodesic_distance_field_mask(
+    UInt8Input mask,
+    Int64Input sources,
+    const std::vector<double> &sampling,
+    std::optional<DoubleInput> speed,
+    const std::size_t n_threads
+) {
+    if (mask.ndim() == 0) {
+        throw std::invalid_argument("mask must have ndim >= 1, got ndim=0");
+    }
+    if (sampling.size() != mask.ndim()) {
+        throw std::invalid_argument(
+            "sampling must have length matching mask ndim, got ndim=" +
+            std::to_string(mask.ndim()) + ", sampling length=" +
+            std::to_string(sampling.size())
+        );
+    }
+    if (sources.ndim() != 2) {
+        throw std::invalid_argument(
+            "sources must have ndim == 2, got ndim=" + std::to_string(sources.ndim())
+        );
+    }
+    if (static_cast<std::size_t>(sources.shape(1)) != mask.ndim()) {
+        throw std::invalid_argument(
+            "sources.shape[1] must match mask ndim, got sources.shape[1]=" +
+            std::to_string(sources.shape(1)) + ", mask.ndim()=" +
+            std::to_string(mask.ndim())
+        );
+    }
+
+    const auto shape = ndarray_shape(mask);
+    auto distances_array = make_array<double, DoubleArray>(size_t_shape(shape));
+
+    ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
+    ConstArrayView<std::int64_t> sources_view{sources.data(), ndarray_shape(sources), {}};
+    ArrayView<double> distances_view{distances_array.data(), shape, {}};
+    const OptionalSpeed speed_opt = make_optional_speed(speed, shape);
+
+    {
+        nb::gil_scoped_release release;
+        distance::geodesic_distance_field(
+            mask_view, sources_view, sampling, speed_opt.ptr, distances_view, n_threads
+        );
+    }
+    return distances_array;
+}
+
+DoubleArray geodesic_distances_mask(
+    UInt8Input mask,
+    Int64Input points,
+    const std::vector<double> &sampling,
+    std::optional<DoubleInput> speed,
+    const std::size_t n_threads
+) {
+    if (mask.ndim() == 0) {
+        throw std::invalid_argument("mask must have ndim >= 1, got ndim=0");
+    }
+    if (sampling.size() != mask.ndim()) {
+        throw std::invalid_argument(
+            "sampling must have length matching mask ndim, got ndim=" +
+            std::to_string(mask.ndim()) + ", sampling length=" +
+            std::to_string(sampling.size())
+        );
+    }
+    if (points.ndim() != 2) {
+        throw std::invalid_argument(
+            "points must have ndim == 2, got ndim=" + std::to_string(points.ndim())
+        );
+    }
+    if (static_cast<std::size_t>(points.shape(1)) != mask.ndim()) {
+        throw std::invalid_argument(
+            "points.shape[1] must match mask ndim, got points.shape[1]=" +
+            std::to_string(points.shape(1)) + ", mask.ndim()=" +
+            std::to_string(mask.ndim())
+        );
+    }
+
+    const auto shape = ndarray_shape(mask);
+    const auto n_points = static_cast<std::size_t>(points.shape(0));
+    auto distances_array = make_array<double, DoubleArray>({n_points, n_points});
+
+    ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
+    ConstArrayView<std::int64_t> points_view{points.data(), ndarray_shape(points), {}};
+    ArrayView<double> distances_view{
+        distances_array.data(),
+        {static_cast<std::ptrdiff_t>(n_points), static_cast<std::ptrdiff_t>(n_points)},
+        {},
+    };
+    const OptionalSpeed speed_opt = make_optional_speed(speed, shape);
+
+    {
+        nb::gil_scoped_release release;
+        distance::geodesic_distances(
+            mask_view, points_view, sampling, speed_opt.ptr, distances_view, n_threads
+        );
+    }
+    return distances_array;
+}
+
+// Validate a triangle mesh (vertices (V, 3) float64, faces (F, 3) int64) and
+// return the vertex count.
+std::size_t check_mesh(const DoubleInput &vertices, const Int64Input &faces) {
+    if (vertices.ndim() != 2 || vertices.shape(1) != 3) {
+        throw std::invalid_argument(
+            "vertices must have shape (n_vertices, 3), got ndim=" +
+            std::to_string(vertices.ndim())
+        );
+    }
+    if (faces.ndim() != 2 || faces.shape(1) != 3) {
+        throw std::invalid_argument(
+            "faces must have shape (n_faces, 3), got ndim=" + std::to_string(faces.ndim())
+        );
+    }
+    return static_cast<std::size_t>(vertices.shape(0));
+}
+
+DoubleArray geodesic_distance_field_mesh(
+    DoubleInput vertices,
+    Int64Input faces,
+    Int64Input sources,
+    std::optional<DoubleInput> speed,
+    const std::size_t n_threads
+) {
+    const auto n_vertices = check_mesh(vertices, faces);
+    if (sources.ndim() != 1) {
+        throw std::invalid_argument(
+            "sources must have ndim == 1 (vertex indices), got ndim=" +
+            std::to_string(sources.ndim())
+        );
+    }
+
+    auto distances_array = make_array<double, DoubleArray>({n_vertices});
+
+    ConstArrayView<double> vertices_view{vertices.data(), ndarray_shape(vertices), {}};
+    ConstArrayView<std::int64_t> faces_view{faces.data(), ndarray_shape(faces), {}};
+    ConstArrayView<std::int64_t> sources_view{sources.data(), ndarray_shape(sources), {}};
+    ArrayView<double> distances_view{
+        distances_array.data(), {static_cast<std::ptrdiff_t>(n_vertices)}, {}
+    };
+    const OptionalSpeed speed_opt =
+        make_optional_speed(speed, {static_cast<std::ptrdiff_t>(n_vertices)});
+
+    {
+        nb::gil_scoped_release release;
+        distance::geodesic_distance_field_mesh(
+            vertices_view, faces_view, sources_view, speed_opt.ptr, distances_view, n_threads
+        );
+    }
+    return distances_array;
+}
+
+DoubleArray geodesic_distances_mesh(
+    DoubleInput vertices,
+    Int64Input faces,
+    Int64Input points,
+    std::optional<DoubleInput> speed,
+    const std::size_t n_threads
+) {
+    const auto n_vertices = check_mesh(vertices, faces);
+    if (points.ndim() != 1) {
+        throw std::invalid_argument(
+            "points must have ndim == 1 (vertex indices), got ndim=" +
+            std::to_string(points.ndim())
+        );
+    }
+
+    const auto n_points = static_cast<std::size_t>(points.shape(0));
+    auto distances_array = make_array<double, DoubleArray>({n_points, n_points});
+
+    ConstArrayView<double> vertices_view{vertices.data(), ndarray_shape(vertices), {}};
+    ConstArrayView<std::int64_t> faces_view{faces.data(), ndarray_shape(faces), {}};
+    ConstArrayView<std::int64_t> points_view{points.data(), ndarray_shape(points), {}};
+    ArrayView<double> distances_view{
+        distances_array.data(),
+        {static_cast<std::ptrdiff_t>(n_points), static_cast<std::ptrdiff_t>(n_points)},
+        {},
+    };
+    const OptionalSpeed speed_opt =
+        make_optional_speed(speed, {static_cast<std::ptrdiff_t>(n_vertices)});
+
+    {
+        nb::gil_scoped_release release;
+        distance::geodesic_distances_mesh(
+            vertices_view, faces_view, points_view, speed_opt.ptr, distances_view, n_threads
+        );
+    }
+    return distances_array;
+}
+
 } // namespace
 
 void bind_distance(nb::module_ &m) {
@@ -310,6 +530,43 @@ void bind_distance(nb::module_ &m) {
         "_non_maximum_distance_suppression_uint32",
         &non_maximum_distance_suppression_impl<std::uint32_t>,
         nb::arg("distance_map"), nb::arg("points"), nb::arg("n_threads"), nms_doc
+    );
+
+    m.def(
+        "_geodesic_distance_field_mask",
+        &geodesic_distance_field_mask,
+        nb::arg("mask"), nb::arg("sources"), nb::arg("sampling"),
+        nb::arg("speed").none(), nb::arg("n_threads"),
+        "Geodesic distance field within a mask from a set of source coordinates.\n"
+        "mask nonzero = inside the domain. sources is (n_sources, ndim) int64.\n"
+        "Returns a float64 array of mask.shape; unreachable voxels are +inf."
+    );
+    m.def(
+        "_geodesic_distances_mask",
+        &geodesic_distances_mask,
+        nb::arg("mask"), nb::arg("points"), nb::arg("sampling"),
+        nb::arg("speed").none(), nb::arg("n_threads"),
+        "Full pairwise geodesic distance matrix between points within a mask.\n"
+        "points is (n_points, ndim) int64. Returns a symmetric (n_points,\n"
+        "n_points) float64 matrix; +inf where two points are not connected."
+    );
+    m.def(
+        "_geodesic_distance_field_mesh",
+        &geodesic_distance_field_mesh,
+        nb::arg("vertices"), nb::arg("faces"), nb::arg("sources"),
+        nb::arg("speed").none(), nb::arg("n_threads"),
+        "Geodesic distance field on a triangle mesh from a set of source\n"
+        "vertices. vertices (n_vertices, 3) float64, faces (n_faces, 3) int64,\n"
+        "sources (n_sources,) int64 vertex indices. Returns (n_vertices,) float64."
+    );
+    m.def(
+        "_geodesic_distances_mesh",
+        &geodesic_distances_mesh,
+        nb::arg("vertices"), nb::arg("faces"), nb::arg("points"),
+        nb::arg("speed").none(), nb::arg("n_threads"),
+        "Full pairwise geodesic distance matrix between mesh vertices.\n"
+        "points is (n_points,) int64 vertex indices. Returns a symmetric\n"
+        "(n_points, n_points) float64 matrix."
     );
 }
 
