@@ -23,6 +23,8 @@
 #include "bioimage_cpp/graph/node_label_projection.hxx"
 #include "bioimage_cpp/graph/proposal_generator.hxx"
 #include "bioimage_cpp/graph/proposal_generators/greedy_additive_multicut.hxx"
+#include "bioimage_cpp/graph/distributed/block_extraction.hxx"
+#include "bioimage_cpp/graph/distributed/merge.hxx"
 #include "bioimage_cpp/graph/proposal_generators/watershed.hxx"
 #include "bioimage_cpp/graph/rag_coordinates.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
@@ -195,6 +197,15 @@ UInt64Array edges_to_uv_array(const std::vector<bioimage_cpp::detail::Edge> &edg
         data[2 * index] = edges[index].first;
         data[2 * index + 1] = edges[index].second;
     }
+    return result;
+}
+
+// Copy a flat per-edge partial-statistics buffer (row-major, 5 columns) into a
+// NumPy `(n_edges, 5)` array. Used by the distributed block-extraction bindings.
+DoubleArray block_stats_to_array(const std::vector<double> &stats) {
+    const auto rows = stats.size() / 5;
+    auto result = make_double_array({rows, std::size_t{5}});
+    std::copy(stats.begin(), stats.end(), result.data());
     return result;
 }
 
@@ -1423,6 +1434,134 @@ std::vector<std::ptrdiff_t> ndarray_shape(ConstDoubleArray array) {
     return shape;
 }
 
+// ---- Distributed region-adjacency-graph + edge-feature primitives ----
+
+template <class T>
+UInt64Array block_region_adjacency_edges_t(
+    LabelArray<T> labels,
+    std::vector<std::int64_t> own_begin,
+    std::vector<std::int64_t> own_shape,
+    const std::size_t number_of_threads
+) {
+    ConstArrayView<T> labels_view{labels.data(), ndarray_shape(labels), {}};
+
+    std::vector<bioimage_cpp::detail::Edge> edges;
+    {
+        nb::gil_scoped_release release;
+        edges = graph::distributed::block_region_adjacency_edges<T>(
+            labels_view, own_begin, own_shape, number_of_threads
+        );
+    }
+    return edges_to_uv_array(edges);
+}
+
+template <class T>
+nb::tuple block_edge_map_stats_t(
+    LabelArray<T> labels,
+    ConstDoubleArray edge_map,
+    std::vector<std::int64_t> own_begin,
+    std::vector<std::int64_t> own_shape,
+    const std::size_t number_of_threads
+) {
+    ConstArrayView<T> labels_view{labels.data(), ndarray_shape(labels), {}};
+    ConstArrayView<double> edge_map_view{edge_map.data(), ndarray_shape(edge_map), {}};
+
+    graph::distributed::BlockEdgeStats result;
+    {
+        nb::gil_scoped_release release;
+        result = graph::distributed::block_edge_map_stats<T>(
+            labels_view, edge_map_view, own_begin, own_shape, number_of_threads
+        );
+    }
+    return nb::make_tuple(
+        edges_to_uv_array(result.edges), block_stats_to_array(result.stats)
+    );
+}
+
+template <class T>
+nb::tuple block_affinity_stats_t(
+    LabelArray<T> labels,
+    ConstDoubleArray affinities,
+    std::vector<std::vector<std::ptrdiff_t>> offsets,
+    std::vector<std::int64_t> own_begin,
+    std::vector<std::int64_t> own_shape,
+    const std::size_t number_of_threads
+) {
+    ConstArrayView<T> labels_view{labels.data(), ndarray_shape(labels), {}};
+    ConstArrayView<double> affinities_view{affinities.data(), ndarray_shape(affinities), {}};
+
+    graph::distributed::BlockEdgeStats result;
+    {
+        nb::gil_scoped_release release;
+        result = graph::distributed::block_affinity_stats<T>(
+            labels_view, affinities_view, offsets, own_begin, own_shape, number_of_threads
+        );
+    }
+    return nb::make_tuple(
+        edges_to_uv_array(result.edges), block_stats_to_array(result.stats)
+    );
+}
+
+UInt64Array distributed_merge_edges(ConstUInt64Array edges) {
+    ConstArrayView<std::uint64_t> edges_view{edges.data(), ndarray_shape(edges), {}};
+
+    std::vector<bioimage_cpp::detail::Edge> merged;
+    {
+        nb::gil_scoped_release release;
+        merged = graph::distributed::merge_edges(edges_view);
+    }
+    return edges_to_uv_array(merged);
+}
+
+DoubleArray distributed_merge_block_edge_stats(
+    const Graph &global_graph,
+    ConstDoubleArray current_stats,
+    ConstUInt64Array block_edges,
+    ConstDoubleArray block_stats
+) {
+    ConstArrayView<double> current_view{current_stats.data(), ndarray_shape(current_stats), {}};
+    ConstArrayView<std::uint64_t> block_edges_view{block_edges.data(), ndarray_shape(block_edges), {}};
+    ConstArrayView<double> block_stats_view{block_stats.data(), ndarray_shape(block_stats), {}};
+
+    std::vector<double> out;
+    {
+        nb::gil_scoped_release release;
+        out = graph::distributed::merge_block_edge_stats(
+            global_graph, current_view, block_edges_view, block_stats_view
+        );
+    }
+    return block_stats_to_array(out);
+}
+
+DoubleArray distributed_finalize_edge_features(
+    ConstDoubleArray stats,
+    const bool compute_complex_features
+) {
+    if (stats.ndim() != 2 || stats.shape(1) != 5) {
+        throw std::invalid_argument("stats must have shape (number_of_edges, 5)");
+    }
+    const auto rows = static_cast<std::size_t>(stats.shape(0));
+    const std::size_t number_of_features = compute_complex_features ? 5 : 2;
+    auto result = make_double_array({rows, number_of_features});
+
+    ConstArrayView<double> stats_view{stats.data(), ndarray_shape(stats), {}};
+    ArrayView<double> out_view{
+        result.data(),
+        {
+            static_cast<std::ptrdiff_t>(rows),
+            static_cast<std::ptrdiff_t>(number_of_features),
+        },
+        {},
+    };
+    {
+        nb::gil_scoped_release release;
+        graph::distributed::finalize_edge_features(
+            stats_view, compute_complex_features, out_view
+        );
+    }
+    return result;
+}
+
 template <class LabelT>
 DoubleArray accumulate_edge_map_features_t(
     const Rag &rag,
@@ -2447,6 +2586,99 @@ void bind_graph(nb::module_ &m) {
         nb::arg("offsets"),
         nb::arg("compute_complex_features"),
         nb::arg("number_of_threads")
+    );
+
+    // Distributed region-adjacency-graph + edge-feature primitives.
+    m.def(
+        "_block_region_adjacency_edges_uint32",
+        &block_region_adjacency_edges_t<std::uint32_t>,
+        nb::arg("labels"), nb::arg("own_begin"), nb::arg("own_shape"),
+        nb::arg("number_of_threads"),
+        "Extract owned region-adjacency edges from a uint32 label block."
+    );
+    m.def(
+        "_block_region_adjacency_edges_uint64",
+        &block_region_adjacency_edges_t<std::uint64_t>,
+        nb::arg("labels"), nb::arg("own_begin"), nb::arg("own_shape"),
+        nb::arg("number_of_threads"),
+        "Extract owned region-adjacency edges from a uint64 label block."
+    );
+    m.def(
+        "_block_region_adjacency_edges_int32",
+        &block_region_adjacency_edges_t<std::int32_t>,
+        nb::arg("labels"), nb::arg("own_begin"), nb::arg("own_shape"),
+        nb::arg("number_of_threads"),
+        "Extract owned region-adjacency edges from an int32 label block."
+    );
+    m.def(
+        "_block_region_adjacency_edges_int64",
+        &block_region_adjacency_edges_t<std::int64_t>,
+        nb::arg("labels"), nb::arg("own_begin"), nb::arg("own_shape"),
+        nb::arg("number_of_threads"),
+        "Extract owned region-adjacency edges from an int64 label block."
+    );
+
+    m.def(
+        "_block_edge_map_stats_uint32",
+        &block_edge_map_stats_t<std::uint32_t>,
+        nb::arg("labels"), nb::arg("edge_map"), nb::arg("own_begin"),
+        nb::arg("own_shape"), nb::arg("number_of_threads")
+    );
+    m.def(
+        "_block_edge_map_stats_uint64",
+        &block_edge_map_stats_t<std::uint64_t>,
+        nb::arg("labels"), nb::arg("edge_map"), nb::arg("own_begin"),
+        nb::arg("own_shape"), nb::arg("number_of_threads")
+    );
+    m.def(
+        "_block_edge_map_stats_int32",
+        &block_edge_map_stats_t<std::int32_t>,
+        nb::arg("labels"), nb::arg("edge_map"), nb::arg("own_begin"),
+        nb::arg("own_shape"), nb::arg("number_of_threads")
+    );
+    m.def(
+        "_block_edge_map_stats_int64",
+        &block_edge_map_stats_t<std::int64_t>,
+        nb::arg("labels"), nb::arg("edge_map"), nb::arg("own_begin"),
+        nb::arg("own_shape"), nb::arg("number_of_threads")
+    );
+
+    m.def(
+        "_block_affinity_stats_uint32",
+        &block_affinity_stats_t<std::uint32_t>,
+        nb::arg("labels"), nb::arg("affinities"), nb::arg("offsets"),
+        nb::arg("own_begin"), nb::arg("own_shape"), nb::arg("number_of_threads")
+    );
+    m.def(
+        "_block_affinity_stats_uint64",
+        &block_affinity_stats_t<std::uint64_t>,
+        nb::arg("labels"), nb::arg("affinities"), nb::arg("offsets"),
+        nb::arg("own_begin"), nb::arg("own_shape"), nb::arg("number_of_threads")
+    );
+    m.def(
+        "_block_affinity_stats_int32",
+        &block_affinity_stats_t<std::int32_t>,
+        nb::arg("labels"), nb::arg("affinities"), nb::arg("offsets"),
+        nb::arg("own_begin"), nb::arg("own_shape"), nb::arg("number_of_threads")
+    );
+    m.def(
+        "_block_affinity_stats_int64",
+        &block_affinity_stats_t<std::int64_t>,
+        nb::arg("labels"), nb::arg("affinities"), nb::arg("offsets"),
+        nb::arg("own_begin"), nb::arg("own_shape"), nb::arg("number_of_threads")
+    );
+
+    m.def("_merge_edges", &distributed_merge_edges, nb::arg("edges"));
+    m.def(
+        "_merge_block_edge_stats",
+        &distributed_merge_block_edge_stats,
+        nb::arg("global_graph"), nb::arg("current_stats"),
+        nb::arg("block_edges"), nb::arg("block_stats")
+    );
+    m.def(
+        "_finalize_edge_features",
+        &distributed_finalize_edge_features,
+        nb::arg("stats"), nb::arg("compute_complex_features")
     );
     m.def(
         "_lifted_edges_from_affinities_uint32",

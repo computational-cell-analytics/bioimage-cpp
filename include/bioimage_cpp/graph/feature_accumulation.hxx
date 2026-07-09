@@ -196,25 +196,10 @@ void scan_edge_map_3d_chunk(
     }
 }
 
-// Given an offset along one axis and the axis length, return the half-open
-// range of axis coordinates `[lo, hi)` for which `coord + delta` stays in
-// `[0, length)`. Returns `lo >= hi` if the offset is larger than the axis.
-inline void valid_axis_range(
-    const std::ptrdiff_t delta,
-    const std::size_t length,
-    std::size_t &lo,
-    std::size_t &hi
-) {
-    if (delta >= 0) {
-        lo = 0;
-        const auto d = static_cast<std::size_t>(delta);
-        hi = (d >= length) ? 0 : (length - d);
-    } else {
-        const auto d = static_cast<std::size_t>(-delta);
-        lo = (d >= length) ? length : d;
-        hi = length;
-    }
-}
+// `valid_axis_range` lives in `detail/grid.hxx` (it is pure grid geometry,
+// shared with the distributed block-extraction sweeps). Pull it into this
+// namespace so the offset-box sweeps below can call it unqualified.
+using bioimage_cpp::detail::valid_axis_range;
 
 // Sweep every (node, target) pair on a 2D grid for which `node + offset` stays
 // in bounds, restricted to the half-open y-slab [y_begin, y_end). The body

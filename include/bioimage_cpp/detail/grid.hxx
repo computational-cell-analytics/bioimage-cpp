@@ -86,4 +86,27 @@ inline bool is_valid_grid_edge(
     return valid_offset_target(node, offset, shape, strides, unused);
 }
 
+// Given a signed offset `delta` along one axis and the axis `length`, return the
+// half-open range of reference coordinates `[lo, hi)` for which `coord + delta`
+// stays in `[0, length)`. Returns `lo >= hi` when the offset is larger than the
+// axis (no valid reference coordinate). This is the per-axis primitive behind
+// the offset-box sweeps in feature accumulation and the distributed block
+// extraction — it depends only on grid geometry, not on any array data.
+inline void valid_axis_range(
+    const std::ptrdiff_t delta,
+    const std::size_t length,
+    std::size_t &lo,
+    std::size_t &hi
+) {
+    if (delta >= 0) {
+        lo = 0;
+        const auto d = static_cast<std::size_t>(delta);
+        hi = (d >= length) ? 0 : (length - d);
+    } else {
+        const auto d = static_cast<std::size_t>(-delta);
+        lo = (d >= length) ? length : d;
+        hi = length;
+    }
+}
+
 } // namespace bioimage_cpp::detail
