@@ -2188,6 +2188,98 @@ Important differences:
   pairwise distance matrix; threshold the distance map first to keep the
   candidate count modest.
 
+## scikit-fmm
+
+`scikit-fmm` computes geodesic distances on regular grids with the fast
+marching method. `bioimage-cpp` groups geodesic distances under `bic.distance`
+with two operations — a **distance field** to a set of sources, and the full
+**pairwise distance matrix** between a set of points — for two geometry types:
+regular-grid **masks** (the scikit-fmm equivalent) and triangle **meshes**
+(which scikit-fmm does not support; the reference for those is the exact MMP
+algorithm in `pygeodesic`).
+
+Both are solved with a first-order fast marching method (Godunov/Eikonal on the
+grid, Kimmel–Sethian on triangles). Masks match scikit-fmm's `order=1` scheme;
+mesh distances are first-order approximations of the exact surface geodesics.
+
+scikit-fmm:
+
+```python
+import numpy as np
+import skfmm
+
+# Distance from a set of seed voxels, constrained to a mask (domain).
+phi = np.ones(mask.shape)
+phi[tuple(sources.T)] = -1            # zero contour marks the seeds
+phi = np.ma.MaskedArray(phi, ~mask)   # obstacles / outside-domain
+field = np.abs(skfmm.distance(phi, dx=sampling))
+# Weighted (travel-time) variant:
+tt = skfmm.travel_time(phi, speed, dx=sampling)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+# masks (regular grid); sources/points are (n, ndim) int64 voxel coordinates
+field = bic.distance.geodesic_distance_field(mask, sources, sampling=None,
+                                             speed=None)      # -> mask.shape, float64
+matrix = bic.distance.geodesic_distances(mask, points)       # -> (N, N) float64
+
+# optional per-axis gradient of the field (like vector_difference_transform)
+field, grad = bic.distance.geodesic_distance_field(mask, sources,
+                                                   return_gradient=True)
+# grad: (*mask.shape, ndim) float32, d(field)/d(axis), points away from source
+gradient = bic.distance.geodesic_gradient_field(mask, sources)  # just the gradient
+
+# surfaces (triangle mesh); sources/points are 1-D int64 vertex indices
+field = bic.distance.geodesic_distance_field_mesh(vertices, faces, sources,
+                                                  speed=None) # -> (n_vertices,) float64
+matrix = bic.distance.geodesic_distances_mesh(vertices, faces, points)  # -> (N, N) float64
+```
+
+Name mapping:
+
+| scikit-fmm / pygeodesic | bioimage-cpp name |
+| --- | --- |
+| `skfmm.distance` / `skfmm.travel_time` (from seed voxels, masked) | `geodesic_distance_field` |
+| gradient of the distance field (per-axis) | `geodesic_distance_field(..., return_gradient=True)` / `geodesic_gradient_field` |
+| pairwise via repeated `skfmm.distance` | `geodesic_distances` |
+| `pygeodesic … geodesicDistances(sources, None)` | `geodesic_distance_field_mesh` |
+| `pygeodesic … geodesicDistances` (pairwise) | `geodesic_distances_mesh` |
+
+Important differences:
+
+- Explicit, geometry-specific functions rather than a level-set encoding: the
+  domain is passed directly as a `mask` (nonzero = inside) or as a
+  `(vertices, faces)` mesh, and the sources are given as coordinates / vertex
+  indices instead of being baked into a signed `phi`.
+- Outputs are `float64`. Voxels outside the mask and points/vertices
+  unreachable from any source are `+inf`; pairwise matrices are symmetric with
+  a zero diagonal.
+- `sampling` (per-axis voxel spacing, scalar or per-axis) maps to scikit-fmm's
+  `dx` and applies to masks only — meshes carry real vertex coordinates.
+- `speed` is optional (`None` = unit-speed geodesic distance). When supplied it
+  generalizes to a weighted travel time, matching `skfmm.travel_time`; for
+  masks it has the mask's shape, for meshes it is per-vertex.
+- `number_of_threads` follows the `bic.distance` convention (`1` default,
+  `0` = hardware concurrency); the pairwise solves parallelize over sources.
+- `geodesic_distance_field(..., return_gradient=True)` also returns the per-axis
+  gradient `∇T` of the field (or use `geodesic_gradient_field` for the gradient
+  alone), analogous to `vector_difference_transform`. It is `float32` with shape
+  `(*mask.shape, ndim)` (channel-last, NumPy axis order); component `i` is
+  `d(field)/d(axis_i)`, pointing **away** from the nearest source with
+  `‖∇T‖ ≈ 1/speed`. Negate it to trace back toward the source — e.g. feed
+  `-grad` (transposed to channel-first) to `bic.flow.compute_flow_density`. It
+  is zero at sources, background, and unreachable voxels. Masks only.
+- Mesh geodesics are surface (2-manifold) distances from the Kimmel–Sethian
+  triangle fast-marching method — a first-order approximation (a few % mean
+  error vs the exact `pygeodesic` MMP algorithm, larger on very obtuse
+  triangles, since obtuse-angle unfolding is not done yet). Like the mask
+  solver it slightly overestimates. See `development/distance/` for the
+  reference oracles and `benchmark_geodesic.py` for timings.
+
 ## I/O and Build Dependencies
 
 `bioimage-cpp` intentionally does not replace nifty or affogato I/O helpers.
