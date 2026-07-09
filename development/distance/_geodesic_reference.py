@@ -69,11 +69,14 @@ def reference_geodesic_field_mask(mask, sources, sampling=None, speed=None):
     phi[tuple(sources.T)] = -1.0
     phi = np.ma.MaskedArray(phi, mask=~mask)
 
+    # order=1 matches bioimage-cpp's first-order Godunov scheme (so agreement is
+    # limited only by the ~0.5-cell seed offset documented above, not by the
+    # stencil order).
     if speed is None:
-        field = np.ma.abs(skfmm.distance(phi, dx=dx))
+        field = np.ma.abs(skfmm.distance(phi, dx=dx, order=1))
     else:
         speed = np.ascontiguousarray(speed, dtype=np.float64)
-        field = skfmm.travel_time(phi, speed, dx=dx)
+        field = skfmm.travel_time(phi, speed, dx=dx, order=1)
 
     out = np.full(mask.shape, np.inf, dtype=np.float64)
     field_data = np.ma.getdata(field)
@@ -143,8 +146,10 @@ def reference_geodesic_distances_mesh(vertices, faces, points):
     n = len(points)
     out = np.full((n, n), np.inf, dtype=np.float64)
     for i in range(n):
-        distances, _ = algo.geodesicDistances(points[i : i + 1], points)
-        out[i] = np.asarray(distances, dtype=np.float64)
+        # Read the full single-source field and index the targets; passing an
+        # explicit target array to pygeodesic can overflow on some meshes.
+        distances, _ = algo.geodesicDistances(points[i : i + 1], None)
+        out[i] = np.asarray(distances, dtype=np.float64)[points]
     out = 0.5 * (out + out.T)
     np.fill_diagonal(out, 0.0)
     return out

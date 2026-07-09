@@ -90,8 +90,9 @@ def geodesic_distance_field(
     sources: np.ndarray,
     sampling: float | Sequence[float] | None = None,
     speed: np.ndarray | None = None,
+    return_gradient: bool = False,
     number_of_threads: int = 1,
-) -> np.ndarray:
+):
     """Geodesic distance field within a mask from a set of source coordinates.
 
     Computes, for every foreground voxel, the shortest-path distance to the
@@ -114,15 +115,25 @@ def geodesic_distance_field(
         Optional per-voxel speed, same shape as ``mask``. ``None`` gives
         unit-speed geodesic distance; otherwise the result is the weighted
         travel time.
+    return_gradient
+        If ``True``, also return the per-axis gradient of the field (see
+        Returns). Analogous to :func:`vector_difference_transform`.
     number_of_threads
         ``0`` uses ``hardware_concurrency``; a positive value pins the thread
         count. Default ``1``.
 
     Returns
     -------
-    np.ndarray
-        ``float64`` array of shape ``mask.shape``. Background voxels and voxels
-        unreachable from any source are ``+inf``.
+    np.ndarray or (np.ndarray, np.ndarray)
+        The distance field, a ``float64`` array of shape ``mask.shape``.
+        Background voxels and voxels unreachable from any source are ``+inf``.
+        If ``return_gradient`` is ``True``, returns ``(field, gradient)`` where
+        ``gradient`` is a ``float32`` array of shape ``(*mask.shape, ndim)``
+        holding the first-order upwind gradient ``d(field)/d(axis)`` (channel
+        last, NumPy axis order). The gradient points **away from the source**
+        (direction of increasing distance) with ``norm ~= 1/speed``; negate it
+        to trace back toward the source. It is zero at sources, background, and
+        unreachable voxels.
     """
     function = "geodesic_distance_field"
     binary = _as_binary_input(mask, function)
@@ -131,9 +142,39 @@ def geodesic_distance_field(
     sampling_values = _normalize_sampling(sampling, ndim, function)
     speed_arr = _as_speed(speed, tuple(binary.shape), function)
     n_threads = _normalize_threads(number_of_threads, function)
-    return _core._geodesic_distance_field_mask(
-        binary, sources_arr, sampling_values, speed_arr, n_threads
+    field, gradient = _core._geodesic_distance_field_mask(
+        binary, sources_arr, sampling_values, speed_arr, bool(return_gradient), n_threads
     )
+    if return_gradient:
+        return field, gradient
+    return field
+
+
+def geodesic_gradient_field(
+    mask: np.ndarray,
+    sources: np.ndarray,
+    sampling: float | Sequence[float] | None = None,
+    speed: np.ndarray | None = None,
+    number_of_threads: int = 1,
+) -> np.ndarray:
+    """Return the per-axis gradient of the geodesic distance field within a mask.
+
+    Thin wrapper around :func:`geodesic_distance_field` with
+    ``return_gradient=True`` that returns only the gradient. Output has shape
+    ``mask.shape + (ndim,)`` and dtype ``float32``; the trailing vector axis
+    follows NumPy axis order. Each component is ``d(field)/d(axis)`` pointing
+    away from the nearest source (``norm ~= 1/speed``); negate to trace toward
+    it (e.g. to feed :func:`bioimage_cpp.flow.compute_flow_density`).
+    """
+    _, gradient = geodesic_distance_field(
+        mask,
+        sources,
+        sampling=sampling,
+        speed=speed,
+        return_gradient=True,
+        number_of_threads=number_of_threads,
+    )
+    return gradient
 
 
 def geodesic_distances(

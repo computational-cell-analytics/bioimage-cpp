@@ -296,11 +296,12 @@ OptionalSpeed make_optional_speed(
     return result;
 }
 
-DoubleArray geodesic_distance_field_mask(
+nb::tuple geodesic_distance_field_mask(
     UInt8Input mask,
     Int64Input sources,
     const std::vector<double> &sampling,
     std::optional<DoubleInput> speed,
+    const bool return_gradient,
     const std::size_t n_threads
 ) {
     if (mask.ndim() == 0) {
@@ -327,6 +328,7 @@ DoubleArray geodesic_distance_field_mask(
     }
 
     const auto shape = ndarray_shape(mask);
+    const auto ndim = shape.size();
     auto distances_array = make_array<double, DoubleArray>(size_t_shape(shape));
 
     ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
@@ -334,13 +336,31 @@ DoubleArray geodesic_distance_field_mask(
     ArrayView<double> distances_view{distances_array.data(), shape, {}};
     const OptionalSpeed speed_opt = make_optional_speed(speed, shape);
 
+    // Optional per-axis gradient output, shape (*mask.shape, ndim), float32.
+    FloatArray gradient_array;
+    ArrayView<float> gradient_view;
+    ArrayView<float> *gradient_ptr = nullptr;
+    if (return_gradient) {
+        auto gradient_shape = size_t_shape(shape);
+        gradient_shape.push_back(ndim);
+        gradient_array = make_array<float, FloatArray>(gradient_shape);
+        auto gradient_view_shape = shape;
+        gradient_view_shape.push_back(static_cast<std::ptrdiff_t>(ndim));
+        gradient_view = ArrayView<float>{gradient_array.data(), gradient_view_shape, {}};
+        gradient_ptr = &gradient_view;
+    }
+
     {
         nb::gil_scoped_release release;
         distance::geodesic_distance_field(
-            mask_view, sources_view, sampling, speed_opt.ptr, distances_view, n_threads
+            mask_view, sources_view, sampling, speed_opt.ptr, distances_view, n_threads,
+            gradient_ptr
         );
     }
-    return distances_array;
+
+    auto gradient_result =
+        return_gradient ? nb::cast(gradient_array) : nb::object(nb::none());
+    return nb::make_tuple(nb::cast(distances_array), gradient_result);
 }
 
 DoubleArray geodesic_distances_mask(
@@ -536,10 +556,12 @@ void bind_distance(nb::module_ &m) {
         "_geodesic_distance_field_mask",
         &geodesic_distance_field_mask,
         nb::arg("mask"), nb::arg("sources"), nb::arg("sampling"),
-        nb::arg("speed").none(), nb::arg("n_threads"),
+        nb::arg("speed").none(), nb::arg("return_gradient"), nb::arg("n_threads"),
         "Geodesic distance field within a mask from a set of source coordinates.\n"
         "mask nonzero = inside the domain. sources is (n_sources, ndim) int64.\n"
-        "Returns a float64 array of mask.shape; unreachable voxels are +inf."
+        "Returns (field, gradient): field is float64 of mask.shape (unreachable\n"
+        "voxels +inf); gradient is float32 (*mask.shape, ndim) when\n"
+        "return_gradient else None."
     );
     m.def(
         "_geodesic_distances_mask",

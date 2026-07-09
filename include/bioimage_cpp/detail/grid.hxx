@@ -28,6 +28,26 @@ inline std::vector<std::ptrdiff_t> c_order_strides(const std::vector<std::ptrdif
     return strides;
 }
 
+// Decode a flat (row-major) node index into its per-axis coordinates, writing
+// `ndim` entries into `coords_out`. `strides` must be `c_order_strides(shape)`.
+// Uses one division + one subtraction per axis (no modulo); the innermost axis
+// (stride 1) reduces to a copy of the remaining index. This is the cheap
+// decode to prefer in hot loops that need a node's coordinates once, rather
+// than calling `valid_offset_target` (div + mod per axis) repeatedly.
+inline void coords_from_index(
+    std::uint64_t node,
+    const std::vector<std::ptrdiff_t> &strides,
+    std::size_t ndim,
+    std::ptrdiff_t *coords_out
+) {
+    for (std::size_t axis = 0; axis < ndim; ++axis) {
+        const auto stride = static_cast<std::uint64_t>(strides[axis]);
+        const auto coord = node / stride;
+        coords_out[axis] = static_cast<std::ptrdiff_t>(coord);
+        node -= coord * stride;
+    }
+}
+
 // Translate a flat node index by a per-axis offset on a row-major grid.
 //
 // Returns true when the offset keeps the result inside the grid, in which case
