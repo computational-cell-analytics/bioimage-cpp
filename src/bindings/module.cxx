@@ -6,6 +6,7 @@
 #include "graph.hxx"
 #include "ground_truth.hxx"
 #include "label_multiset.hxx"
+#include "mesh.hxx"
 #include "segmentation.hxx"
 #include "transformation.hxx"
 #include "util.hxx"
@@ -25,6 +26,7 @@ NB_MODULE(_core, m) {
     bioimage_cpp::bindings::bind_graph(m);
     bioimage_cpp::bindings::bind_ground_truth(m);
     bioimage_cpp::bindings::bind_label_multiset(m);
+    bioimage_cpp::bindings::bind_mesh(m);
     bioimage_cpp::bindings::bind_segmentation(m);
     bioimage_cpp::bindings::bind_transformation(m);
     bioimage_cpp::bindings::bind_util(m);

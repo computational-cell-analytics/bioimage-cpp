@@ -1872,6 +1872,54 @@ Notes:
 
 ## Skimage
 
+### Marching Cubes
+
+`bioimage-cpp` provides dependency-free isosurface extraction under
+`bic.mesh`, including both the topology-resolving Lewiner/MC33 method used by
+default in scikit-image and the classic Lorensen lookup-table variant.
+
+```python
+import bioimage_cpp as bic
+
+# Extract one object from a label image. `pad=True` closes objects that touch
+# the volume boundary by adding a temporary zero-valued halo.
+vertices, faces, normals, values = bic.mesh.marching_cubes(
+    labels == label_id,
+    level=0.5,
+    spacing=(z_spacing, y_spacing, x_spacing),
+    method="lewiner",
+    pad=True,
+)
+```
+
+The signature follows `skimage.measure.marching_cubes`: `level`, `spacing`,
+`gradient_direction`, `step_size`, `allow_degenerate`, `method`, and an
+optional boolean `mask` have the same purpose. Coordinates use NumPy
+`(z, y, x)` order. Vertices are `float32` at unit spacing and `float64` after
+non-unit spacing; faces are consistently `int32`, and normals/values are
+`float32`.
+
+Important details:
+
+- Inputs are converted to contiguous `float32` before extraction. Any real
+  numeric or boolean input dtype is accepted; complex inputs are rejected.
+- `method="lewiner"` resolves ambiguous cases and is the default;
+  `method="lorensen"` selects the original 256-case algorithm.
+- Normals and local-range values follow scikit-image semantics. As in
+  scikit-image, `gradient_direction` reverses face winding without changing
+  normals, and anisotropic spacing scales vertices without transforming
+  normals.
+- `pad=False` matches scikit-image's open-boundary behavior. The additional
+  `pad=True` option uses a zero-valued halo and is intended for
+  foreground-positive segmentation masks. The iso-level is determined from
+  the original unpadded volume.
+- Spacing entries must be positive and finite, and faces remain `int32` when
+  degenerate faces are removed. These validations/dtype choices are
+  intentional differences from scikit-image edge cases.
+
+See `development/mesh/check_marching_cubes.py` for reference comparisons and
+`development/mesh/benchmark_marching_cubes.py` for reproducible timings.
+
 ### Anti-Aliased Resampling
 
 `affine_transform` itself never pre-smooths the input; downsampling without
