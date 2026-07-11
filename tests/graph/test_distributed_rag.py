@@ -377,3 +377,29 @@ def test_unsupported_label_dtype_raises():
     labels = np.zeros((5, 5), dtype=np.uint8)
     with pytest.raises(TypeError):
         dist.block_region_adjacency_edges(labels, [0, 0], [5, 5])
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("number_of_threads", [1, 4])
+def test_negative_labels_raise(dtype, number_of_threads):
+    # A negative label must raise a normal Python exception from every block
+    # scanner, also when the check fires inside a worker thread (this used to
+    # terminate the process via an unhandled exception in std::thread).
+    labels = np.zeros((8, 8), dtype=dtype)
+    labels[3, 3] = -1
+    edge_map = np.zeros((8, 8), dtype=np.float64)
+    affinities = np.zeros((2, 8, 8), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="negative"):
+        dist.block_region_adjacency_edges(
+            labels, [0, 0], [8, 8], number_of_threads=number_of_threads
+        )
+    with pytest.raises(ValueError, match="negative"):
+        dist.block_edge_map_stats(
+            labels, edge_map, [0, 0], [8, 8], number_of_threads=number_of_threads
+        )
+    with pytest.raises(ValueError, match="negative"):
+        dist.block_affinity_stats(
+            labels, affinities, [[1, 0], [0, 1]], [0, 0], [8, 8],
+            number_of_threads=number_of_threads,
+        )
