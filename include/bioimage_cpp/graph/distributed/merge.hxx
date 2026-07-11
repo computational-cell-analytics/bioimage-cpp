@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
-#include <unordered_set>
 #include <vector>
 
 // Whole-volume merge primitives for the distributed region-adjacency-graph and
@@ -25,7 +24,9 @@ namespace bioimage_cpp::graph::distributed {
 // Edges are canonicalized to `u < v`, self-edges (`u == v`) are dropped, and the
 // result is deduplicated and sorted ascending by `(u, v)` — exactly the
 // precondition of `UndirectedGraph::from_sorted_unique_edges`, so the merged
-// output can be turned into the global graph directly.
+// output can be turned into the global graph directly. Deduplication uses
+// sort + unique rather than a hash set: peak memory stays close to one copy of
+// the input instead of the ~8x node/bucket overhead of an unordered_set.
 inline std::vector<bioimage_cpp::detail::Edge> merge_edges(
     const ConstArrayView<std::uint64_t> &concatenated
 ) {
@@ -34,19 +35,21 @@ inline std::vector<bioimage_cpp::detail::Edge> merge_edges(
     }
 
     const auto number_of_input_edges = static_cast<std::size_t>(concatenated.shape[0]);
-    std::unordered_set<bioimage_cpp::detail::Edge, bioimage_cpp::detail::EdgeHash> merged;
-    merged.reserve(number_of_input_edges);
+    std::vector<bioimage_cpp::detail::Edge> sorted_edges;
+    sorted_edges.reserve(number_of_input_edges);
     for (std::size_t index = 0; index < number_of_input_edges; ++index) {
         const auto u = concatenated.data[2 * index];
         const auto v = concatenated.data[2 * index + 1];
         if (u == v) {
             continue;
         }
-        merged.insert(bioimage_cpp::detail::edge_key(u, v));
+        sorted_edges.push_back(bioimage_cpp::detail::edge_key(u, v));
     }
 
-    std::vector<bioimage_cpp::detail::Edge> sorted_edges(merged.begin(), merged.end());
     std::sort(sorted_edges.begin(), sorted_edges.end());
+    sorted_edges.erase(
+        std::unique(sorted_edges.begin(), sorted_edges.end()), sorted_edges.end()
+    );
     return sorted_edges;
 }
 

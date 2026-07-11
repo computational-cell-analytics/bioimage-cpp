@@ -214,6 +214,10 @@ def merge_edges(edges) -> np.ndarray:
     self-edges are dropped, and the result is deduplicated and sorted
     lexicographically. The returned ``(E, 2)`` ``uint64`` array feeds
     :meth:`bioimage_cpp.graph.UndirectedGraph.from_unique_edges` directly.
+
+    Outputs are valid inputs, so peak memory can be bounded by merging
+    hierarchically: merge groups of blocks first, then merge the merged
+    results (tree reduction).
     """
     if isinstance(edges, np.ndarray):
         stacked = edges
