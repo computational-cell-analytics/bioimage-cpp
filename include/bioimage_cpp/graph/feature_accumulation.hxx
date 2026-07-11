@@ -193,16 +193,10 @@ void scan_edge_map_3d_chunk(
     }
 }
 
-// `valid_axis_range` lives in `detail/grid.hxx` (it is pure grid geometry,
-// shared with the distributed block-extraction sweeps). Pull it into this
-// namespace so the offset-box sweeps below can call it unqualified.
-using bioimage_cpp::detail::valid_axis_range;
-
 // Sweep every (node, target) pair on a 2D grid for which `node + offset` stays
-// in bounds, restricted to the half-open y-slab [y_begin, y_end). The body
-// receives flat C-order indices for both endpoints and is expected to inline
-// at -O2 since this is a header-only template with a fully-known callable
-// type at instantiation.
+// in bounds, restricted to the half-open y-slab [y_begin, y_end). Thin wrapper
+// around `detail/grid.hxx::sweep_clipped_box_2d` (the loop shared with the
+// distributed block extraction) with the x-axis unclipped.
 template <class Body>
 void sweep_offset_box_2d(
     const std::ptrdiff_t dy,
@@ -213,25 +207,9 @@ void sweep_offset_box_2d(
     const std::size_t y_end,
     const Body &body
 ) {
-    std::size_t y_lo_full, y_hi_full, x_lo, x_hi;
-    valid_axis_range(dy, height, y_lo_full, y_hi_full);
-    valid_axis_range(dx, width, x_lo, x_hi);
-    const auto y_lo = std::max(y_lo_full, y_begin);
-    const auto y_hi = std::min(y_hi_full, y_end);
-    if (y_lo >= y_hi || x_lo >= x_hi) {
-        return;
-    }
-    const auto offset_stride = dy * static_cast<std::ptrdiff_t>(width) + dx;
-    for (std::size_t y = y_lo; y < y_hi; ++y) {
-        const auto row_offset = y * width;
-        for (std::size_t x = x_lo; x < x_hi; ++x) {
-            const auto node = row_offset + x;
-            const auto target = static_cast<std::uint64_t>(
-                static_cast<std::ptrdiff_t>(node) + offset_stride
-            );
-            body(static_cast<std::uint64_t>(node), target);
-        }
-    }
+    bioimage_cpp::detail::sweep_clipped_box_2d(
+        dy, dx, height, width, y_begin, y_end, 0, width, body
+    );
 }
 
 // 3D variant of `sweep_offset_box_2d`. Restricts the sweep to a z-slab.
@@ -247,32 +225,9 @@ void sweep_offset_box_3d(
     const std::size_t z_end,
     const Body &body
 ) {
-    std::size_t z_lo_full, z_hi_full, y_lo, y_hi, x_lo, x_hi;
-    valid_axis_range(dz, depth, z_lo_full, z_hi_full);
-    valid_axis_range(dy, height, y_lo, y_hi);
-    valid_axis_range(dx, width, x_lo, x_hi);
-    const auto z_lo = std::max(z_lo_full, z_begin);
-    const auto z_hi = std::min(z_hi_full, z_end);
-    if (z_lo >= z_hi || y_lo >= y_hi || x_lo >= x_hi) {
-        return;
-    }
-    const auto slice_size = height * width;
-    const auto offset_stride =
-        dz * static_cast<std::ptrdiff_t>(slice_size) +
-        dy * static_cast<std::ptrdiff_t>(width) + dx;
-    for (std::size_t z = z_lo; z < z_hi; ++z) {
-        const auto slice_offset = z * slice_size;
-        for (std::size_t y = y_lo; y < y_hi; ++y) {
-            const auto row_offset = slice_offset + y * width;
-            for (std::size_t x = x_lo; x < x_hi; ++x) {
-                const auto node = row_offset + x;
-                const auto target = static_cast<std::uint64_t>(
-                    static_cast<std::ptrdiff_t>(node) + offset_stride
-                );
-                body(static_cast<std::uint64_t>(node), target);
-            }
-        }
-    }
+    bioimage_cpp::detail::sweep_clipped_box_3d(
+        dz, dy, dx, depth, height, width, z_begin, z_end, 0, height, 0, width, body
+    );
 }
 
 template <class LabelT, class ValueT, class Stats>

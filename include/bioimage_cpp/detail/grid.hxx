@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -106,6 +107,100 @@ inline void valid_axis_range(
         const auto d = static_cast<std::size_t>(-delta);
         lo = (d >= length) ? length : d;
         hi = length;
+    }
+}
+
+// Sweep every (node, target) pair on a 2D row-major grid for which
+// `node + offset` stays inside the grid and the reference node lies in the
+// half-open clip box `[clip_y_lo, clip_y_hi) x [clip_x_lo, clip_x_hi)`. The
+// body receives flat C-order indices for both endpoints and is expected to
+// inline at -O2 since this is a header-only template with a fully-known
+// callable type at instantiation. Callers fold any additional restriction —
+// a per-thread axis-0 slab, an owned block box — into the clip box; passing
+// the full grid extent sweeps every valid reference node. Shared by the
+// in-core feature accumulation / lifted-edge sweeps and the distributed
+// block extraction.
+template <class Body>
+void sweep_clipped_box_2d(
+    const std::ptrdiff_t dy,
+    const std::ptrdiff_t dx,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t clip_y_lo,
+    const std::size_t clip_y_hi,
+    const std::size_t clip_x_lo,
+    const std::size_t clip_x_hi,
+    const Body &body
+) {
+    std::size_t y_lo_v, y_hi_v, x_lo_v, x_hi_v;
+    valid_axis_range(dy, height, y_lo_v, y_hi_v);
+    valid_axis_range(dx, width, x_lo_v, x_hi_v);
+    const auto y_lo = std::max(y_lo_v, clip_y_lo);
+    const auto y_hi = std::min(y_hi_v, clip_y_hi);
+    const auto x_lo = std::max(x_lo_v, clip_x_lo);
+    const auto x_hi = std::min(x_hi_v, clip_x_hi);
+    if (y_lo >= y_hi || x_lo >= x_hi) {
+        return;
+    }
+    const auto offset_stride = dy * static_cast<std::ptrdiff_t>(width) + dx;
+    for (std::size_t y = y_lo; y < y_hi; ++y) {
+        const auto row_offset = y * width;
+        for (std::size_t x = x_lo; x < x_hi; ++x) {
+            const auto node = row_offset + x;
+            const auto target = static_cast<std::uint64_t>(
+                static_cast<std::ptrdiff_t>(node) + offset_stride
+            );
+            body(static_cast<std::uint64_t>(node), target);
+        }
+    }
+}
+
+// 3D variant of `sweep_clipped_box_2d`.
+template <class Body>
+void sweep_clipped_box_3d(
+    const std::ptrdiff_t dz,
+    const std::ptrdiff_t dy,
+    const std::ptrdiff_t dx,
+    const std::size_t depth,
+    const std::size_t height,
+    const std::size_t width,
+    const std::size_t clip_z_lo,
+    const std::size_t clip_z_hi,
+    const std::size_t clip_y_lo,
+    const std::size_t clip_y_hi,
+    const std::size_t clip_x_lo,
+    const std::size_t clip_x_hi,
+    const Body &body
+) {
+    std::size_t z_lo_v, z_hi_v, y_lo_v, y_hi_v, x_lo_v, x_hi_v;
+    valid_axis_range(dz, depth, z_lo_v, z_hi_v);
+    valid_axis_range(dy, height, y_lo_v, y_hi_v);
+    valid_axis_range(dx, width, x_lo_v, x_hi_v);
+    const auto z_lo = std::max(z_lo_v, clip_z_lo);
+    const auto z_hi = std::min(z_hi_v, clip_z_hi);
+    const auto y_lo = std::max(y_lo_v, clip_y_lo);
+    const auto y_hi = std::min(y_hi_v, clip_y_hi);
+    const auto x_lo = std::max(x_lo_v, clip_x_lo);
+    const auto x_hi = std::min(x_hi_v, clip_x_hi);
+    if (z_lo >= z_hi || y_lo >= y_hi || x_lo >= x_hi) {
+        return;
+    }
+    const auto slice_size = height * width;
+    const auto offset_stride =
+        dz * static_cast<std::ptrdiff_t>(slice_size) +
+        dy * static_cast<std::ptrdiff_t>(width) + dx;
+    for (std::size_t z = z_lo; z < z_hi; ++z) {
+        const auto slice_offset = z * slice_size;
+        for (std::size_t y = y_lo; y < y_hi; ++y) {
+            const auto row_offset = slice_offset + y * width;
+            for (std::size_t x = x_lo; x < x_hi; ++x) {
+                const auto node = row_offset + x;
+                const auto target = static_cast<std::uint64_t>(
+                    static_cast<std::ptrdiff_t>(node) + offset_stride
+                );
+                body(static_cast<std::uint64_t>(node), target);
+            }
+        }
     }
 }
 
