@@ -25,8 +25,8 @@ The pipeline has three stages:
 
 3. **Merge the features**: fold each block's partial statistics onto the global
    edges with :func:`merge_block_edge_stats` (starting from
-   :func:`empty_edge_stats`), then convert to features with
-   :func:`finalize_edge_features`.
+   :func:`empty_edge_stats`; the accumulator is updated in place), then convert
+   to features with :func:`finalize_edge_features`.
 
 Exactly-recoverable features are ``size``, ``mean``, ``std``, ``min`` and
 ``max``. Median and percentiles cannot be reconstructed from block partials, so
@@ -246,17 +246,33 @@ def merge_block_edge_stats(
     """Fold one block's partial statistics onto the global edges.
 
     ``current_stats`` is the running ``(E, 5)`` accumulator (rows aligned to
-    ``global_graph`` edge ids; start from :func:`empty_edge_stats`).
+    ``global_graph`` edge ids; start from :func:`empty_edge_stats`). **It is
+    updated in place and returned**, so one merge costs O(block edges)
+    regardless of the global graph size; it must be a C-contiguous, writable
+    ``float64`` array (as produced by :func:`empty_edge_stats`).
     ``block_edges`` / ``block_stats`` are a block extraction's ``(n, 2)`` /
     ``(n, 5)`` outputs. Each block edge is mapped to its global edge id via
     ``global_graph.find_edge``; edges absent from the graph are skipped.
     ``count`` adds, ``mean/M2`` combine via the Chan formula, and ``min/max``
-    reduce. Returns the updated ``(E, 5)`` accumulator.
+    reduce.
 
     Block edge endpoints must be valid node ids of ``global_graph``.
     """
-    current = _as_stats_array(current_stats, "current_stats")
-    if int(current.shape[0]) != int(global_graph.number_of_edges):
+    # Do not coerce/copy `current_stats` — the merge mutates it in place, and a
+    # silent copy would discard the update.
+    if not isinstance(current_stats, np.ndarray) or current_stats.dtype != np.float64:
+        raise TypeError(
+            "current_stats must be a float64 numpy array, got "
+            f"{type(current_stats).__name__}"
+            + (f" with dtype={current_stats.dtype}" if isinstance(current_stats, np.ndarray) else "")
+        )
+    if current_stats.ndim != 2 or current_stats.shape[1] != 5:
+        raise ValueError("current_stats must have shape (number_of_edges, 5)")
+    if not current_stats.flags.c_contiguous:
+        raise ValueError("current_stats must be C-contiguous (it is updated in place)")
+    if not current_stats.flags.writeable:
+        raise ValueError("current_stats must be writable (it is updated in place)")
+    if int(current_stats.shape[0]) != int(global_graph.number_of_edges):
         raise ValueError("current_stats rows must match global_graph number_of_edges")
 
     block_edge_array = np.asarray(block_edges, dtype=np.uint64)
@@ -266,12 +282,13 @@ def merge_block_edge_stats(
     if block_stat_array.shape[0] != block_edge_array.shape[0]:
         raise ValueError("block_edges and block_stats must have the same number of rows")
 
-    return _core._merge_block_edge_stats(
+    _core._merge_block_edge_stats(
         global_graph,
-        current,
+        current_stats,
         np.ascontiguousarray(block_edge_array),
         block_stat_array,
     )
+    return current_stats
 
 
 def finalize_edge_features(

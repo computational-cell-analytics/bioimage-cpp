@@ -1434,6 +1434,14 @@ std::vector<std::ptrdiff_t> ndarray_shape(ConstDoubleArray array) {
     return shape;
 }
 
+std::vector<std::ptrdiff_t> ndarray_shape(DoubleArray array) {
+    std::vector<std::ptrdiff_t> shape(array.ndim());
+    for (std::size_t axis = 0; axis < array.ndim(); ++axis) {
+        shape[axis] = static_cast<std::ptrdiff_t>(array.shape(axis));
+    }
+    return shape;
+}
+
 // ---- Distributed region-adjacency-graph + edge-feature primitives ----
 
 template <class T>
@@ -1513,24 +1521,25 @@ UInt64Array distributed_merge_edges(ConstUInt64Array edges) {
     return edges_to_uv_array(merged);
 }
 
-DoubleArray distributed_merge_block_edge_stats(
+// Mutates `current_stats` in place (the Python wrapper hands the caller's
+// accumulator back), so one merge stays O(block edges) instead of copying the
+// whole global accumulator per block.
+void distributed_merge_block_edge_stats(
     const Graph &global_graph,
-    ConstDoubleArray current_stats,
+    DoubleArray current_stats,
     ConstUInt64Array block_edges,
     ConstDoubleArray block_stats
 ) {
-    ConstArrayView<double> current_view{current_stats.data(), ndarray_shape(current_stats), {}};
+    ArrayView<double> current_view{current_stats.data(), ndarray_shape(current_stats), {}};
     ConstArrayView<std::uint64_t> block_edges_view{block_edges.data(), ndarray_shape(block_edges), {}};
     ConstArrayView<double> block_stats_view{block_stats.data(), ndarray_shape(block_stats), {}};
 
-    std::vector<double> out;
     {
         nb::gil_scoped_release release;
-        out = graph::distributed::merge_block_edge_stats(
+        graph::distributed::merge_block_edge_stats(
             global_graph, current_view, block_edges_view, block_stats_view
         );
     }
-    return block_stats_to_array(out);
 }
 
 DoubleArray distributed_finalize_edge_features(

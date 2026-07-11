@@ -51,20 +51,22 @@ inline std::vector<bioimage_cpp::detail::Edge> merge_edges(
 }
 
 // Fold one block's partial edge statistics into a running whole-volume
-// accumulator, returning the updated accumulator. `current_stats` and the return
-// value are `(number_of_edges, 5)` rows aligned to `global_graph`'s edge ids;
+// accumulator, updating `current_stats` in place. `current_stats` is
+// `(number_of_edges, 5)` rows aligned to `global_graph`'s edge ids;
 // `block_edges`/`block_stats` are the `(n, 2)` / `(n, 5)` outputs of a block
 // extraction. Each block edge is mapped to its global edge id via
 // `global_graph.find_edge`; edges absent from the global graph (id `-1`) are
 // skipped. `count` adds, `mean/M2` combine via the Chan formula, and `min/max`
 // reduce; rows with zero count take the block row verbatim (so `current_stats`
-// may be zero-initialized).
+// may be zero-initialized). Mutating in place keeps one merge O(block edges)
+// instead of O(global edges) — the per-block cost must not scale with the
+// global graph.
 //
 // Block edge endpoints must be valid node ids of `global_graph`
 // (`< number_of_nodes`); `find_edge` throws `std::out_of_range` otherwise.
-inline std::vector<double> merge_block_edge_stats(
+inline void merge_block_edge_stats(
     const UndirectedGraph &global_graph,
-    const ConstArrayView<double> &current_stats,
+    const ArrayView<double> &current_stats,
     const ConstArrayView<std::uint64_t> &block_edges,
     const ConstArrayView<double> &block_stats
 ) {
@@ -88,11 +90,6 @@ inline std::vector<double> merge_block_edge_stats(
         );
     }
 
-    const auto number_of_edges = static_cast<std::size_t>(current_stats.shape[0]);
-    std::vector<double> out(
-        current_stats.data, current_stats.data + number_of_edges * 5
-    );
-
     const auto number_of_block_edges = static_cast<std::size_t>(block_edges.shape[0]);
     for (std::size_t index = 0; index < number_of_block_edges; ++index) {
         const auto u = block_edges.data[2 * index];
@@ -102,7 +99,7 @@ inline std::vector<double> merge_block_edge_stats(
             continue;
         }
 
-        double *const o = out.data() + static_cast<std::size_t>(edge) * 5;
+        double *const o = current_stats.data + static_cast<std::size_t>(edge) * 5;
         const double *const b = block_stats.data + index * 5;
         if (b[0] == 0.0) {
             continue;
@@ -123,7 +120,6 @@ inline std::vector<double> merge_block_edge_stats(
             o[4] = std::max(o[4], b[4]);
         }
     }
-    return out;
 }
 
 // Turn accumulated partial statistics `(number_of_edges, 5)` into edge features.

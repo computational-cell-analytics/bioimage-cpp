@@ -519,10 +519,10 @@ block_edges, block_stats = d.block_affinity_stats(labels_block, aff_block, offse
 global_edges = d.merge_edges([edges_block_0, edges_block_1, ...])
 graph = bic.graph.UndirectedGraph.from_unique_edges(number_of_nodes, global_edges)
 
-# fold per-block features onto the global edges, then finalize:
+# fold per-block features onto the global edges (in place), then finalize:
 acc = d.empty_edge_stats(graph.number_of_edges)
 for be, bs in per_block_stats:
-    acc = d.merge_block_edge_stats(graph, acc, be, bs)
+    d.merge_block_edge_stats(graph, acc, be, bs)
 features = d.finalize_edge_features(acc, compute_complex_features=True)
 ```
 

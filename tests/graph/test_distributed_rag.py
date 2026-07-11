@@ -322,6 +322,42 @@ def test_finalize_edge_features_formulas_and_zero_count():
     np.testing.assert_array_equal(complex_[1], [0.0, 0.0, 0.0, 0.0, 0.0])
 
 
+def test_merge_block_edge_stats_updates_in_place():
+    graph = bic.graph.UndirectedGraph.from_unique_edges(
+        2, np.array([[0, 1]], dtype=np.uint64)
+    )
+    acc = dist.empty_edge_stats(graph.number_of_edges)
+    edges = np.array([[0, 1]], dtype=np.uint64)
+    stats = np.array([[1.0, 2.0, 0.0, 2.0, 2.0]], dtype=np.float64)
+
+    result = dist.merge_block_edge_stats(graph, acc, edges, stats)
+    assert result is acc
+    np.testing.assert_array_equal(acc[0], [1.0, 2.0, 0.0, 2.0, 2.0])
+
+
+def test_merge_block_edge_stats_rejects_bad_accumulator():
+    graph = bic.graph.UndirectedGraph.from_unique_edges(
+        3, np.array([[0, 1], [1, 2]], dtype=np.uint64)
+    )
+    edges = np.array([[0, 1]], dtype=np.uint64)
+    stats = np.array([[1.0, 2.0, 0.0, 2.0, 2.0]], dtype=np.float64)
+
+    with pytest.raises(TypeError, match="float64"):
+        dist.merge_block_edge_stats(
+            graph, np.zeros((2, 5), dtype=np.float32), edges, stats
+        )
+    with pytest.raises(TypeError, match="float64"):
+        dist.merge_block_edge_stats(graph, [[0.0] * 5] * 2, edges, stats)
+    with pytest.raises(ValueError, match="C-contiguous"):
+        dist.merge_block_edge_stats(
+            graph, np.zeros((2, 10), dtype=np.float64)[:, ::2], edges, stats
+        )
+    read_only = dist.empty_edge_stats(graph.number_of_edges)
+    read_only.setflags(write=False)
+    with pytest.raises(ValueError, match="writable"):
+        dist.merge_block_edge_stats(graph, read_only, edges, stats)
+
+
 def test_std_is_stable_for_large_baseline():
     # Values 1e8 and 1e8 + 1 have std 0.5; the naive sum-of-squares formula
     # returns 0.0 here due to catastrophic cancellation.
