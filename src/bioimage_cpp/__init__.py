@@ -56,6 +56,7 @@ This library provides the following functionality:
 - `distance`: distance transform functionality.
 - `filters`: efficient implementation of convolutional image filters.
 - `graph`: graph creation and graph (partitioning) algorithms.
+- `mesh`: triangle-mesh extraction from 3D volumes and segmentation masks.
 - `segmentation`: image segmentation functionality.
 - `transformation`: affine transformations.
 - `utils`: misc utility functionality.
@@ -97,6 +98,7 @@ from . import filters
 from . import flow
 from . import graph
 from . import label_multiset
+from . import mesh
 from . import segmentation
 from . import transformation
 from . import utils
@@ -109,6 +111,7 @@ __all__ = [
     "flow",
     "graph",
     "label_multiset",
+    "mesh",
     "segmentation",
     "transformation",
     "utils",
