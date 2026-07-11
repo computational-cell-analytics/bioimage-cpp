@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from bioimage_cpp.label_multiset import read_subset
 

@@ -1,9 +1,7 @@
 import numpy as np
 
-from bioimage_cpp._core import Blocking
 from bioimage_cpp.label_multiset import (
     MultisetMerger,
-    downsample_multiset,
     multiset_from_labels,
 )
 
