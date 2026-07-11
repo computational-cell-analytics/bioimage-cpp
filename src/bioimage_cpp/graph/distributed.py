@@ -36,6 +36,8 @@ size]`` — it equals the corresponding columns of the in-core complex features.
 
 from __future__ import annotations
 
+import operator
+
 import numpy as np
 
 from .. import _core
@@ -68,6 +70,8 @@ def _as_index_vector(values, ndim: int, name: str) -> list[int]:
     array = np.asarray(values)
     if array.ndim != 1 or array.shape[0] != ndim:
         raise ValueError(f"{name} must be a 1D sequence of length {ndim}")
+    if not np.issubdtype(array.dtype, np.integer):
+        raise TypeError(f"{name} must contain integers, got dtype={array.dtype}")
     return [int(value) for value in array]
 
 
@@ -76,6 +80,18 @@ def _as_stats_array(values, name: str) -> np.ndarray:
     if array.ndim != 2 or array.shape[1] != 5:
         raise ValueError(f"{name} must have shape (number_of_edges, 5)")
     return np.ascontiguousarray(array)
+
+
+def _as_edge_part(part) -> np.ndarray:
+    array = np.asarray(part)
+    if array.size:
+        if not np.issubdtype(array.dtype, np.integer):
+            raise TypeError(
+                f"edges must have an integer dtype, got dtype={array.dtype}"
+            )
+        if np.issubdtype(array.dtype, np.signedinteger) and (array < 0).any():
+            raise ValueError("edges must not contain negative node ids")
+    return array.astype(np.uint64, copy=False)
 
 
 def _dispatch_labels(labels, table, name: str):
@@ -185,7 +201,14 @@ def block_affinity_stats(
             f"affinities shape={affinity_array.shape}, labels shape={label_array.shape}"
         )
 
-    normalized_offsets = [tuple(int(value) for value in offset) for offset in offsets]
+    try:
+        # operator.index accepts ints and NumPy integers but rejects floats,
+        # which int() would silently truncate.
+        normalized_offsets = [
+            tuple(operator.index(value) for value in offset) for offset in offsets
+        ]
+    except TypeError as error:
+        raise TypeError(f"offsets must contain integers: {error}") from error
     if len(normalized_offsets) != affinity_array.shape[0]:
         raise ValueError(
             "offsets length must match affinities channel count, got "
@@ -220,14 +243,13 @@ def merge_edges(edges) -> np.ndarray:
     results (tree reduction).
     """
     if isinstance(edges, np.ndarray):
-        stacked = edges
+        stacked = _as_edge_part(edges)
     else:
-        parts = [np.asarray(part, dtype=np.uint64) for part in edges]
+        parts = [_as_edge_part(part) for part in edges]
         if not parts:
             return np.empty((0, 2), dtype=np.uint64)
         stacked = np.concatenate(parts, axis=0)
 
-    stacked = np.asarray(stacked, dtype=np.uint64)
     if stacked.ndim != 2 or stacked.shape[1] != 2:
         raise ValueError("edges must have shape (n_edges, 2)")
     return _core._merge_edges(np.ascontiguousarray(stacked))

@@ -445,6 +445,33 @@ def test_unsupported_label_dtype_raises():
         dist.block_region_adjacency_edges(labels, [0, 0], [5, 5])
 
 
+def test_non_integer_owned_box_raises():
+    labels = np.zeros((6, 6), dtype=np.uint32)
+    with pytest.raises(TypeError, match="own_begin must contain integers"):
+        dist.block_region_adjacency_edges(labels, [0.9, 0], [3, 3])
+    with pytest.raises(TypeError, match="own_shape must contain integers"):
+        dist.block_region_adjacency_edges(labels, [0, 0], [1.9, 3])
+
+
+def test_non_integer_offsets_raise():
+    labels = np.zeros((6, 6), dtype=np.uint32)
+    affinities = np.zeros((1, 6, 6), dtype=np.float64)
+    with pytest.raises(TypeError, match="offsets must contain integers"):
+        dist.block_affinity_stats(labels, affinities, [[0.9, 0]], [0, 0], [6, 6])
+
+
+def test_merge_edges_rejects_negative_and_float_edges():
+    with pytest.raises(ValueError, match="negative"):
+        dist.merge_edges(np.array([[-1, 2]], dtype=np.int64))
+    with pytest.raises(ValueError, match="negative"):
+        dist.merge_edges([np.array([[0, 1]], dtype=np.uint64), [[-1, 2]]])
+    with pytest.raises(TypeError, match="integer dtype"):
+        dist.merge_edges(np.array([[0.5, 2.0]], dtype=np.float64))
+    # non-negative signed integers are fine
+    merged = dist.merge_edges(np.array([[1, 0]], dtype=np.int64))
+    np.testing.assert_array_equal(merged, np.array([[0, 1]], dtype=np.uint64))
+
+
 @pytest.mark.parametrize("dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("number_of_threads", [1, 4])
 def test_negative_labels_raise(dtype, number_of_threads):
