@@ -155,3 +155,33 @@ def test_undirected_graph_freeze_is_callable_after_inserts_and_after_reads():
     np.testing.assert_array_equal(
         np.sort(graph.node_adjacency(0)[:, 0]), np.array([1, 2], dtype=np.uint64)
     )
+
+
+def test_from_edges_and_from_unique_edges_return_python_subclass():
+    uvs = np.array([[0, 1], [1, 2], [0, 2]], dtype=np.uint64)
+    core = bic._core.UndirectedGraph.from_unique_edges(3, uvs)
+
+    for graph in (
+        bic.graph.UndirectedGraph.from_unique_edges(3, uvs),
+        bic.graph.UndirectedGraph.from_edges(3, uvs),
+    ):
+        # The classmethods construct the Python subclass (the core statics
+        # return the raw _core type), so the convenience wrappers work.
+        assert isinstance(graph, bic.graph.UndirectedGraph)
+        assert graph.number_of_nodes == core.number_of_nodes
+        assert graph.number_of_edges == core.number_of_edges
+        np.testing.assert_array_equal(graph.uv_ids(), core.uv_ids())
+        np.testing.assert_array_equal(
+            graph.find_edges([[0, 1], [2, 0]]), np.array([0, 2], dtype=np.int64)
+        )
+
+
+def test_from_edges_deduplicates_but_from_unique_edges_requires_unique():
+    uvs_with_duplicate = np.array([[0, 1], [1, 0], [1, 2]], dtype=np.uint64)
+    graph = bic.graph.UndirectedGraph.from_edges(3, uvs_with_duplicate)
+    assert graph.number_of_edges == 2
+
+    with pytest.raises(ValueError):
+        bic.graph.UndirectedGraph.from_unique_edges(
+            3, np.array([[0, 0]], dtype=np.uint64)
+        )

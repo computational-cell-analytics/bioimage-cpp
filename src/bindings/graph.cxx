@@ -1903,6 +1903,23 @@ void bind_graph(nb::module_ &m) {
             nb::arg("number_of_nodes") = 0,
             nb::arg("reserve_number_of_edges") = 0
         )
+        // Constructor equivalent of the from_edges / from_unique_edges
+        // statics. Unlike a def_static, an __init__ overload constructs an
+        // instance of the *derived* Python class, so the Python subclass in
+        // bioimage_cpp.graph can build itself from an edge array.
+        .def(
+            "__init__",
+            [](Graph *self, const std::uint64_t number_of_nodes, ConstUInt64Array uvs,
+               const bool unique) {
+                new (self) Graph(
+                    unique ? graph_from_unique_edges(number_of_nodes, uvs)
+                           : graph_from_edges(number_of_nodes, uvs)
+                );
+            },
+            nb::arg("number_of_nodes"),
+            nb::arg("uvs"),
+            nb::arg("unique")
+        )
         .def(
             "assign",
             &Graph::assign,
