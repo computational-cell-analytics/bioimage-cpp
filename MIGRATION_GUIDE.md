@@ -500,7 +500,11 @@ per-block subgraphs/features to zarr/N5/HDF5) is intentionally left to the
 caller, since I/O and block scheduling belong in Python.
 
 The primitives assume **globally consistent labels** (a segment has the same id
-in every block — as after a stitched distributed watershed). A block owns the
+in every block — as after a stitched distributed watershed). Labels must also
+be reasonably **dense**: the global graph allocates memory proportional to the
+largest node id (`from_unique_edges(number_of_nodes, ...)` builds a dense CSR
+over ids `0 .. number_of_nodes - 1`), so sparse or very large globally unique
+id ranges need a relabeling pass before building the graph. A block owns the
 pixel-pairs whose reference pixel lies in its inner (non-halo) box, so the
 caller reads each block with a halo (≥1 on the forward faces for the region
 graph / an edge map; ≥ `max |offset|` per side for affinities) and passes the

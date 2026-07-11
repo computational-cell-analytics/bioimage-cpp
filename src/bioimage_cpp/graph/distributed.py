@@ -21,7 +21,10 @@ The pipeline has three stages:
 
 2. **Merge the graph**: :func:`merge_edges` unions the per-block edges into the
    whole-volume edge set; build the global graph with
-   :meth:`bioimage_cpp.graph.UndirectedGraph.from_unique_edges`.
+   :meth:`bioimage_cpp.graph.UndirectedGraph.from_unique_edges`. Labels must be
+   globally consistent *and* reasonably dense: the graph allocates memory
+   proportional to the largest node id, so sparse or very large globally unique
+   id ranges need a relabeling pass first.
 
 3. **Merge the features**: fold each block's partial statistics onto the global
    edges with :func:`merge_block_edge_stats` (starting from
