@@ -66,6 +66,16 @@ def test_edge_map_features_complex():
     )
 
 
+def test_edge_map_features_complex_std_stable_for_large_baseline():
+    # Values 1e8 and 1e8 + 1 have std 0.5; the naive sum-of-squares formula
+    # returns 0.0 here due to catastrophic cancellation.
+    labels = np.array([[0, 1], [0, 1]], dtype=np.uint32)
+    edge_map = np.array([[1e8, 1e8], [1e8 + 1, 1e8 + 1]], dtype=np.float64)
+    rag = bic.graph.region_adjacency_graph(labels)
+    features = bic.graph.features.edge_map_features_complex(rag, labels, edge_map)
+    np.testing.assert_allclose(features[0, 2], 0.5)
+
+
 def test_affinity_features_simple():
     labels = np.array([[1, 1, 2], [1, 3, 2]], dtype=np.int64)
     rag = bic.graph.region_adjacency_graph(labels)

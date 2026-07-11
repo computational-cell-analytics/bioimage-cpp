@@ -530,8 +530,11 @@ Notes:
 
 - Blocked results reproduce the whole-volume `region_adjacency_graph` /
   `features.*_features` exactly for `size`, `min` and `max`, and to
-  floating-point tolerance for `mean` / `std` (the running sums depend on thread
-  count and merge order).
+  floating-point tolerance for `mean` / `std` (the running moments depend on
+  thread count and merge order). The `(n, 5)` partial statistics use the
+  numerically stable Welford/Chan representation `[count, mean, M2, min, max]`
+  (`M2` = sum of squared deviations from the mean), so `std` stays accurate
+  for values with a large baseline and small spread.
 - **Median and percentiles are not distributable.** The distributed complex
   output is the moment subset `[mean, std, min, max, size]` — the corresponding
   columns of the in-core 12-column complex features.

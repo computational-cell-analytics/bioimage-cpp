@@ -29,8 +29,8 @@
 // the block's inner (non-halo) box `[own_begin, own_begin + own_shape)`; the
 // neighbor pixel is read from the passed (outer, haloed) array. Because inner
 // boxes tile the volume, every contributing pair is counted exactly once, so
-// per-block partial statistics (count/sum/sum_of_squares add, min/max reduce)
-// reconstruct the whole-volume statistics exactly. The reference pixel is the
+// per-block partial statistics (count adds, mean/M2 combine via Chan, min/max
+// reduce) reconstruct the whole-volume statistics exactly. The reference pixel is the
 // lower pixel of a forward nearest-neighbor edge (region graph / edge map) or
 // the pixel an affinity value is stored at (affinities).
 //
@@ -42,41 +42,47 @@
 namespace bioimage_cpp::graph::distributed {
 
 // Per-edge partial statistics accumulated over the pixels a block owns. Layout
-// mirrors the serialized `(n_edges, 5)` array: count, sum, sum_of_squares, min,
-// max. `count/min/max` are exact under any thread/block ordering; the
-// floating-point `sum/sum_of_squares` (and hence mean/std after finalization)
-// are reproducible only for a fixed thread count and merge order.
+// mirrors the serialized `(n_edges, 5)` array: count, mean, M2 (sum of squared
+// deviations from the mean), min, max. Mean/M2 use the Welford update and the
+// Chan combine instead of raw sum / sum-of-squares so the merged standard
+// deviation stays accurate for values with a large baseline and small spread
+// (raw moments suffer catastrophic cancellation there). `count/min/max` are
+// exact under any thread/block ordering; the floating-point `mean/M2` (and
+// hence mean/std after finalization) are reproducible only for a fixed thread
+// count and merge order.
 struct PartialStats {
     double count = 0.0;
-    double sum = 0.0;
-    double sum_of_squares = 0.0;
+    double mean = 0.0;
+    double m2 = 0.0;
     double minimum = std::numeric_limits<double>::infinity();
     double maximum = -std::numeric_limits<double>::infinity();
 
     void add(const double value) {
-        sum += value;
-        sum_of_squares += value * value;
+        count += 1.0;
+        const auto delta = value - mean;
+        mean += delta / count;
+        m2 += delta * (value - mean);
         minimum = std::min(minimum, value);
         maximum = std::max(maximum, value);
-        count += 1.0;
     }
 
     void merge(const PartialStats &other) {
         if (other.count == 0.0) {
             return;
         }
-        sum += other.sum;
-        sum_of_squares += other.sum_of_squares;
+        const auto delta = other.mean - mean;
+        const auto total = count + other.count;
+        mean += delta * other.count / total;
+        m2 += other.m2 + delta * delta * count * other.count / total;
+        count = total;
         minimum = std::min(minimum, other.minimum);
         maximum = std::max(maximum, other.maximum);
-        count += other.count;
     }
 };
 
 // A block's owned edges together with their aligned partial statistics. `edges`
 // is sorted-unique with `u < v`; `stats` is row-major `(edges.size(), 5)` with
-// columns [count, sum, sum_of_squares, min, max] and row `i` describing
-// `edges[i]`.
+// columns [count, mean, M2, min, max] and row `i` describing `edges[i]`.
 struct BlockEdgeStats {
     std::vector<bioimage_cpp::detail::Edge> edges;
     std::vector<double> stats;
@@ -357,8 +363,8 @@ inline BlockEdgeStats merge_stats_maps(std::vector<EdgeStatsMap> &per_thread) {
     for (const auto &edge : result.edges) {
         const auto &stats = merged[edge];
         result.stats.push_back(stats.count);
-        result.stats.push_back(stats.sum);
-        result.stats.push_back(stats.sum_of_squares);
+        result.stats.push_back(stats.mean);
+        result.stats.push_back(stats.m2);
         result.stats.push_back(stats.minimum);
         result.stats.push_back(stats.maximum);
     }

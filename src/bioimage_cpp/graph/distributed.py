@@ -131,8 +131,9 @@ def block_edge_map_stats(
     must have the same shape as ``labels``. Returns ``(edges, stats)`` where
     ``edges`` is ``(n, 2)`` ``uint64`` (matching
     :func:`block_region_adjacency_edges` for the same block) and ``stats`` is
-    ``(n, 5)`` ``float64`` with columns ``[count, sum, sum_of_squares, min,
-    max]`` aligned row-by-row to ``edges``.
+    ``(n, 5)`` ``float64`` with columns ``[count, mean, M2, min, max]`` aligned
+    row-by-row to ``edges`` (``M2`` is the sum of squared deviations from the
+    mean, as in Welford's algorithm — numerically stable when merged).
     """
     label_array, run = _dispatch_labels(
         labels, _BLOCK_EDGE_MAP_STATS_BY_DTYPE, "edge-map"
@@ -249,8 +250,8 @@ def merge_block_edge_stats(
     ``block_edges`` / ``block_stats`` are a block extraction's ``(n, 2)`` /
     ``(n, 5)`` outputs. Each block edge is mapped to its global edge id via
     ``global_graph.find_edge``; edges absent from the graph are skipped.
-    ``count/sum/sum_of_squares`` add and ``min/max`` reduce. Returns the updated
-    ``(E, 5)`` accumulator.
+    ``count`` adds, ``mean/M2`` combine via the Chan formula, and ``min/max``
+    reduce. Returns the updated ``(E, 5)`` accumulator.
 
     Block edge endpoints must be valid node ids of ``global_graph``.
     """

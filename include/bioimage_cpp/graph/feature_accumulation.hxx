@@ -38,7 +38,6 @@ struct SimpleStats {
 
 struct ComplexStats {
     double sum = 0.0;
-    double sum_of_squares = 0.0;
     double minimum = std::numeric_limits<double>::infinity();
     double maximum = -std::numeric_limits<double>::infinity();
     std::uint64_t count = 0;
@@ -46,7 +45,6 @@ struct ComplexStats {
 
     void add(const double value) {
         sum += value;
-        sum_of_squares += value * value;
         minimum = std::min(minimum, value);
         maximum = std::max(maximum, value);
         ++count;
@@ -55,7 +53,6 @@ struct ComplexStats {
 
     void merge(ComplexStats &other) {
         sum += other.sum;
-        sum_of_squares += other.sum_of_squares;
         minimum = std::min(minimum, other.minimum);
         maximum = std::max(maximum, other.maximum);
         count += other.count;
@@ -407,7 +404,16 @@ inline void write_complex_features(
 
         const auto count = static_cast<double>(edge_stats.count);
         const auto mean = edge_stats.sum / count;
-        const auto variance = std::max(0.0, edge_stats.sum_of_squares / count - mean * mean);
+        // Two-pass variance over the stored values: exact, and free of the
+        // catastrophic cancellation that sum_of_squares/count - mean^2 shows
+        // for values with a large baseline and small spread. Computed before
+        // the percentile calls, which reorder `values` via nth_element.
+        double sum_of_squared_deviations = 0.0;
+        for (const auto value : edge_stats.values) {
+            const auto deviation = value - mean;
+            sum_of_squared_deviations += deviation * deviation;
+        }
+        const auto variance = sum_of_squared_deviations / count;
         out.data[offset] = mean;
         out.data[offset + 1] = percentile(edge_stats.values, 50.0);
         out.data[offset + 2] = std::sqrt(variance);

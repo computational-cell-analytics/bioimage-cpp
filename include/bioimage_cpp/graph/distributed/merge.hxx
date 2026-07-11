@@ -56,8 +56,9 @@ inline std::vector<bioimage_cpp::detail::Edge> merge_edges(
 // `block_edges`/`block_stats` are the `(n, 2)` / `(n, 5)` outputs of a block
 // extraction. Each block edge is mapped to its global edge id via
 // `global_graph.find_edge`; edges absent from the global graph (id `-1`) are
-// skipped. `count/sum/sum_of_squares` add; `min/max` reduce, seeded from the
-// first contribution to each edge (so `current_stats` may be zero-initialized).
+// skipped. `count` adds, `mean/M2` combine via the Chan formula, and `min/max`
+// reduce; rows with zero count take the block row verbatim (so `current_stats`
+// may be zero-initialized).
 //
 // Block edge endpoints must be valid node ids of `global_graph`
 // (`< number_of_nodes`); `find_edge` throws `std::out_of_range` otherwise.
@@ -103,16 +104,24 @@ inline std::vector<double> merge_block_edge_stats(
 
         double *const o = out.data() + static_cast<std::size_t>(edge) * 5;
         const double *const b = block_stats.data + index * 5;
+        if (b[0] == 0.0) {
+            continue;
+        }
         if (o[0] == 0.0) {
+            o[0] = b[0];
+            o[1] = b[1];
+            o[2] = b[2];
             o[3] = b[3];
             o[4] = b[4];
         } else {
+            const auto delta = b[1] - o[1];
+            const auto total = o[0] + b[0];
+            o[1] += delta * b[0] / total;
+            o[2] += b[2] + delta * delta * o[0] * b[0] / total;
+            o[0] = total;
             o[3] = std::min(o[3], b[3]);
             o[4] = std::max(o[4], b[4]);
         }
-        o[0] += b[0];
-        o[1] += b[1];
-        o[2] += b[2];
     }
     return out;
 }
@@ -152,9 +161,9 @@ inline void finalize_edge_features(
             continue;
         }
 
-        const auto mean = s[1] / count;
+        const auto mean = s[1];
         if (compute_complex_features) {
-            const auto variance = std::max(0.0, s[2] / count - mean * mean);
+            const auto variance = std::max(0.0, s[2] / count);
             o[0] = mean;
             o[1] = std::sqrt(variance);
             o[2] = s[3];
