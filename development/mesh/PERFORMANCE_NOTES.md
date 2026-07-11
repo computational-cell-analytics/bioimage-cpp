@@ -1,5 +1,65 @@
 # Marching cubes performance
 
+## Codex-Sol / Claude consolidation (2026-07-11)
+
+The consolidation pass kept the Codex-Sol float32 MC33 kernel, exact
+scikit-image normal/value semantics, and zero-copy NumPy handoff. It moved
+axis conversion and winding into triangle emission, added robust transitive
+degenerate-vertex merging with the shared `UnionFind`, and broadened the
+correctness and benchmark suites. Scalar spacing is now accepted as an
+isotropic convenience.
+
+The benchmark now has a backward-compatible single-size mode and a full
+scaling suite matching the independent implementation comparison:
+
+```bash
+python development/mesh/benchmark_marching_cubes.py --size medium
+python development/mesh/benchmark_marching_cubes.py \
+    --suite scaling --repeats 5 --batches 1 --warmup 1 --memory \
+    --json /tmp/marching-cubes.json
+```
+
+The scaling suite alternates paired bioimage-cpp/scikit-image calls and covers
+Lewiner spheres/scalar fields through 512³, dense 10%-foreground masks through
+256³, and all three Lorensen workloads at 128³. Fresh subprocesses measure
+peak RSS before the timing process allocates any large volumes.
+
+Same-harness before/after results on the machine described below:
+
+| case | before ms | after ms | change | scikit-image / after |
+|---|---:|---:|---:|---:|
+| sphere, Lewiner, 512³ | 1,898.68 | 1,786.24 | -5.9% | 1.06× |
+| dense mask, Lewiner, 256³ | 2,119.26 | 2,063.38 | -2.6% | 1.98× |
+| scalar field, Lewiner, 512³ | 2,268.58 | 2,295.50 | +1.2% | 1.30× |
+| sphere, Lorensen, 128³ | 30.31 | 28.39 | -6.3% | 1.31× |
+| dense mask, Lorensen, 128³ | 192.19 | 212.75 | +10.7% | 2.16× |
+| scalar field, Lorensen, 128³ | 48.72 | 49.80 | +2.2% | 1.84× |
+
+Absolute timings moved with CPU state: across all 15 cases the geometric-mean
+wall time improved 2.4%, while normalization by each paired scikit-image time
+showed a 1.1% improvement. Targeted same-session A/B repeats against the exact
+pre-change commit resolved the apparent small-scalar and dense-Lorensen
+regressions: scalar 64³ retained a ~2.04–2.06× paired speedup, while dense
+Lorensen improved from ~2.01–2.02× to ~2.08×. No reproducible regression above
+3% remained.
+
+Peak RSS was unchanged within measurement noise:
+
+| case | before MiB | after MiB | scikit-image MiB |
+|---|---:|---:|---:|
+| sphere 512³ | 725.8 | 725.7 | 734.6 |
+| dense mask 256³ | 643.5 | 643.5 | 1,108.6 |
+| scalar field 512³ | 703.3 | 703.4 | 843.3 |
+
+Correctness validation finished with 29 mesh tests, 1,024 full-suite tests,
+all 254 nontrivial binary cube configurations for both methods, 1,024 random
+scalar cubes for both methods, and 1,000 randomized multi-cube mask/stride/
+degeneracy cases. Twelve `allow_degenerate=False` cases intentionally differed
+from scikit-image's negative-index remapping quirk; all returned faces were
+valid and contained no collapsed-coordinate triangles.
+
+## Two-slice face-cache optimization
+
 `bic.mesh.marching_cubes` remains deterministic and single-threaded. The
 optimization pass replaced the volume-growing edge hash map with Lewiner's
 two-slice face cache. Several smaller candidates were measured first and

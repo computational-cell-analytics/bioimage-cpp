@@ -51,6 +51,47 @@ def _collapsed_coordinate_faces(vertices: np.ndarray, faces: np.ndarray) -> int:
     return int(np.count_nonzero(first_second | first_third | second_third))
 
 
+def _trilinear_sample(volume: np.ndarray, coordinates: np.ndarray) -> np.ndarray:
+    """Independently sample a scalar field at NumPy-order (z, y, x) coordinates."""
+    image = np.asarray(volume, dtype=np.float64)
+    output = np.empty(len(coordinates), dtype=np.float64)
+    nz, ny, nx = image.shape
+    for index, (z, y, x) in enumerate(coordinates):
+        z0, y0, x0 = int(np.floor(z)), int(np.floor(y)), int(np.floor(x))
+        z1, y1, x1 = min(z0 + 1, nz - 1), min(y0 + 1, ny - 1), min(x0 + 1, nx - 1)
+        fz, fy, fx = z - z0, y - y0, x - x0
+        value = 0.0
+        for cz, wz in ((z0, 1.0 - fz), (z1, fz)):
+            for cy, wy in ((y0, 1.0 - fy), (y1, fy)):
+                for cx, wx in ((x0, 1.0 - fx), (x1, fx)):
+                    value += wz * wy * wx * image[cz, cy, cx]
+        output[index] = value
+    return output
+
+
+def _transitive_degenerate_regression_volume() -> np.ndarray:
+    """Reproduce a duplicate-vertex chain that previously yielded face index -1."""
+    rng = np.random.default_rng(293841)
+    levels = np.asarray([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
+    for _ in range(16):
+        shape = tuple(int(size) for size in rng.integers(3, 9, size=3))
+        volume = rng.integers(0, 4, size=shape, dtype=np.uint8)
+        volume.flat[0] = 0
+        volume.flat[-1] = 3
+        level = float(rng.choice(levels))
+        method = "lewiner" if rng.random() < 0.7 else "lorensen"
+        allow_degenerate = bool(rng.random() < 0.5)
+        step_size = 2 if min(shape) >= 5 and rng.random() < 0.25 else 1
+        if rng.random() < 0.25:
+            rng.random(shape)
+    assert shape == (6, 5, 8)
+    assert level == 1.0
+    assert method == "lorensen"
+    assert not allow_degenerate
+    assert step_size == 1
+    return volume
+
+
 def test_box_mesh_has_reference_dimensions_and_dtypes():
     vertices, faces, normals, values = bic.mesh.marching_cubes(_interior_box(), 0.5)
 
@@ -67,6 +108,38 @@ def test_box_mesh_has_reference_dimensions_and_dtypes():
     np.testing.assert_array_equal(vertices.min(axis=0), [0.5, 0.5, 0.5])
     np.testing.assert_array_equal(vertices.max(axis=0), [3.5, 4.5, 5.5])
     np.testing.assert_array_equal(values, np.ones_like(values))
+
+
+@pytest.mark.parametrize("method", ["lewiner", "lorensen"])
+def test_method_output_invariants(method):
+    volume = _interior_ball()
+    vertices, faces, normals, values = bic.mesh.marching_cubes(
+        volume, 0.5, method=method
+    )
+
+    assert vertices.ndim == 2 and vertices.shape[1] == 3
+    assert faces.ndim == 2 and faces.shape[1] == 3
+    assert normals.shape == vertices.shape
+    assert values.shape == (len(vertices),)
+    assert vertices.dtype == normals.dtype == values.dtype == np.float32
+    assert faces.dtype == np.int32
+    assert np.all((faces >= 0) & (faces < len(vertices)))
+    np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1e-4)
+    assert vertices.min() >= 0.0
+    for axis, size in enumerate(volume.shape):
+        assert vertices[:, axis].max() <= size - 1
+
+
+def test_lorensen_vertices_lie_on_isosurface():
+    rng = np.random.default_rng(0)
+    volume = rng.random((12, 13, 14), dtype=np.float32)
+    level = 0.5
+    vertices, _, _, _ = bic.mesh.marching_cubes(
+        volume, level, method="lorensen"
+    )
+    np.testing.assert_allclose(
+        _trilinear_sample(volume, vertices), level, atol=1e-4
+    )
 
 
 def test_output_arrays_are_contiguous_writable_and_survive_collection():
@@ -111,6 +184,15 @@ def test_spacing_preserves_mesh_and_uses_float64_vertices():
     np.testing.assert_array_equal(faces, unit_faces)
     np.testing.assert_array_equal(normals, unit_normals)
     np.testing.assert_array_equal(values, unit_values)
+
+
+def test_scalar_spacing_is_broadcast_to_all_axes():
+    volume = _interior_box()
+    scalar = bic.mesh.marching_cubes(volume, 0.5, spacing=2.0)
+    explicit = bic.mesh.marching_cubes(volume, 0.5, spacing=(2.0, 2.0, 2.0))
+    for actual, expected in zip(scalar, explicit, strict=True):
+        np.testing.assert_array_equal(actual, expected)
+    assert scalar[0].dtype == np.float64
 
 
 @pytest.mark.parametrize("dtype", [np.bool_, np.uint16, np.float64])
@@ -180,6 +262,18 @@ def test_mask_and_step_size_are_honoured():
     assert values.shape == (len(vertices),)
 
 
+def test_mask_reduces_surface_and_step_size_coarsens_mesh():
+    rng = np.random.default_rng(4)
+    volume = rng.random((20, 22, 24), dtype=np.float32)
+    mask = np.ones(volume.shape, dtype=bool)
+    mask[:, :, : volume.shape[2] // 2] = False
+    fine = bic.mesh.marching_cubes(volume, 0.5)
+    masked = bic.mesh.marching_cubes(volume, 0.5, mask=mask)
+    coarse = bic.mesh.marching_cubes(volume, 0.5, step_size=2)
+    assert len(masked[1]) < len(fine[1])
+    assert len(coarse[1]) < len(fine[1])
+
+
 @pytest.mark.parametrize("method", ["lewiner", "lorensen"])
 @pytest.mark.parametrize("step_size", [1, 2, 3])
 def test_vertex_cache_with_step_size_and_mask_is_deterministic(method, step_size):
@@ -239,6 +333,29 @@ def test_allow_degenerate_false_removes_collapsed_faces():
     assert _zero_area_faces(removed[0], removed[1]) < _zero_area_faces(kept[0], kept[1])
     assert len(removed[1]) < len(kept[1])
     assert removed[1].dtype == np.int32
+
+
+def test_transitive_degenerate_vertex_merges_have_valid_indices():
+    volume = _transitive_degenerate_regression_volume()
+    first = bic.mesh.marching_cubes(
+        volume,
+        1.0,
+        method="lorensen",
+        allow_degenerate=False,
+    )
+    second = bic.mesh.marching_cubes(
+        volume,
+        1.0,
+        method="lorensen",
+        allow_degenerate=False,
+    )
+
+    assert first[0].shape == (251, 3)
+    assert first[1].shape == (360, 3)
+    assert np.all((first[1] >= 0) & (first[1] < len(first[0])))
+    assert _collapsed_coordinate_faces(first[0], first[1]) == 0
+    for actual, expected in zip(first, second, strict=True):
+        np.testing.assert_array_equal(actual, expected)
 
 
 def test_default_level_is_midpoint_of_original_volume_when_padding():

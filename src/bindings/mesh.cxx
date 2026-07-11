@@ -113,28 +113,13 @@ nb::tuple marching_cubes_float32(
             level,
             step_size,
             classic ? mesh::MarchingCubesMethod::Lorensen : mesh::MarchingCubesMethod::Lewiner,
+            descent ? mesh::GradientDirection::Descent : mesh::GradientDirection::Ascent,
             mask_ptr,
             allow_degenerate
         );
     }
     if (result.values.empty()) {
         throw std::runtime_error("No surface found at the given iso value.");
-    }
-
-    {
-        BIOIMAGE_PROFILE_SCOPE(profiler, "orient_output");
-        // The core mirrors the reference kernel's x/y/z convention. Public arrays
-        // use NumPy's z/y/x axis order, matching skimage.measure.marching_cubes.
-        for (std::size_t vertex = 0; vertex < result.values.size(); ++vertex) {
-            const std::size_t base = vertex * 3;
-            std::swap(result.vertices[base], result.vertices[base + 2]);
-            std::swap(result.normals[base], result.normals[base + 2]);
-        }
-        if (descent) {
-            for (std::size_t face = 0; face < result.faces.size(); face += 3) {
-                std::swap(result.faces[face], result.faces[face + 2]);
-            }
-        }
     }
 
     const std::size_t n_vertices = result.values.size();

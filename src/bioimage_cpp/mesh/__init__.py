@@ -10,13 +10,20 @@ import numpy as np
 from .. import _core
 
 
-def _as_spacing(spacing: Sequence[float]) -> np.ndarray:
-    try:
-        values = np.asarray(spacing, dtype=np.float64)
-    except (TypeError, ValueError) as error:
-        raise ValueError("spacing must consist of three floats") from error
+def _as_spacing(spacing: float | Sequence[float]) -> np.ndarray:
+    if np.isscalar(spacing):
+        try:
+            value = float(spacing)
+        except (TypeError, ValueError) as error:
+            raise ValueError("spacing must be a scalar or consist of three floats") from error
+        values = np.full(3, value, dtype=np.float64)
+    else:
+        try:
+            values = np.asarray(spacing, dtype=np.float64)
+        except (TypeError, ValueError) as error:
+            raise ValueError("spacing must be a scalar or consist of three floats") from error
     if values.shape != (3,):
-        raise ValueError("spacing must consist of three floats")
+        raise ValueError("spacing must be a scalar or consist of three floats")
     if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
         raise ValueError("spacing entries must be positive and finite")
     return values
@@ -26,7 +33,7 @@ def marching_cubes(
     volume: np.ndarray,
     level: float | None = None,
     *,
-    spacing: Sequence[float] = (1.0, 1.0, 1.0),
+    spacing: float | Sequence[float] = (1.0, 1.0, 1.0),
     gradient_direction: str = "descent",
     step_size: int = 1,
     allow_degenerate: bool = True,
@@ -50,14 +57,17 @@ def marching_cubes(
     level:
         Iso-value to extract. ``None`` uses the midpoint of the data range.
     spacing:
-        Three physical spacings in NumPy axis order ``(z, y, x)``.
+        One isotropic spacing or three physical spacings in NumPy axis order
+        ``(z, y, x)``.
     gradient_direction:
         ``"descent"`` (the default) treats objects as values larger than the
         exterior; ``"ascent"`` reverses triangle winding.
     step_size:
         Sampling stride in voxels. Values above one produce a coarser mesh.
     allow_degenerate:
-        If false, remove faces with repeated vertex coordinates.
+        If false, transitively merge repeated vertex coordinates and remove
+        faces that collapse after remapping. Representatives preserve the
+        first vertex occurrence and all returned face indices are valid.
     method:
         ``"lewiner"`` or ``"lorensen"``.
     mask:

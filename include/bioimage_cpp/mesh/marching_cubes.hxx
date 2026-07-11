@@ -13,6 +13,7 @@
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/mesh/detail/mc33_luts.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 
 #include <algorithm>
 #include <array>
@@ -34,10 +35,15 @@ enum class MarchingCubesMethod {
     Lorensen,
 };
 
+enum class GradientDirection {
+    Descent,
+    Ascent,
+};
+
 struct MarchingCubesResult {
     // All vector-valued arrays are flat C-order arrays with a trailing size-3
-    // component axis. Vertices/normals use the reference kernel's x/y/z order;
-    // the binding converts them to NumPy z/y/x order before returning them.
+    // component axis. Vertices and normals use NumPy z/y/x order; faces have
+    // already been oriented according to GradientDirection.
     std::vector<float> vertices;
     std::vector<std::int32_t> faces;
     std::vector<float> normals;
@@ -169,8 +175,8 @@ constexpr std::array<std::array<int, 2>, 12> kEdgeRelativeZ{{
 
 class Cell {
 public:
-    Cell(const int nx, const int ny)
-        : nx_(nx), ny_(ny),
+    Cell(const int nx, const int ny, const GradientDirection gradient_direction)
+        : nx_(nx), ny_(ny), gradient_direction_(gradient_direction),
           face_layer1_(static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) * 4, -1),
           face_layer2_(static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) * 4, -1) {}
 
@@ -219,6 +225,7 @@ public:
             for (int corner = 0; corner < 3; ++corner) {
                 add_face_from_edge(lut.get2(lut_index, triangle * 3 + corner));
             }
+            orient_last_face();
         }
     }
 
@@ -228,6 +235,7 @@ public:
             for (int corner = 0; corner < 3; ++corner) {
                 add_face_from_edge(lut.get3(lut_index, lut_index2, triangle * 3 + corner));
             }
+            orient_last_face();
         }
     }
 
@@ -258,9 +266,9 @@ private:
             throw std::runtime_error("marching cubes produced too many vertices for int32 faces");
         }
         const int index = static_cast<int>(values_.size());
-        vertices_.push_back(static_cast<float>(x));
-        vertices_.push_back(static_cast<float>(y));
         vertices_.push_back(static_cast<float>(z));
+        vertices_.push_back(static_cast<float>(y));
+        vertices_.push_back(static_cast<float>(x));
         normals_.insert(normals_.end(), {0.0F, 0.0F, 0.0F});
         values_.push_back(0.0F);
         return index;
@@ -275,9 +283,15 @@ private:
 
     void add_gradient(const int vertex, const double x, const double y, const double z) {
         const std::size_t base = static_cast<std::size_t>(vertex) * 3;
-        normals_[base] += static_cast<float>(x);
+        normals_[base] += static_cast<float>(z);
         normals_[base + 1] += static_cast<float>(y);
-        normals_[base + 2] += static_cast<float>(z);
+        normals_[base + 2] += static_cast<float>(x);
+    }
+
+    void orient_last_face() {
+        if (gradient_direction_ == GradientDirection::Descent) {
+            std::swap(faces_[faces_.size() - 3], faces_[faces_.size() - 1]);
+        }
     }
 
     void add_gradient_from_corner(const int vertex, const int corner, const double strength) {
@@ -418,6 +432,7 @@ private:
 
     int nx_ = 0;
     int ny_ = 0;
+    GradientDirection gradient_direction_ = GradientDirection::Descent;
     int x_ = 0;
     int y_ = 0;
     int z_ = 0;
@@ -473,9 +488,7 @@ inline void select_mc33_tiling(const Luts &luts, Cell &cell, int case_, int conf
 
 inline void remove_degenerate_faces(MarchingCubesResult &result) {
     const std::size_t n_vertices = result.values.size();
-    std::vector<std::int32_t> map(n_vertices);
-    for (std::size_t i = 0; i < n_vertices; ++i) map[i] = static_cast<std::int32_t>(i);
-    std::vector<bool> keep_face(result.faces.size() / 3, true);
+    util::UnionFind components(n_vertices);
     const auto equal_vertex = [&result](const std::int32_t a, const std::int32_t b) {
         const std::size_t first = static_cast<std::size_t>(a) * 3;
         const std::size_t second = static_cast<std::size_t>(b) * 3;
@@ -483,30 +496,57 @@ inline void remove_degenerate_faces(MarchingCubesResult &result) {
             && result.vertices[first + 1] == result.vertices[second + 1]
             && result.vertices[first + 2] == result.vertices[second + 2];
     };
-    for (std::size_t face = 0; face < keep_face.size(); ++face) {
+    const auto merge_stably = [&components](const std::int32_t first, const std::int32_t second) {
+        const auto first_root = components.find(static_cast<std::uint64_t>(first));
+        const auto second_root = components.find(static_cast<std::uint64_t>(second));
+        if (first_root != second_root) {
+            components.merge_to(
+                std::min(first_root, second_root), std::max(first_root, second_root)
+            );
+        }
+    };
+    for (std::size_t face = 0; face < result.faces.size() / 3; ++face) {
         const std::int32_t a = result.faces[face * 3];
         const std::int32_t b = result.faces[face * 3 + 1];
         const std::int32_t c = result.faces[face * 3 + 2];
-        if (equal_vertex(a, b)) { map[static_cast<std::size_t>(a)] = map[static_cast<std::size_t>(b)] = std::min(map[static_cast<std::size_t>(a)], map[static_cast<std::size_t>(b)]); keep_face[face] = false; }
-        if (equal_vertex(a, c)) { map[static_cast<std::size_t>(a)] = map[static_cast<std::size_t>(c)] = std::min(map[static_cast<std::size_t>(a)], map[static_cast<std::size_t>(c)]); keep_face[face] = false; }
-        if (equal_vertex(b, c)) { map[static_cast<std::size_t>(b)] = map[static_cast<std::size_t>(c)] = std::min(map[static_cast<std::size_t>(b)], map[static_cast<std::size_t>(c)]); keep_face[face] = false; }
+        if (equal_vertex(a, b)) merge_stably(a, b);
+        if (equal_vertex(a, c)) merge_stably(a, c);
+        if (equal_vertex(b, c)) merge_stably(b, c);
     }
+
+    std::vector<std::uint64_t> roots(n_vertices);
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        roots[vertex] = components.find(static_cast<std::uint64_t>(vertex));
+    }
+
     std::vector<std::int32_t> compact(n_vertices, -1);
     MarchingCubesResult output;
     for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
-        if (map[vertex] == static_cast<std::int32_t>(vertex)) {
+        if (roots[vertex] == vertex) {
             compact[vertex] = static_cast<std::int32_t>(output.values.size());
-            output.vertices.insert(output.vertices.end(), result.vertices.begin() + static_cast<std::ptrdiff_t>(vertex * 3), result.vertices.begin() + static_cast<std::ptrdiff_t>(vertex * 3 + 3));
-            output.normals.insert(output.normals.end(), result.normals.begin() + static_cast<std::ptrdiff_t>(vertex * 3), result.normals.begin() + static_cast<std::ptrdiff_t>(vertex * 3 + 3));
+            const auto begin = static_cast<std::ptrdiff_t>(vertex * 3);
+            output.vertices.insert(
+                output.vertices.end(),
+                result.vertices.begin() + begin,
+                result.vertices.begin() + begin + 3
+            );
+            output.normals.insert(
+                output.normals.end(),
+                result.normals.begin() + begin,
+                result.normals.begin() + begin + 3
+            );
             output.values.push_back(result.values[vertex]);
         }
     }
-    for (std::size_t face = 0; face < keep_face.size(); ++face) {
-        if (!keep_face[face]) continue;
-        for (int corner = 0; corner < 3; ++corner) {
-            const auto old = static_cast<std::size_t>(result.faces[face * 3 + static_cast<std::size_t>(corner)]);
-            output.faces.push_back(compact[static_cast<std::size_t>(map[old])]);
-        }
+
+    for (std::size_t face = 0; face < result.faces.size() / 3; ++face) {
+        const auto a = roots[static_cast<std::size_t>(result.faces[face * 3])];
+        const auto b = roots[static_cast<std::size_t>(result.faces[face * 3 + 1])];
+        const auto c = roots[static_cast<std::size_t>(result.faces[face * 3 + 2])];
+        if (a == b || a == c || b == c) continue;
+        output.faces.push_back(compact[static_cast<std::size_t>(a)]);
+        output.faces.push_back(compact[static_cast<std::size_t>(b)]);
+        output.faces.push_back(compact[static_cast<std::size_t>(c)]);
     }
     result = std::move(output);
 }
@@ -769,14 +809,16 @@ inline void traverse_cells(
 
 } // namespace detail::marching_cubes
 
-// Extract an isosurface from a 3-D float32 image. The core deliberately does
-// not know about Python layout conventions beyond the C-order ArrayView; the
-// binding handles argument validation, output axis order, and spacing.
+// Extract an isosurface from a 3-D float32 image. Vertices and normals are
+// returned in NumPy (z, y, x) axis order. `gradient_direction` controls face
+// winding only, matching the public Python contract; spacing remains a binding
+// concern because it does not affect the float32 extraction kernel.
 inline MarchingCubesResult marching_cubes(
     const ConstArrayView<float> &volume,
     const double level,
     const int step_size,
     const MarchingCubesMethod method,
+    const GradientDirection gradient_direction,
     const ConstArrayView<std::uint8_t> *mask,
     const bool allow_degenerate
 ) {
@@ -803,7 +845,7 @@ inline MarchingCubesResult marching_cubes(
     }
     const auto &tables = *tables_ptr;
     std::optional<detail::marching_cubes::Cell> cell;
-    cell.emplace(nx, ny);
+    cell.emplace(nx, ny, gradient_direction);
     {
         BIOIMAGE_PROFILE_SCOPE(profiler, "cell_traversal");
         if (mask == nullptr) {

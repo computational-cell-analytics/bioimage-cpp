@@ -1905,6 +1905,8 @@ Important details:
   numeric or boolean input dtype is accepted; complex inputs are rejected.
 - `method="lewiner"` resolves ambiguous cases and is the default;
   `method="lorensen"` selects the original 256-case algorithm.
+- `spacing` accepts either one positive finite scalar for isotropic data or a
+  length-three `(z, y, x)` sequence.
 - Normals and local-range values follow scikit-image semantics. As in
   scikit-image, `gradient_direction` reverses face winding without changing
   normals, and anisotropic spacing scales vertices without transforming
@@ -1914,8 +1916,12 @@ Important details:
   foreground-positive segmentation masks. The iso-level is determined from
   the original unpadded volume.
 - Spacing entries must be positive and finite, and faces remain `int32` when
-  degenerate faces are removed. These validations/dtype choices are
-  intentional differences from scikit-image edge cases.
+  degenerate faces are removed. Duplicate vertices in a collapsed face are
+  merged transitively with the first vertex as representative, and faces that
+  still collapse after remapping are discarded. This guarantees in-range face
+  indices and intentionally avoids a rare scikit-image negative-index
+  remapping quirk. These validation and cleanup choices are intentional
+  differences from scikit-image edge cases.
 
 See `development/mesh/check_marching_cubes.py` for reference comparisons and
 `development/mesh/benchmark_marching_cubes.py` for reproducible timings.
