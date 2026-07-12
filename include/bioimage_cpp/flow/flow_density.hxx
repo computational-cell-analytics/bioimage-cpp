@@ -10,6 +10,11 @@
 #include <cstdint>
 #include <vector>
 
+#if defined(BIOIMAGE_FLOW_FMA_DISPATCH) && defined(_MSC_VER)
+#include <immintrin.h>
+#include <intrin.h>
+#endif
+
 namespace bioimage_cpp::flow {
 namespace detail {
 
@@ -233,7 +238,12 @@ inline void trace_particle(
     }
 }
 
-template <std::size_t D, bool UseRK2, bool CheckConvergence, bool RestrictToMask>
+// CodegenVariant gives separately compiled ISA variants a distinct linker
+// identity. Without it, COMDAT selection may replace an FMA instantiation with
+// the portable instantiation that has the otherwise-identical template name.
+template <
+    std::size_t D, bool UseRK2, bool CheckConvergence, bool RestrictToMask,
+    bool CodegenVariant = false>
 void trace_all(
     std::vector<std::array<float, D>> &positions,
     const std::array<const float *, D> &channels,
@@ -260,6 +270,90 @@ void trace_all(
         }
     );
 }
+
+#if defined(BIOIMAGE_FLOW_FMA_DISPATCH)
+
+inline bool runtime_fma_supported() noexcept {
+    static const bool supported = []() noexcept {
+#if defined(_MSC_VER)
+        int registers[4]{};
+        __cpuid(registers, 1);
+        constexpr int fma_bit = 1 << 12;
+        constexpr int osxsave_bit = 1 << 27;
+        constexpr int avx_bit = 1 << 28;
+        if ((registers[2] & (fma_bit | osxsave_bit | avx_bit)) !=
+            (fma_bit | osxsave_bit | avx_bit)) {
+            return false;
+        }
+        if ((_xgetbv(0) & 0x6) != 0x6) {
+            return false;
+        }
+#if defined(BIOIMAGE_FLOW_FMA_REQUIRES_AVX2)
+        __cpuidex(registers, 7, 0);
+        constexpr int avx2_bit = 1 << 5;
+        if ((registers[1] & avx2_bit) == 0) {
+            return false;
+        }
+#endif
+        return true;
+#elif defined(__GNUC__) || defined(__clang__)
+        return __builtin_cpu_supports("avx") && __builtin_cpu_supports("fma");
+#else
+        return false;
+#endif
+    }();
+    return supported;
+}
+
+void trace_all_fma_2d(
+    std::vector<std::array<float, 2>> &positions,
+    const std::array<const float *, 2> &channels,
+    const GridLayout<2> &grid,
+    const std::uint8_t *mask,
+    std::size_t n_threads,
+    std::size_t n_iter,
+    float dt,
+    float tol
+);
+
+void trace_all_fma_3d(
+    std::vector<std::array<float, 3>> &positions,
+    const std::array<const float *, 3> &channels,
+    const GridLayout<3> &grid,
+    const std::uint8_t *mask,
+    std::size_t n_threads,
+    std::size_t n_iter,
+    float dt,
+    float tol
+);
+
+template <std::size_t D>
+bool try_trace_all_fma(
+    std::vector<std::array<float, D>> &positions,
+    const std::array<const float *, D> &channels,
+    const GridLayout<D> &grid,
+    const std::uint8_t *mask,
+    const std::size_t n_threads,
+    const std::size_t n_iter,
+    const float dt,
+    const float tol
+) {
+    if (!runtime_fma_supported()) {
+        return false;
+    }
+    if constexpr (D == 2) {
+        trace_all_fma_2d(
+            positions, channels, grid, mask, n_threads, n_iter, dt, tol
+        );
+    } else {
+        trace_all_fma_3d(
+            positions, channels, grid, mask, n_threads, n_iter, dt, tol
+        );
+    }
+    return true;
+}
+
+#endif
 
 } // namespace detail
 
@@ -346,7 +440,25 @@ void compute_flow_density(
             BIOIMAGE_FLOW_TRACE(4, true,  false, false)
             BIOIMAGE_FLOW_TRACE(5, true,  false, true)
             BIOIMAGE_FLOW_TRACE(6, true,  true,  false)
-            BIOIMAGE_FLOW_TRACE(7, true,  true,  true)
+            case 7:
+#if defined(BIOIMAGE_FLOW_FMA_DISPATCH)
+                if (detail::try_trace_all_fma<D>(
+                        positions,
+                        channels,
+                        grid,
+                        fg_mask.data,
+                        n_threads,
+                        n_iter,
+                        dt,
+                        tol
+                    )) {
+                    break;
+                }
+#endif
+                detail::trace_all<D, true, true, true>(
+                    positions, channels, grid, fg_mask.data, n_threads, n_iter, dt, tol
+                );
+                break;
         }
 #undef BIOIMAGE_FLOW_TRACE
     }

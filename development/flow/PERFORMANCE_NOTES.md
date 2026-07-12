@@ -90,6 +90,15 @@ table and the iteration-major loop (with its per-iteration alive scan) with:
    redundant there (committed endpoints already passed the in-bounds mask test,
    and the seed is an in-bounds integer voxel).
 
+10. **Runtime-dispatched FMA specialization** for the common default mode
+    `(RK2, convergence, restrict_to_mask)`. On supported x86 CPUs the extension
+    dispatches once, before thread fan-out, to a separately compiled tracer that
+    uses scalar FMA contraction in the nested lerps. All other modes and CPUs use
+    the portable kernel. Only `src/cpp/flow/flow_density_fma.cxx` receives the
+    ISA flags (`-mavx -mfma` for GCC/Clang, `/arch:AVX2` for MSVC); the extension
+    and binding layer remain baseline-safe. The build can disable this path with
+    `-C cmake.define.BIOIMAGE_FLOW_FMA_DISPATCH=OFF`.
+
 Chosen defaults (see `src/bioimage_cpp/flow/_flow.py`) are unchanged:
 
 ```python
@@ -200,9 +209,46 @@ threads   runtime   speedup vs 1T
 Better than the pre-rewrite kernel's 3.57× at 8T; barrier and alive-scan removal
 let it scale further before hitting the 4-physical-core / SMT ceiling.
 
+## Runtime FMA dispatch (2026-07-12)
+
+The direct bilinear/trilinear sampler is a chain of scalar lerps. On baseline
+x86-64 those lerps compile as separate multiply/add operations; an FMA-enabled
+build contracts them and provides a further portable-at-runtime speedup without
+changing the flow layout or API.
+
+Paired `check_flow_density.py` medians on the AMD EPYC 7513, from the same source
+revision and build environment:
+
+| Fixture | Threads | Dispatch OFF | Dispatch ON | Improvement |
+|---|---:|---:|---:|---:|
+| 3D | 1 | 1.4900 s | 1.3084 s | 12.2% |
+| 3D | 8 | 0.3035 s | 0.2553 s | 15.9% |
+| 2D | 1 | 0.2021 s | 0.1801 s | 10.9% |
+
+The full registered 3D density remained byte-for-byte identical, both stored
+reference checks passed with unchanged metrics, and the complete test suite
+reported 1057 passed / 8 skipped. A further 400 randomized 2D/3D default-mode
+cases, including axis-of-length-one shapes and 1/4 threads, produced identical
+aggregate output digests with dispatch enabled and disabled.
+
+Implementation details that matter:
+
+- Runtime feature detection happens in the baseline-compiled caller before the
+  specialized function is entered.
+- GCC/Clang require AVX+FMA; MSVC uses `/arch:AVX2` and therefore also checks AVX2
+  before dispatch.
+- Only the common selector 7 specialization is duplicated. Less common Euler,
+  no-convergence, and unrestricted modes keep using the portable implementation.
+- The FMA translation unit uses a distinct `CodegenVariant` template argument.
+  Without a distinct mangled name, linker COMDAT selection can silently retain
+  the portable `trace_all` instantiation and discard the FMA implementation.
+- Automatic `target_clones` remains rejected: putting a target boundary around
+  the driver or chunk inhibited the hot-loop inlining and regressed runtime.
+
 ## Correctness
 
-- All 1067 tests in the package pass; the 17 `tests/test_flow.py` cases cover
+- The current suite reports 1057 passed / 8 skipped. The 17
+  `tests/test_flow.py` cases cover
   2D/3D, Euler/RK2, mask on/off, convergence on/off, single-vs-multithread
   equality, non-contiguous inputs, degenerate `n_iter`, and invalid inputs.
 - A differential harness ran 1056 randomized cases — axis-of-length-1 shapes,
@@ -251,6 +297,10 @@ Kept so these avenues are not blindly re-attempted.
 - **`target_clones` autovectorization SIMD** (earlier, rolled back) — the AVX2
   clone emitted only scalar FMA (gcc judged the 8-corner gather unprofitable) and
   regressed 8T from icache pressure of three inlined clones.
+- **Current-sample channel prefetching** after interpolation offsets were known
+  regressed the EPYC 3D fixture by about 5% at 1T and 2% at 8T. The warm-kernel
+  counter run reported only about 1.45% L1-data load misses, so the extra
+  prefetch instructions cost more than the avoided demand-load latency.
 - **Interleaved (channel-last) layout + hand-written AVX2 FMA** (earlier, rolled
   back, 2026-06-12) — codegen was confirmed optimal via `objdump` (8× packed
   `vfmadd132ps`, zero gathers) yet was no faster than scalar, and `VS=4` padding
@@ -288,11 +338,12 @@ Lower priority than the landed work; all need a fixed-clock host with `perf`
    several kernel calls) to confirm where the remaining cycles go (front-end vs
    back-end memory vs back-end core) and to provide a low-noise environment for
    evaluating (1).
-3. **Cross-architecture confirmation** of the truncation gain magnitude on arm64
-   (macOS AppleClang, Linux aarch64) and Windows MSVC. The particle-major and
-   direct-interpolation gains are portable C++20; the truncation magnitude is the
-   most microarchitecture-dependent (it depends on how `floor` is lowered without
-   SSE4.1 / on the arm equivalent).
+3. **Cross-architecture confirmation** on macOS x86-64 and Windows x86-64 for
+   the FMA dispatch, plus the truncation gain magnitude on arm64 (macOS
+   AppleClang and Linux aarch64). The particle-major and direct-interpolation
+   gains are portable C++20; the x86 dispatch is compiler-specific and the
+   truncation magnitude depends on how `floor` is lowered without SSE4.1 / on
+   the arm equivalent.
 
 ## Reproducing these measurements
 
