@@ -97,9 +97,19 @@ class UndirectedGraph(_core.UndirectedGraph):
 
     @classmethod
     def from_edges(cls, number_of_nodes: int, uvs):
-        graph = cls(number_of_nodes)
-        graph.insert_edges(uvs)
-        return graph
+        return cls(int(number_of_nodes), _as_uv_array(uvs, "uvs"), False)
+
+    @classmethod
+    def from_unique_edges(cls, number_of_nodes: int, uvs):
+        """Bulk-construct from a pre-deduplicated ``(n, 2)`` edge array.
+
+        The caller asserts that no undirected ``(u, v)`` pair appears twice and
+        that ``u != v`` in every row; edges receive ids matching their position
+        in ``uvs``. This skips the per-edge dedup of :meth:`from_edges` and is
+        the fast path for e.g. the merged edge set of
+        :func:`bioimage_cpp.graph.distributed.merge_edges`.
+        """
+        return cls(int(number_of_nodes), _as_uv_array(uvs, "uvs"), True)
 
     @classmethod
     def deserialize(cls, serialization):

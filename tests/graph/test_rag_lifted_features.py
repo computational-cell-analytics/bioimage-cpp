@@ -219,7 +219,6 @@ def test_lifted_affinity_features_skips_local_hits():
         ],
         dtype=np.uint32,
     )
-    rag = bic.graph.region_adjacency_graph(labels)
     # Offset (2, 2): in a 3x3 grid only (0, 0) -> (2, 2), both label 0.
     # So no diff, no accumulation. We pass a lifted edge that doesn't exist
     # in the data to make sure no accumulation happens.

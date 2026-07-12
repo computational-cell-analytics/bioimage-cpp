@@ -284,29 +284,34 @@ def test_merge_block_edge_stats_reduction_and_skipping():
     )
     acc = dist.empty_edge_stats(graph.number_of_edges)
 
-    # Block A touches edge (0,1) with values summarized as count=2,sum=3,sq=5,min=1,max=2.
+    # Block A touches edge (0,1) with values {1, 2}: count=2, mean=1.5, M2=0.5.
     edges_a = np.array([[0, 1]], dtype=np.uint64)
-    stats_a = np.array([[2.0, 3.0, 5.0, 1.0, 2.0]], dtype=np.float64)
+    stats_a = np.array([[2.0, 1.5, 0.5, 1.0, 2.0]], dtype=np.float64)
     acc = dist.merge_block_edge_stats(graph, acc, edges_a, stats_a)
 
-    # Block B touches edge (0,1) again plus (0,2) which is absent -> skipped.
+    # Block B touches edge (0,1) again with value {10} plus (0,2) which is
+    # absent from the graph -> skipped.
     edges_b = np.array([[0, 1], [0, 2]], dtype=np.uint64)
     stats_b = np.array(
-        [[1.0, 10.0, 100.0, 10.0, 10.0], [5.0, 5.0, 5.0, -1.0, 9.0]], dtype=np.float64
+        [[1.0, 10.0, 0.0, 10.0, 10.0], [5.0, 1.0, 5.0, -1.0, 9.0]], dtype=np.float64
     )
     acc = dist.merge_block_edge_stats(graph, acc, edges_b, stats_b)
 
-    # edge (0,1): count 2+1, sum 3+10, sq 5+100, min(1,10)=1, max(2,10)=10
-    np.testing.assert_array_equal(acc[0], [3.0, 13.0, 105.0, 1.0, 10.0])
+    # edge (0,1) now describes {1, 2, 10}: count=3, mean=13/3,
+    # M2 = sum((x - mean)^2) = 438/9, min(1,10)=1, max(2,10)=10
+    values = np.array([1.0, 2.0, 10.0])
+    np.testing.assert_allclose(
+        acc[0], [3.0, values.mean(), ((values - values.mean()) ** 2).sum(), 1.0, 10.0]
+    )
     # edge (1,2): never touched
     np.testing.assert_array_equal(acc[1], [0.0, 0.0, 0.0, 0.0, 0.0])
 
 
 def test_finalize_edge_features_formulas_and_zero_count():
-    # edge 0: count=4, sum=8 -> mean 2; sum_sq=24 -> var = 24/4 - 4 = 2 -> std sqrt(2)
+    # edge 0: count=4, mean=2, M2=8 -> var = 8/4 = 2 -> std sqrt(2)
     # edge 1: empty
     stats = np.array(
-        [[4.0, 8.0, 24.0, -1.0, 5.0], [0.0, 0.0, 0.0, 0.0, 0.0]], dtype=np.float64
+        [[4.0, 2.0, 8.0, -1.0, 5.0], [0.0, 0.0, 0.0, 0.0, 0.0]], dtype=np.float64
     )
     simple = dist.finalize_edge_features(stats, compute_complex_features=False)
     np.testing.assert_allclose(simple[0], [2.0, 4.0])
@@ -315,6 +320,67 @@ def test_finalize_edge_features_formulas_and_zero_count():
     complex_ = dist.finalize_edge_features(stats, compute_complex_features=True)
     np.testing.assert_allclose(complex_[0], [2.0, np.sqrt(2.0), -1.0, 5.0, 4.0])
     np.testing.assert_array_equal(complex_[1], [0.0, 0.0, 0.0, 0.0, 0.0])
+
+
+def test_merge_block_edge_stats_updates_in_place():
+    graph = bic.graph.UndirectedGraph.from_unique_edges(
+        2, np.array([[0, 1]], dtype=np.uint64)
+    )
+    acc = dist.empty_edge_stats(graph.number_of_edges)
+    edges = np.array([[0, 1]], dtype=np.uint64)
+    stats = np.array([[1.0, 2.0, 0.0, 2.0, 2.0]], dtype=np.float64)
+
+    result = dist.merge_block_edge_stats(graph, acc, edges, stats)
+    assert result is acc
+    np.testing.assert_array_equal(acc[0], [1.0, 2.0, 0.0, 2.0, 2.0])
+
+
+def test_merge_block_edge_stats_rejects_bad_accumulator():
+    graph = bic.graph.UndirectedGraph.from_unique_edges(
+        3, np.array([[0, 1], [1, 2]], dtype=np.uint64)
+    )
+    edges = np.array([[0, 1]], dtype=np.uint64)
+    stats = np.array([[1.0, 2.0, 0.0, 2.0, 2.0]], dtype=np.float64)
+
+    with pytest.raises(TypeError, match="float64"):
+        dist.merge_block_edge_stats(
+            graph, np.zeros((2, 5), dtype=np.float32), edges, stats
+        )
+    with pytest.raises(TypeError, match="float64"):
+        dist.merge_block_edge_stats(graph, [[0.0] * 5] * 2, edges, stats)
+    with pytest.raises(ValueError, match="C-contiguous"):
+        dist.merge_block_edge_stats(
+            graph, np.zeros((2, 10), dtype=np.float64)[:, ::2], edges, stats
+        )
+    read_only = dist.empty_edge_stats(graph.number_of_edges)
+    read_only.setflags(write=False)
+    with pytest.raises(ValueError, match="writable"):
+        dist.merge_block_edge_stats(graph, read_only, edges, stats)
+
+
+def test_std_is_stable_for_large_baseline():
+    # Values 1e8 and 1e8 + 1 have std 0.5; the naive sum-of-squares formula
+    # returns 0.0 here due to catastrophic cancellation.
+    labels = np.array([[0, 1], [0, 1]], dtype=np.uint32)
+    edge_map = np.array([[1e8, 1e8], [1e8 + 1, 1e8 + 1]], dtype=np.float64)
+
+    graph = bic.graph.UndirectedGraph.from_unique_edges(
+        2, np.array([[0, 1]], dtype=np.uint64)
+    )
+
+    # Whole array as one block, and split into two one-row blocks so the
+    # cross-block Chan combine is exercised too.
+    single = dist.block_edge_map_stats(labels, edge_map, [0, 0], [2, 2])
+    blocked = [
+        dist.block_edge_map_stats(labels, edge_map, [0, 0], [1, 2]),
+        dist.block_edge_map_stats(labels, edge_map, [1, 0], [1, 2]),
+    ]
+    for per_block in ([single], blocked):
+        acc = dist.empty_edge_stats(graph.number_of_edges)
+        for be, bs in per_block:
+            acc = dist.merge_block_edge_stats(graph, acc, be, bs)
+        features = dist.finalize_edge_features(acc, compute_complex_features=True)
+        np.testing.assert_allclose(features[0, 1], 0.5)
 
 
 # --------------------------------------------------------------------------
@@ -377,3 +443,56 @@ def test_unsupported_label_dtype_raises():
     labels = np.zeros((5, 5), dtype=np.uint8)
     with pytest.raises(TypeError):
         dist.block_region_adjacency_edges(labels, [0, 0], [5, 5])
+
+
+def test_non_integer_owned_box_raises():
+    labels = np.zeros((6, 6), dtype=np.uint32)
+    with pytest.raises(TypeError, match="own_begin must contain integers"):
+        dist.block_region_adjacency_edges(labels, [0.9, 0], [3, 3])
+    with pytest.raises(TypeError, match="own_shape must contain integers"):
+        dist.block_region_adjacency_edges(labels, [0, 0], [1.9, 3])
+
+
+def test_non_integer_offsets_raise():
+    labels = np.zeros((6, 6), dtype=np.uint32)
+    affinities = np.zeros((1, 6, 6), dtype=np.float64)
+    with pytest.raises(TypeError, match="offsets must contain integers"):
+        dist.block_affinity_stats(labels, affinities, [[0.9, 0]], [0, 0], [6, 6])
+
+
+def test_merge_edges_rejects_negative_and_float_edges():
+    with pytest.raises(ValueError, match="negative"):
+        dist.merge_edges(np.array([[-1, 2]], dtype=np.int64))
+    with pytest.raises(ValueError, match="negative"):
+        dist.merge_edges([np.array([[0, 1]], dtype=np.uint64), [[-1, 2]]])
+    with pytest.raises(TypeError, match="integer dtype"):
+        dist.merge_edges(np.array([[0.5, 2.0]], dtype=np.float64))
+    # non-negative signed integers are fine
+    merged = dist.merge_edges(np.array([[1, 0]], dtype=np.int64))
+    np.testing.assert_array_equal(merged, np.array([[0, 1]], dtype=np.uint64))
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("number_of_threads", [1, 4])
+def test_negative_labels_raise(dtype, number_of_threads):
+    # A negative label must raise a normal Python exception from every block
+    # scanner, also when the check fires inside a worker thread (this used to
+    # terminate the process via an unhandled exception in std::thread).
+    labels = np.zeros((8, 8), dtype=dtype)
+    labels[3, 3] = -1
+    edge_map = np.zeros((8, 8), dtype=np.float64)
+    affinities = np.zeros((2, 8, 8), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="negative"):
+        dist.block_region_adjacency_edges(
+            labels, [0, 0], [8, 8], number_of_threads=number_of_threads
+        )
+    with pytest.raises(ValueError, match="negative"):
+        dist.block_edge_map_stats(
+            labels, edge_map, [0, 0], [8, 8], number_of_threads=number_of_threads
+        )
+    with pytest.raises(ValueError, match="negative"):
+        dist.block_affinity_stats(
+            labels, affinities, [[1, 0], [0, 1]], [0, 0], [8, 8],
+            number_of_threads=number_of_threads,
+        )

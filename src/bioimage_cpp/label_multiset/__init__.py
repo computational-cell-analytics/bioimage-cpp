@@ -22,7 +22,7 @@ Storage layout (mirrors nifty):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Tuple
 
 import numpy as np
 

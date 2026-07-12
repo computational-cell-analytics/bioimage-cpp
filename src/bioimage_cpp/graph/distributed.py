@@ -21,12 +21,15 @@ The pipeline has three stages:
 
 2. **Merge the graph**: :func:`merge_edges` unions the per-block edges into the
    whole-volume edge set; build the global graph with
-   :meth:`bioimage_cpp.graph.UndirectedGraph.from_unique_edges`.
+   :meth:`bioimage_cpp.graph.UndirectedGraph.from_unique_edges`. Labels must be
+   globally consistent *and* reasonably dense: the graph allocates memory
+   proportional to the largest node id, so sparse or very large globally unique
+   id ranges need a relabeling pass first.
 
 3. **Merge the features**: fold each block's partial statistics onto the global
    edges with :func:`merge_block_edge_stats` (starting from
-   :func:`empty_edge_stats`), then convert to features with
-   :func:`finalize_edge_features`.
+   :func:`empty_edge_stats`; the accumulator is updated in place), then convert
+   to features with :func:`finalize_edge_features`.
 
 Exactly-recoverable features are ``size``, ``mean``, ``std``, ``min`` and
 ``max``. Median and percentiles cannot be reconstructed from block partials, so
@@ -35,6 +38,8 @@ size]`` — it equals the corresponding columns of the in-core complex features.
 """
 
 from __future__ import annotations
+
+import operator
 
 import numpy as np
 
@@ -68,6 +73,8 @@ def _as_index_vector(values, ndim: int, name: str) -> list[int]:
     array = np.asarray(values)
     if array.ndim != 1 or array.shape[0] != ndim:
         raise ValueError(f"{name} must be a 1D sequence of length {ndim}")
+    if not np.issubdtype(array.dtype, np.integer):
+        raise TypeError(f"{name} must contain integers, got dtype={array.dtype}")
     return [int(value) for value in array]
 
 
@@ -76,6 +83,18 @@ def _as_stats_array(values, name: str) -> np.ndarray:
     if array.ndim != 2 or array.shape[1] != 5:
         raise ValueError(f"{name} must have shape (number_of_edges, 5)")
     return np.ascontiguousarray(array)
+
+
+def _as_edge_part(part) -> np.ndarray:
+    array = np.asarray(part)
+    if array.size:
+        if not np.issubdtype(array.dtype, np.integer):
+            raise TypeError(
+                f"edges must have an integer dtype, got dtype={array.dtype}"
+            )
+        if np.issubdtype(array.dtype, np.signedinteger) and (array < 0).any():
+            raise ValueError("edges must not contain negative node ids")
+    return array.astype(np.uint64, copy=False)
 
 
 def _dispatch_labels(labels, table, name: str):
@@ -131,8 +150,9 @@ def block_edge_map_stats(
     must have the same shape as ``labels``. Returns ``(edges, stats)`` where
     ``edges`` is ``(n, 2)`` ``uint64`` (matching
     :func:`block_region_adjacency_edges` for the same block) and ``stats`` is
-    ``(n, 5)`` ``float64`` with columns ``[count, sum, sum_of_squares, min,
-    max]`` aligned row-by-row to ``edges``.
+    ``(n, 5)`` ``float64`` with columns ``[count, mean, M2, min, max]`` aligned
+    row-by-row to ``edges`` (``M2`` is the sum of squared deviations from the
+    mean, as in Welford's algorithm — numerically stable when merged).
     """
     label_array, run = _dispatch_labels(
         labels, _BLOCK_EDGE_MAP_STATS_BY_DTYPE, "edge-map"
@@ -184,7 +204,14 @@ def block_affinity_stats(
             f"affinities shape={affinity_array.shape}, labels shape={label_array.shape}"
         )
 
-    normalized_offsets = [tuple(int(value) for value in offset) for offset in offsets]
+    try:
+        # operator.index accepts ints and NumPy integers but rejects floats,
+        # which int() would silently truncate.
+        normalized_offsets = [
+            tuple(operator.index(value) for value in offset) for offset in offsets
+        ]
+    except TypeError as error:
+        raise TypeError(f"offsets must contain integers: {error}") from error
     if len(normalized_offsets) != affinity_array.shape[0]:
         raise ValueError(
             "offsets length must match affinities channel count, got "
@@ -213,16 +240,19 @@ def merge_edges(edges) -> np.ndarray:
     self-edges are dropped, and the result is deduplicated and sorted
     lexicographically. The returned ``(E, 2)`` ``uint64`` array feeds
     :meth:`bioimage_cpp.graph.UndirectedGraph.from_unique_edges` directly.
+
+    Outputs are valid inputs, so peak memory can be bounded by merging
+    hierarchically: merge groups of blocks first, then merge the merged
+    results (tree reduction).
     """
     if isinstance(edges, np.ndarray):
-        stacked = edges
+        stacked = _as_edge_part(edges)
     else:
-        parts = [np.asarray(part, dtype=np.uint64) for part in edges]
+        parts = [_as_edge_part(part) for part in edges]
         if not parts:
             return np.empty((0, 2), dtype=np.uint64)
         stacked = np.concatenate(parts, axis=0)
 
-    stacked = np.asarray(stacked, dtype=np.uint64)
     if stacked.ndim != 2 or stacked.shape[1] != 2:
         raise ValueError("edges must have shape (n_edges, 2)")
     return _core._merge_edges(np.ascontiguousarray(stacked))
@@ -245,17 +275,33 @@ def merge_block_edge_stats(
     """Fold one block's partial statistics onto the global edges.
 
     ``current_stats`` is the running ``(E, 5)`` accumulator (rows aligned to
-    ``global_graph`` edge ids; start from :func:`empty_edge_stats`).
+    ``global_graph`` edge ids; start from :func:`empty_edge_stats`). **It is
+    updated in place and returned**, so one merge costs O(block edges)
+    regardless of the global graph size; it must be a C-contiguous, writable
+    ``float64`` array (as produced by :func:`empty_edge_stats`).
     ``block_edges`` / ``block_stats`` are a block extraction's ``(n, 2)`` /
     ``(n, 5)`` outputs. Each block edge is mapped to its global edge id via
     ``global_graph.find_edge``; edges absent from the graph are skipped.
-    ``count/sum/sum_of_squares`` add and ``min/max`` reduce. Returns the updated
-    ``(E, 5)`` accumulator.
+    ``count`` adds, ``mean/M2`` combine via the Chan formula, and ``min/max``
+    reduce.
 
     Block edge endpoints must be valid node ids of ``global_graph``.
     """
-    current = _as_stats_array(current_stats, "current_stats")
-    if int(current.shape[0]) != int(global_graph.number_of_edges):
+    # Do not coerce/copy `current_stats` — the merge mutates it in place, and a
+    # silent copy would discard the update.
+    if not isinstance(current_stats, np.ndarray) or current_stats.dtype != np.float64:
+        raise TypeError(
+            "current_stats must be a float64 numpy array, got "
+            f"{type(current_stats).__name__}"
+            + (f" with dtype={current_stats.dtype}" if isinstance(current_stats, np.ndarray) else "")
+        )
+    if current_stats.ndim != 2 or current_stats.shape[1] != 5:
+        raise ValueError("current_stats must have shape (number_of_edges, 5)")
+    if not current_stats.flags.c_contiguous:
+        raise ValueError("current_stats must be C-contiguous (it is updated in place)")
+    if not current_stats.flags.writeable:
+        raise ValueError("current_stats must be writable (it is updated in place)")
+    if int(current_stats.shape[0]) != int(global_graph.number_of_edges):
         raise ValueError("current_stats rows must match global_graph number_of_edges")
 
     block_edge_array = np.asarray(block_edges, dtype=np.uint64)
@@ -265,12 +311,13 @@ def merge_block_edge_stats(
     if block_stat_array.shape[0] != block_edge_array.shape[0]:
         raise ValueError("block_edges and block_stats must have the same number of rows")
 
-    return _core._merge_block_edge_stats(
+    _core._merge_block_edge_stats(
         global_graph,
-        current,
+        current_stats,
         np.ascontiguousarray(block_edge_array),
         block_stat_array,
     )
+    return current_stats
 
 
 def finalize_edge_features(

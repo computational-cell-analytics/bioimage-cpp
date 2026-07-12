@@ -30,7 +30,7 @@ inline std::size_t normalize_thread_count(
 
 // Split [0, number_of_work_items) into n_threads contiguous chunks and invoke
 // `chunk(thread_id, begin, end)` on each chunk. Thread 0 runs on the calling
-// thread; threads 1..n_threads-1 run in parallel std::jthreads. The caller is
+// thread; threads 1..n_threads-1 run in parallel std::threads. The caller is
 // responsible for picking n_threads via normalize_thread_count and for the
 // thread safety of `chunk`.
 //
@@ -70,17 +70,27 @@ void parallel_for_chunks(
         }
     };
 
-    // jthread's destructor joins, so a failure while creating a later worker
-    // cannot destroy an earlier still-joinable thread and terminate the
-    // process. We still join explicitly below to rethrow only after all work
-    // has completed.
-    std::vector<std::jthread> threads;
+    // A joinable std::thread whose destructor runs without a prior join calls
+    // std::terminate. If spawning a later worker throws (e.g. the OS refuses a
+    // new thread), the threads vector would otherwise destroy the already
+    // joinable workers and terminate the process, so join them first and then
+    // rethrow. (std::jthread would join on destruction automatically, but it is
+    // not available in AppleClang's libc++, and portable macOS wheels are a
+    // hard requirement.)
+    std::vector<std::thread> threads;
     threads.reserve(n_threads > 0 ? n_threads - 1 : 0);
-    for (std::size_t thread_id = 1; thread_id < n_threads; ++thread_id) {
-        const auto [begin, end] = bounds(thread_id);
-        threads.emplace_back([thread_id, begin, end, &guarded_chunk]() {
-            guarded_chunk(thread_id, begin, end);
-        });
+    try {
+        for (std::size_t thread_id = 1; thread_id < n_threads; ++thread_id) {
+            const auto [begin, end] = bounds(thread_id);
+            threads.emplace_back([thread_id, begin, end, &guarded_chunk]() {
+                guarded_chunk(thread_id, begin, end);
+            });
+        }
+    } catch (...) {
+        for (auto &thread : threads) {
+            thread.join();
+        }
+        throw;
     }
     const auto [begin, end] = bounds(0);
     guarded_chunk(0, begin, end);

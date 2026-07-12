@@ -500,7 +500,11 @@ per-block subgraphs/features to zarr/N5/HDF5) is intentionally left to the
 caller, since I/O and block scheduling belong in Python.
 
 The primitives assume **globally consistent labels** (a segment has the same id
-in every block — as after a stitched distributed watershed). A block owns the
+in every block — as after a stitched distributed watershed). Labels must also
+be reasonably **dense**: the global graph allocates memory proportional to the
+largest node id (`from_unique_edges(number_of_nodes, ...)` builds a dense CSR
+over ids `0 .. number_of_nodes - 1`), so sparse or very large globally unique
+id ranges need a relabeling pass before building the graph. A block owns the
 pixel-pairs whose reference pixel lies in its inner (non-halo) box, so the
 caller reads each block with a halo (≥1 on the forward faces for the region
 graph / an edge map; ≥ `max |offset|` per side for affinities) and passes the
@@ -519,10 +523,10 @@ block_edges, block_stats = d.block_affinity_stats(labels_block, aff_block, offse
 global_edges = d.merge_edges([edges_block_0, edges_block_1, ...])
 graph = bic.graph.UndirectedGraph.from_unique_edges(number_of_nodes, global_edges)
 
-# fold per-block features onto the global edges, then finalize:
+# fold per-block features onto the global edges (in place), then finalize:
 acc = d.empty_edge_stats(graph.number_of_edges)
 for be, bs in per_block_stats:
-    acc = d.merge_block_edge_stats(graph, acc, be, bs)
+    d.merge_block_edge_stats(graph, acc, be, bs)
 features = d.finalize_edge_features(acc, compute_complex_features=True)
 ```
 
@@ -530,8 +534,11 @@ Notes:
 
 - Blocked results reproduce the whole-volume `region_adjacency_graph` /
   `features.*_features` exactly for `size`, `min` and `max`, and to
-  floating-point tolerance for `mean` / `std` (the running sums depend on thread
-  count and merge order).
+  floating-point tolerance for `mean` / `std` (the running moments depend on
+  thread count and merge order). The `(n, 5)` partial statistics use the
+  numerically stable Welford/Chan representation `[count, mean, M2, min, max]`
+  (`M2` = sum of squared deviations from the mean), so `std` stays accurate
+  for values with a large baseline and small spread.
 - **Median and percentiles are not distributable.** The distributed complex
   output is the moment subset `[mean, std, min, max, size]` — the corresponding
   columns of the in-core 12-column complex features.

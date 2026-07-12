@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
-#include <unordered_set>
 #include <vector>
 
 // Whole-volume merge primitives for the distributed region-adjacency-graph and
@@ -25,7 +24,9 @@ namespace bioimage_cpp::graph::distributed {
 // Edges are canonicalized to `u < v`, self-edges (`u == v`) are dropped, and the
 // result is deduplicated and sorted ascending by `(u, v)` — exactly the
 // precondition of `UndirectedGraph::from_sorted_unique_edges`, so the merged
-// output can be turned into the global graph directly.
+// output can be turned into the global graph directly. Deduplication uses
+// sort + unique rather than a hash set: peak memory stays close to one copy of
+// the input instead of the ~8x node/bucket overhead of an unordered_set.
 inline std::vector<bioimage_cpp::detail::Edge> merge_edges(
     const ConstArrayView<std::uint64_t> &concatenated
 ) {
@@ -34,36 +35,41 @@ inline std::vector<bioimage_cpp::detail::Edge> merge_edges(
     }
 
     const auto number_of_input_edges = static_cast<std::size_t>(concatenated.shape[0]);
-    std::unordered_set<bioimage_cpp::detail::Edge, bioimage_cpp::detail::EdgeHash> merged;
-    merged.reserve(number_of_input_edges);
+    std::vector<bioimage_cpp::detail::Edge> sorted_edges;
+    sorted_edges.reserve(number_of_input_edges);
     for (std::size_t index = 0; index < number_of_input_edges; ++index) {
         const auto u = concatenated.data[2 * index];
         const auto v = concatenated.data[2 * index + 1];
         if (u == v) {
             continue;
         }
-        merged.insert(bioimage_cpp::detail::edge_key(u, v));
+        sorted_edges.push_back(bioimage_cpp::detail::edge_key(u, v));
     }
 
-    std::vector<bioimage_cpp::detail::Edge> sorted_edges(merged.begin(), merged.end());
     std::sort(sorted_edges.begin(), sorted_edges.end());
+    sorted_edges.erase(
+        std::unique(sorted_edges.begin(), sorted_edges.end()), sorted_edges.end()
+    );
     return sorted_edges;
 }
 
 // Fold one block's partial edge statistics into a running whole-volume
-// accumulator, returning the updated accumulator. `current_stats` and the return
-// value are `(number_of_edges, 5)` rows aligned to `global_graph`'s edge ids;
+// accumulator, updating `current_stats` in place. `current_stats` is
+// `(number_of_edges, 5)` rows aligned to `global_graph`'s edge ids;
 // `block_edges`/`block_stats` are the `(n, 2)` / `(n, 5)` outputs of a block
 // extraction. Each block edge is mapped to its global edge id via
 // `global_graph.find_edge`; edges absent from the global graph (id `-1`) are
-// skipped. `count/sum/sum_of_squares` add; `min/max` reduce, seeded from the
-// first contribution to each edge (so `current_stats` may be zero-initialized).
+// skipped. `count` adds, `mean/M2` combine via the Chan formula, and `min/max`
+// reduce; rows with zero count take the block row verbatim (so `current_stats`
+// may be zero-initialized). Mutating in place keeps one merge O(block edges)
+// instead of O(global edges) — the per-block cost must not scale with the
+// global graph.
 //
 // Block edge endpoints must be valid node ids of `global_graph`
 // (`< number_of_nodes`); `find_edge` throws `std::out_of_range` otherwise.
-inline std::vector<double> merge_block_edge_stats(
+inline void merge_block_edge_stats(
     const UndirectedGraph &global_graph,
-    const ConstArrayView<double> &current_stats,
+    const ArrayView<double> &current_stats,
     const ConstArrayView<std::uint64_t> &block_edges,
     const ConstArrayView<double> &block_stats
 ) {
@@ -87,11 +93,6 @@ inline std::vector<double> merge_block_edge_stats(
         );
     }
 
-    const auto number_of_edges = static_cast<std::size_t>(current_stats.shape[0]);
-    std::vector<double> out(
-        current_stats.data, current_stats.data + number_of_edges * 5
-    );
-
     const auto number_of_block_edges = static_cast<std::size_t>(block_edges.shape[0]);
     for (std::size_t index = 0; index < number_of_block_edges; ++index) {
         const auto u = block_edges.data[2 * index];
@@ -101,20 +102,27 @@ inline std::vector<double> merge_block_edge_stats(
             continue;
         }
 
-        double *const o = out.data() + static_cast<std::size_t>(edge) * 5;
+        double *const o = current_stats.data + static_cast<std::size_t>(edge) * 5;
         const double *const b = block_stats.data + index * 5;
+        if (b[0] == 0.0) {
+            continue;
+        }
         if (o[0] == 0.0) {
+            o[0] = b[0];
+            o[1] = b[1];
+            o[2] = b[2];
             o[3] = b[3];
             o[4] = b[4];
         } else {
+            const auto delta = b[1] - o[1];
+            const auto total = o[0] + b[0];
+            o[1] += delta * b[0] / total;
+            o[2] += b[2] + delta * delta * o[0] * b[0] / total;
+            o[0] = total;
             o[3] = std::min(o[3], b[3]);
             o[4] = std::max(o[4], b[4]);
         }
-        o[0] += b[0];
-        o[1] += b[1];
-        o[2] += b[2];
     }
-    return out;
 }
 
 // Turn accumulated partial statistics `(number_of_edges, 5)` into edge features.
@@ -152,9 +160,9 @@ inline void finalize_edge_features(
             continue;
         }
 
-        const auto mean = s[1] / count;
+        const auto mean = s[1];
         if (compute_complex_features) {
-            const auto variance = std::max(0.0, s[2] / count - mean * mean);
+            const auto variance = std::max(0.0, s[2] / count);
             o[0] = mean;
             o[1] = std::sqrt(variance);
             o[2] = s[3];

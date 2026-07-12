@@ -29,8 +29,8 @@
 // the block's inner (non-halo) box `[own_begin, own_begin + own_shape)`; the
 // neighbor pixel is read from the passed (outer, haloed) array. Because inner
 // boxes tile the volume, every contributing pair is counted exactly once, so
-// per-block partial statistics (count/sum/sum_of_squares add, min/max reduce)
-// reconstruct the whole-volume statistics exactly. The reference pixel is the
+// per-block partial statistics (count adds, mean/M2 combine via Chan, min/max
+// reduce) reconstruct the whole-volume statistics exactly. The reference pixel is the
 // lower pixel of a forward nearest-neighbor edge (region graph / edge map) or
 // the pixel an affinity value is stored at (affinities).
 //
@@ -42,41 +42,47 @@
 namespace bioimage_cpp::graph::distributed {
 
 // Per-edge partial statistics accumulated over the pixels a block owns. Layout
-// mirrors the serialized `(n_edges, 5)` array: count, sum, sum_of_squares, min,
-// max. `count/min/max` are exact under any thread/block ordering; the
-// floating-point `sum/sum_of_squares` (and hence mean/std after finalization)
-// are reproducible only for a fixed thread count and merge order.
+// mirrors the serialized `(n_edges, 5)` array: count, mean, M2 (sum of squared
+// deviations from the mean), min, max. Mean/M2 use the Welford update and the
+// Chan combine instead of raw sum / sum-of-squares so the merged standard
+// deviation stays accurate for values with a large baseline and small spread
+// (raw moments suffer catastrophic cancellation there). `count/min/max` are
+// exact under any thread/block ordering; the floating-point `mean/M2` (and
+// hence mean/std after finalization) are reproducible only for a fixed thread
+// count and merge order.
 struct PartialStats {
     double count = 0.0;
-    double sum = 0.0;
-    double sum_of_squares = 0.0;
+    double mean = 0.0;
+    double m2 = 0.0;
     double minimum = std::numeric_limits<double>::infinity();
     double maximum = -std::numeric_limits<double>::infinity();
 
     void add(const double value) {
-        sum += value;
-        sum_of_squares += value * value;
+        count += 1.0;
+        const auto delta = value - mean;
+        mean += delta / count;
+        m2 += delta * (value - mean);
         minimum = std::min(minimum, value);
         maximum = std::max(maximum, value);
-        count += 1.0;
     }
 
     void merge(const PartialStats &other) {
         if (other.count == 0.0) {
             return;
         }
-        sum += other.sum;
-        sum_of_squares += other.sum_of_squares;
+        const auto delta = other.mean - mean;
+        const auto total = count + other.count;
+        mean += delta * other.count / total;
+        m2 += other.m2 + delta * delta * count * other.count / total;
+        count = total;
         minimum = std::min(minimum, other.minimum);
         maximum = std::max(maximum, other.maximum);
-        count += other.count;
     }
 };
 
 // A block's owned edges together with their aligned partial statistics. `edges`
 // is sorted-unique with `u < v`; `stats` is row-major `(edges.size(), 5)` with
-// columns [count, sum, sum_of_squares, min, max] and row `i` describing
-// `edges[i]`.
+// columns [count, mean, M2, min, max] and row `i` describing `edges[i]`.
 struct BlockEdgeStats {
     std::vector<bioimage_cpp::detail::Edge> edges;
     std::vector<double> stats;
@@ -88,7 +94,6 @@ using bioimage_cpp::detail::checked_label_to_node;
 using bioimage_cpp::detail::Edge;
 using bioimage_cpp::detail::EdgeHash;
 using bioimage_cpp::detail::edge_key;
-using bioimage_cpp::detail::valid_axis_range;
 
 using EdgeSet = std::unordered_set<Edge, EdgeHash>;
 using EdgeStatsMap = std::unordered_map<Edge, PartialStats, EdgeHash>;
@@ -146,104 +151,14 @@ inline void validate_owned_box(
     }
 }
 
-// Sweep reference nodes over the owned box on a 2D grid, calling
-// `body(node, target)` with flat C-order indices into the outer array for each
-// reference node whose `+offset` neighbor stays inside the outer array. Axis 0
-// is additionally restricted to the absolute slab `[slab_begin, slab_end)`
-// (the caller's thread chunk, already inside the owned box).
-template <class Body>
-void sweep_owned_box_2d(
-    const std::ptrdiff_t dy,
-    const std::ptrdiff_t dx,
-    const std::size_t outer_h,
-    const std::size_t outer_w,
-    const std::int64_t own_begin_y,
-    const std::int64_t own_begin_x,
-    const std::int64_t own_shape_y,
-    const std::int64_t own_shape_x,
-    const std::size_t slab_begin,
-    const std::size_t slab_end,
-    const Body &body
-) {
-    std::size_t y_lo_v, y_hi_v, x_lo_v, x_hi_v;
-    valid_axis_range(dy, outer_h, y_lo_v, y_hi_v);
-    valid_axis_range(dx, outer_w, x_lo_v, x_hi_v);
-
-    const auto y_lo = std::max({y_lo_v, static_cast<std::size_t>(own_begin_y), slab_begin});
-    const auto y_hi = std::min({y_hi_v, static_cast<std::size_t>(own_begin_y + own_shape_y), slab_end});
-    const auto x_lo = std::max(x_lo_v, static_cast<std::size_t>(own_begin_x));
-    const auto x_hi = std::min(x_hi_v, static_cast<std::size_t>(own_begin_x + own_shape_x));
-    if (y_lo >= y_hi || x_lo >= x_hi) {
-        return;
-    }
-
-    const auto offset_stride = dy * static_cast<std::ptrdiff_t>(outer_w) + dx;
-    for (std::size_t y = y_lo; y < y_hi; ++y) {
-        const auto row_offset = y * outer_w;
-        for (std::size_t x = x_lo; x < x_hi; ++x) {
-            const auto node = row_offset + x;
-            const auto target = static_cast<std::uint64_t>(
-                static_cast<std::ptrdiff_t>(node) + offset_stride
-            );
-            body(static_cast<std::uint64_t>(node), target);
-        }
-    }
-}
-
-// 3D variant of `sweep_owned_box_2d`.
-template <class Body>
-void sweep_owned_box_3d(
-    const std::ptrdiff_t dz,
-    const std::ptrdiff_t dy,
-    const std::ptrdiff_t dx,
-    const std::size_t outer_d,
-    const std::size_t outer_h,
-    const std::size_t outer_w,
-    const std::int64_t own_begin_z,
-    const std::int64_t own_begin_y,
-    const std::int64_t own_begin_x,
-    const std::int64_t own_shape_z,
-    const std::int64_t own_shape_y,
-    const std::int64_t own_shape_x,
-    const std::size_t slab_begin,
-    const std::size_t slab_end,
-    const Body &body
-) {
-    std::size_t z_lo_v, z_hi_v, y_lo_v, y_hi_v, x_lo_v, x_hi_v;
-    valid_axis_range(dz, outer_d, z_lo_v, z_hi_v);
-    valid_axis_range(dy, outer_h, y_lo_v, y_hi_v);
-    valid_axis_range(dx, outer_w, x_lo_v, x_hi_v);
-
-    const auto z_lo = std::max({z_lo_v, static_cast<std::size_t>(own_begin_z), slab_begin});
-    const auto z_hi = std::min({z_hi_v, static_cast<std::size_t>(own_begin_z + own_shape_z), slab_end});
-    const auto y_lo = std::max(y_lo_v, static_cast<std::size_t>(own_begin_y));
-    const auto y_hi = std::min(y_hi_v, static_cast<std::size_t>(own_begin_y + own_shape_y));
-    const auto x_lo = std::max(x_lo_v, static_cast<std::size_t>(own_begin_x));
-    const auto x_hi = std::min(x_hi_v, static_cast<std::size_t>(own_begin_x + own_shape_x));
-    if (z_lo >= z_hi || y_lo >= y_hi || x_lo >= x_hi) {
-        return;
-    }
-
-    const auto slice_size = outer_h * outer_w;
-    const auto offset_stride =
-        dz * static_cast<std::ptrdiff_t>(slice_size) +
-        dy * static_cast<std::ptrdiff_t>(outer_w) + dx;
-    for (std::size_t z = z_lo; z < z_hi; ++z) {
-        const auto slice_offset = z * slice_size;
-        for (std::size_t y = y_lo; y < y_hi; ++y) {
-            const auto row_offset = slice_offset + y * outer_w;
-            for (std::size_t x = x_lo; x < x_hi; ++x) {
-                const auto node = row_offset + x;
-                const auto target = static_cast<std::uint64_t>(
-                    static_cast<std::ptrdiff_t>(node) + offset_stride
-                );
-                body(static_cast<std::uint64_t>(node), target);
-            }
-        }
-    }
-}
-
-// Dispatch the owned-box sweep for one offset over the correct grid rank.
+// Dispatch the owned-box sweep for one offset over the correct grid rank:
+// `body(node, target)` is called with flat C-order indices into the outer
+// array for each reference node inside the owned box whose `+offset` neighbor
+// stays inside the outer array. Axis 0 is additionally restricted to the
+// absolute slab `[slab_begin, slab_end)` (the caller's thread chunk, already
+// inside the owned box). The loop itself is the shared
+// `detail/grid.hxx::sweep_clipped_box_{2d,3d}`; the owned box and slab fold
+// into its clip box.
 template <class Body>
 void sweep_owned_box(
     const std::vector<std::ptrdiff_t> &offset,
@@ -254,18 +169,27 @@ void sweep_owned_box(
     const std::size_t slab_end,
     const Body &body
 ) {
+    const auto lo = [&](const std::size_t axis) {
+        return static_cast<std::size_t>(own_begin[axis]);
+    };
+    const auto hi = [&](const std::size_t axis) {
+        return static_cast<std::size_t>(own_begin[axis] + own_shape[axis]);
+    };
     if (outer_dims.size() == 2) {
-        sweep_owned_box_2d(
+        bioimage_cpp::detail::sweep_clipped_box_2d(
             offset[0], offset[1], outer_dims[0], outer_dims[1],
-            own_begin[0], own_begin[1], own_shape[0], own_shape[1],
-            slab_begin, slab_end, body
+            std::max(lo(0), slab_begin), std::min(hi(0), slab_end),
+            lo(1), hi(1),
+            body
         );
     } else {
-        sweep_owned_box_3d(
-            offset[0], offset[1], offset[2], outer_dims[0], outer_dims[1], outer_dims[2],
-            own_begin[0], own_begin[1], own_begin[2],
-            own_shape[0], own_shape[1], own_shape[2],
-            slab_begin, slab_end, body
+        bioimage_cpp::detail::sweep_clipped_box_3d(
+            offset[0], offset[1], offset[2],
+            outer_dims[0], outer_dims[1], outer_dims[2],
+            std::max(lo(0), slab_begin), std::min(hi(0), slab_end),
+            lo(1), hi(1),
+            lo(2), hi(2),
+            body
         );
     }
 }
@@ -357,8 +281,8 @@ inline BlockEdgeStats merge_stats_maps(std::vector<EdgeStatsMap> &per_thread) {
     for (const auto &edge : result.edges) {
         const auto &stats = merged[edge];
         result.stats.push_back(stats.count);
-        result.stats.push_back(stats.sum);
-        result.stats.push_back(stats.sum_of_squares);
+        result.stats.push_back(stats.mean);
+        result.stats.push_back(stats.m2);
         result.stats.push_back(stats.minimum);
         result.stats.push_back(stats.maximum);
     }
