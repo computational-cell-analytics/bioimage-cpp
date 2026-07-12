@@ -99,6 +99,17 @@ table and the iteration-major loop (with its per-iteration alive scan) with:
     and binding layer remain baseline-safe. The build can disable this path with
     `-C cmake.define.BIOIMAGE_FLOW_FMA_DISPATCH=OFF`.
 
+11. **3-way lockstep trajectory interleave for RK2**
+    (`detail::trace_particle_block`, 2026-07-12). Each worker traces three
+    particles per group in lockstep instead of one trajectory to completion.
+    The trajectories are independent, so the out-of-order core fills one
+    lane's serial sample→lerp→update latency chain with the other lanes'
+    work; a converged/frozen lane costs one predictable branch per remaining
+    group iteration. Euler keeps the plain per-particle loop — its shorter
+    single-sample chain measured ~10 % *slower* interleaved. Results are
+    bitwise identical (per-trajectory arithmetic is untouched). See
+    "Trajectory interleave (2026-07-12)" below for measurements and K choice.
+
 Chosen defaults (see `src/bioimage_cpp/flow/_flow.py`) are unchanged:
 
 ```python
@@ -245,6 +256,59 @@ Implementation details that matter:
 - Automatic `target_clones` remains rejected: putting a target boundary around
   the driver or chunk inhibited the hot-loop inlining and regressed runtime.
 
+## Trajectory interleave (2026-07-12)
+
+The rejected midpoint-reuse experiment showed the per-step loads are
+latency-hidden *within* one trajectory — so the remaining 1T lever is ILP
+*across* trajectories. `trace_particle_block<D, K, ...>` traces K consecutive
+particles in lockstep (local position/alive lane state, per-step body identical
+to `trace_particle`); the RK2 selectors use K=3, with a plain `trace_particle`
+remainder loop.
+
+Measured with tightly paired `.so`-swap ABA runs (K1 = per-particle loop,
+`paired_bench.py`, min-of-3 per invocation, Tiger Lake). Two flag regimes,
+because the conda toolchain exports default `CXXFLAGS`
+(`-march=nocona -mtune=haswell -ftree-vectorize ...`) while wheel builds get
+plain flags — see the pitfall below:
+
+| Workload (RK2 defaults) | conda flags | plain flags |
+|---|---:|---:|
+| registered 3D, 1T | **−8.6 %** (1.93 → 1.76 s) | **−13 %** |
+| registered 2D, 1T | **−27 %** (0.33 → 0.24 s) | **−28 %** |
+| registered 3D, 8T | −3.5 % | ~parity |
+| euler 3D, 1T (gated to K=1) | parity | — |
+| stripes 1/4 long-lived, 1T (lane-divergence worst case) | +1.2 % | parity |
+| stripes 3/4 long-lived, 1T | −1.6 % | — |
+| random flow s=1 / s=10, 1T | −7 % / −10 % | — |
+
+- **K choice**: K=3 and K=4 both beat K=1 by 6–16 % on the 3D fixture in the
+  triage; K=2 was inside noise. Head-to-head, K=3 beat K=4 by ~4 % and carries
+  less lane state, so K=3 landed. GCC 14 does *not* unroll the K-lane loop —
+  the ILP comes from the out-of-order window overlapping loop iterations, and
+  that was measurably sufficient; manual unrolling was not needed.
+- **2D vs 3D**: the 2D win (~27 %) dwarfs 3D — 2D has less per-lane state
+  (position + 4-corner sampling), so the interleave adds ILP without register
+  pressure.
+- **Lane divergence** (the lockstep concern: a group lives as long as its
+  slowest lane) is benign: the stripe worst case — one never-converging
+  orbiter per group of 4, neighbours converging on step 1 — costs ~1 %,
+  because dead lanes skip their step body and only pay an alive-bit branch.
+- **Adversarial cases** live in `development/flow/benchmark_interleave.py`.
+- Verified bitwise identical: 320-case randomized digest harness, registered
+  2D/3D fixtures at 1/4/8 threads, full suite (1070 tests).
+
+### Build-flag pitfall (affects all local benchmarking)
+
+The micromamba GCC 14 environment exports `CXXFLAGS`. CMake appends it to
+every TU, so *normal* local builds are `-march=nocona -mtune=haswell
+-ftree-vectorize ...` on top of the project's `-O3`. Setting `CXXFLAGS=<x>`
+for an experiment build **replaces** those defaults rather than adding to
+them, silently changing codegen of every TU — an early triage here compared
+mixed flag regimes before this was caught. Wheel builds (cibuildwheel, no
+conda) get the plain flags, so plain-flag numbers are the shipping-relevant
+ones. When A/B-benchmarking local builds: `echo $CXXFLAGS` first, and keep
+the regime identical on both sides.
+
 ## Correctness
 
 - The current suite reports 1057 passed / 8 skipped. The 17
@@ -324,6 +388,33 @@ Kept so these avenues are not blindly re-attempted.
   regressed ~34 %. Keeping one trajectory in registers beats interleaving 16 to
   expose memory-level parallelism. This is also why a per-particle prefetch of the
   *next* particle is unlikely to pay: the dependent chain is within one trajectory.
+- **RK2 midpoint same-cell corner reuse** (2026-07-12, reverted). After the first
+  sample of a step, keep the 2^D·D corner values and skip the midpoint's offset
+  computation and reloads when `trunc(mid) == trunc(position)` (bitwise-exact by
+  construction: equal lower coords imply equal clamped offsets and corner
+  values). The mechanism worked as designed — measured with temporary counters,
+  the reuse hit rate is **96.7 %** on the registered 3D fixture (default
+  `dt=0.2`; the midpoint moves `0.1·|flow|` voxels) — and a 320-case randomized
+  digest harness plus the full suite confirmed bitwise-identical output. It was
+  still rejected on tightly A/B-paired benchmarks (alternating the two built
+  `.so` files per run; stash-and-rebuild rounds proved useless against this
+  laptop's 15–20 % thermal drift):
+  - Registered fixtures: 3D 1T ~2–3 % faster, 2D 1T ~5 %, 3D 8T ~2–5 % — the
+    midpoint loads are L1 hits whose latency the out-of-order core already hides
+    behind the trajectory's dependent chain, so removing them buys little.
+  - Adversarial random flows (`development/flow/benchmark_midpoint_reuse.py`,
+    scale sweep): at scale 10 (~30 % hit rate, maximally unpredictable branch)
+    the kernel regressed **13–15 %** at 1T, consistently across pairs; ~1–4 %
+    regression even at scale 1 (92 % hit).
+  - Two codegen traps worth remembering: (a) expressing `sample_flow` as
+    load-cell + interpolate-cell made GCC 14 materialize the corner array on the
+    stack in the single-sample Euler tracer (~20 % Euler regression; fixed by
+    keeping `sample_flow` monolithic); (b) the fatter RK2 `trace_particle` made
+    GCC stop inlining it, emitting it out-of-line as an *untagged* weak symbol
+    with AVX code in the FMA TU — the COMDAT/ODR hazard the dispatch design had
+    only avoided through full inlining. The `CodegenVariant` tag is therefore
+    now propagated through `trace_particle` (landed; instruction streams verified
+    identical to the pre-change build in both TUs).
 
 ## What remains worth trying
 
@@ -333,7 +424,9 @@ Lower priority than the landed work; all need a fixed-clock host with `perf`
 1. **Software prefetching of the next sample's cache lines.** Targets the residual
    load latency on the existing channel-first layout. Expected modest; the failed
    16-block experiment shows added machinery to expose independent loads can lose
-   more than it gains, so measure carefully.
+   more than it gains, so measure carefully. The rejected midpoint-reuse
+   experiment further weakens this idea: eliminating half the per-step loads
+   outright bought only ~2–3 % at 1T, so the loads are already latency-hidden.
 2. **A real `perf stat`** around a warm-kernel harness (fixture loaded once,
    several kernel calls) to confirm where the remaining cycles go (front-end vs
    back-end memory vs back-end core) and to provide a low-noise environment for

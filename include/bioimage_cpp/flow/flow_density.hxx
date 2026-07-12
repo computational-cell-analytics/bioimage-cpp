@@ -164,7 +164,16 @@ namespace detail {
 // Trace a single particle through its whole trajectory. The integration flags
 // are compile-time parameters so the per-step branches on them fold away and
 // the sampler/RK2/convergence/mask code inlines into one specialized loop.
-template <std::size_t D, bool UseRK2, bool CheckConvergence, bool RestrictToMask>
+//
+// CodegenVariant must match the instantiating trace_all (see there): the
+// compiler is free to emit this function out-of-line (observed with GCC 14
+// under mild size pressure), and without the tag the FMA translation unit
+// would emit AVX code under the same weak symbol name as the portable
+// instantiation, letting COMDAT selection ship AVX code to the portable
+// fallback path (SIGILL on pre-AVX CPUs) or silently discard the FMA kernel.
+template <
+    std::size_t D, bool UseRK2, bool CheckConvergence, bool RestrictToMask,
+    bool CodegenVariant = false>
 inline void trace_particle(
     std::array<float, D> &position,
     const std::array<const float *, D> &channels,
@@ -238,6 +247,111 @@ inline void trace_particle(
     }
 }
 
+// Trace K consecutive particles in lockstep. The trajectories are independent,
+// so the out-of-order core can overlap one lane's serial sample->update chain
+// with the other lanes' chains; a converged or mask-frozen lane costs one
+// predictable branch per remaining group iteration, and the group ends when
+// every lane is done. The per-step body is identical to trace_particle (with
+// `break` expressed as clearing the lane's alive flag), so the traced
+// positions are bitwise equal to K independent trace_particle calls.
+template <
+    std::size_t D, std::size_t K, bool UseRK2, bool CheckConvergence,
+    bool RestrictToMask, bool CodegenVariant = false>
+inline void trace_particle_block(
+    std::array<float, D> *positions,
+    const std::array<const float *, D> &channels,
+    const GridLayout<D> &grid,
+    const std::uint8_t *mask,
+    const std::size_t n_iter,
+    const float dt,
+    const float tol
+) {
+    static_assert(K >= 2, "use trace_particle for single trajectories");
+
+    const auto clip = [&grid](std::array<float, D> &p) {
+        for (std::size_t axis = 0; axis < D; ++axis) {
+            if (p[axis] < 0.0f) {
+                p[axis] = 0.0f;
+            } else if (p[axis] > grid.upper[axis]) {
+                p[axis] = grid.upper[axis];
+            }
+        }
+    };
+
+    // Local copies keep the lane state in registers across the group loop.
+    std::array<std::array<float, D>, K> pos;
+    std::array<bool, K> alive;
+    for (std::size_t k = 0; k < K; ++k) {
+        pos[k] = positions[k];
+        alive[k] = true;
+    }
+    if constexpr (!RestrictToMask) {
+        for (std::size_t k = 0; k < K; ++k) {
+            clip(pos[k]);
+        }
+    }
+
+    for (std::size_t iter = 0; iter < n_iter; ++iter) {
+        for (std::size_t k = 0; k < K; ++k) {
+            if (!alive[k]) {
+                continue;
+            }
+            std::array<float, D> step{};
+            sample_flow<D>(channels, pos[k], grid, step);
+
+            if constexpr (UseRK2) {
+                std::array<float, D> mid{};
+                for (std::size_t axis = 0; axis < D; ++axis) {
+                    mid[axis] = pos[k][axis] + 0.5f * dt * step[axis];
+                }
+                clip(mid);
+                sample_flow<D>(channels, mid, grid, step);
+            }
+
+            if constexpr (CheckConvergence) {
+                float max_step = 0.0f;
+                for (std::size_t axis = 0; axis < D; ++axis) {
+                    const float abs_step = std::fabs(dt * step[axis]);
+                    if (abs_step > max_step) {
+                        max_step = abs_step;
+                    }
+                }
+                if (max_step < tol) {
+                    alive[k] = false;
+                    continue;
+                }
+            }
+
+            std::array<float, D> proposed = pos[k];
+            for (std::size_t axis = 0; axis < D; ++axis) {
+                proposed[axis] += dt * step[axis];
+            }
+
+            if constexpr (RestrictToMask) {
+                if (!position_is_in_mask<D>(proposed, grid, mask)) {
+                    alive[k] = false;
+                    continue;
+                }
+            } else {
+                clip(proposed);
+            }
+            pos[k] = proposed;
+        }
+
+        bool any_alive = false;
+        for (std::size_t k = 0; k < K; ++k) {
+            any_alive = any_alive || alive[k];
+        }
+        if (!any_alive) {
+            break;
+        }
+    }
+
+    for (std::size_t k = 0; k < K; ++k) {
+        positions[k] = pos[k];
+    }
+}
+
 // CodegenVariant gives separately compiled ISA variants a distinct linker
 // identity. Without it, COMDAT selection may replace an FMA instantiation with
 // the portable instantiation that has the otherwise-identical template name.
@@ -262,8 +376,26 @@ void trace_all(
         n_threads,
         positions.size(),
         [&](const std::size_t, const std::size_t begin, const std::size_t end) {
-            for (std::size_t i = begin; i < end; ++i) {
-                trace_particle<D, UseRK2, CheckConvergence, RestrictToMask>(
+            // Lockstep interleaving only pays for RK2: its two dependent
+            // samples per step leave latency bubbles that other lanes fill.
+            // The shorter Euler chain measured ~10% slower when interleaved
+            // (extra lane state without enough latency to hide). K=3 beat
+            // K=2/4 and the per-particle loop on paired benchmarks (see
+            // development/flow/PERFORMANCE_NOTES.md, trajectory interleave).
+            constexpr std::size_t K = UseRK2 ? 3 : 1;
+            std::size_t i = begin;
+            if constexpr (K > 1) {
+                for (; i + K <= end; i += K) {
+                    trace_particle_block<
+                        D, K, UseRK2, CheckConvergence, RestrictToMask,
+                        CodegenVariant>(
+                        &positions[i], channels, grid, mask, n_iter, dt, tol
+                    );
+                }
+            }
+            for (; i < end; ++i) {
+                trace_particle<
+                    D, UseRK2, CheckConvergence, RestrictToMask, CodegenVariant>(
                     positions[i], channels, grid, mask, n_iter, dt, tol
                 );
             }
