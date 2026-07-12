@@ -155,3 +155,21 @@ def test_undirected_graph_freeze_is_callable_after_inserts_and_after_reads():
     np.testing.assert_array_equal(
         np.sort(graph.node_adjacency(0)[:, 0]), np.array([1, 2], dtype=np.uint64)
     )
+
+
+def test_undirected_graph_rejects_unrepresentable_node_count():
+    with pytest.raises(OverflowError, match="CSR offsets"):
+        bic.graph.UndirectedGraph(np.iinfo(np.uint64).max)
+
+
+@pytest.mark.parametrize(
+    "uvs",
+    [
+        np.array([[1, 0]], np.uint64),
+        np.array([[0, 1], [0, 1]], np.uint64),
+        np.array([[1, 2], [0, 1]], np.uint64),
+    ],
+)
+def test_from_unique_edges_validates_fast_path_preconditions(uvs):
+    with pytest.raises(ValueError):
+        bic.graph.UndirectedGraph.from_unique_edges(3, uvs)

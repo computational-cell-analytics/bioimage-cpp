@@ -206,6 +206,29 @@ def test_mask_invalid_arguments():
         bic.distance.geodesic_distance_field(mask, np.zeros((1, 3), np.int64))
 
 
+def test_mask_rejects_background_sources_and_invalid_speed():
+    mask = np.ones((4, 4), np.uint8)
+    mask[1, 1] = 0
+    with pytest.raises(ValueError, match="foreground"):
+        bic.distance.geodesic_distance_field(mask, np.array([[1, 1]], np.int64))
+    for value in (0.0, -1.0, np.nan, np.inf):
+        speed = np.ones(mask.shape, np.float64)
+        speed[0, 0] = value
+        with pytest.raises(ValueError, match="finite and strictly positive"):
+            bic.distance.geodesic_distance_field(
+                mask, np.array([[0, 0]], np.int64), speed=speed
+            )
+
+
+def test_mesh_rejects_non_finite_vertices():
+    verts, faces, _ = flat_grid_mesh(3)
+    verts[0, 0] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        bic.distance.geodesic_distance_field_mesh(
+            verts, faces, np.array([0], np.int64)
+        )
+
+
 # --------------------------------------------------------------------------- #
 # mask: gradient of the field
 # --------------------------------------------------------------------------- #

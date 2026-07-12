@@ -4,6 +4,15 @@ import pytest
 import bioimage_cpp as bic
 
 
+@pytest.mark.parametrize("number_of_threads", [1, 4])
+def test_negative_labels_raise_without_terminating(number_of_threads):
+    labels = np.zeros((8, 8), dtype=np.int32)
+    labels[3, 3] = -1
+    rag = bic.graph.region_adjacency_graph(np.zeros((8, 8), dtype=np.uint32))
+    with pytest.raises(ValueError, match="negative"):
+        bic.graph.rag_coordinates(rag, labels, number_of_threads=number_of_threads)
+
+
 def _labels_2d():
     return np.array(
         [

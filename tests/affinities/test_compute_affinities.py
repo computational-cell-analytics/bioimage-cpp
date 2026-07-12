@@ -4,6 +4,22 @@ import pytest
 import bioimage_cpp as bic
 
 
+def test_minimum_int64_offset_is_safely_out_of_bounds():
+    labels = np.ones((2, 2), dtype=np.uint32)
+    affinities, valid = bic.affinities.compute_affinities(
+        labels, [[np.iinfo(np.int64).min, 0]], number_of_threads=1
+    )
+    assert not affinities.any()
+    assert not valid.any()
+
+
+def test_fractional_offsets_are_rejected():
+    with pytest.raises(TypeError, match="integers"):
+        bic.affinities.compute_affinities(
+            np.ones((2, 2), dtype=np.uint32), [[0.5, 0]]
+        )
+
+
 def _numpy_reference(labels, offsets, ignore_label=None):
     """Slow but obvious reference: nested Python loops over voxels."""
     labels = np.asarray(labels)

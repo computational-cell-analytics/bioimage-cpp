@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from .. import _core
+from .._validation import strict_index
 
 
 def _normalize_mask(fg_mask: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
@@ -34,8 +35,8 @@ def _normalize_sigma(
             raise ValueError(
                 f"spacing must be a sequence of length {ndim}, got shape {sp.shape}"
             )
-        if np.any(sp <= 0):
-            raise ValueError("spacing values must be positive")
+        if not np.all(np.isfinite(sp)) or np.any(sp <= 0):
+            raise ValueError("spacing values must be finite and positive")
         return tuple((sig / sp).tolist())
     return sigma
 
@@ -110,9 +111,7 @@ def compute_flow_density(
             f"flow first axis must match spatial ndim={ndim}, got {array.shape[0]}"
         )
 
-    n_steps = int(n_iter)
-    if n_steps < 0:
-        raise ValueError("n_iter must be >= 0")
+    n_steps = strict_index(n_iter, "n_iter", minimum=0)
     step_size = float(dt)
     if not np.isfinite(step_size) or step_size < 0:
         raise ValueError("dt must be finite and >= 0")
@@ -122,10 +121,10 @@ def compute_flow_density(
     integration_method = str(method)
     if integration_method not in ("euler", "rk2"):
         raise ValueError(f"method must be 'euler' or 'rk2', got '{integration_method}'")
-    n_threads = int(number_of_threads)
-    if n_threads < 1:
-        raise ValueError("number_of_threads must be >= 1")
+    n_threads = strict_index(number_of_threads, "number_of_threads", minimum=1)
 
+    # Finiteness of the flow tensor is validated once in the binding layer
+    # (bindings/flow.cxx); it is deliberately not re-scanned here.
     contiguous_flow = np.ascontiguousarray(array, dtype=np.float32)
     mask = _normalize_mask(fg_mask, tuple(contiguous_flow.shape[1:]))
 

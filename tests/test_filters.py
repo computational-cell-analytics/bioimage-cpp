@@ -13,6 +13,19 @@ from scipy import ndimage
 import bioimage_cpp.filters as bf
 
 
+@pytest.mark.parametrize("value", [np.nan, np.inf])
+def test_filters_reject_non_finite_inputs_and_parameters(value):
+    image = np.ones((5, 5), dtype=np.float32)
+    bad_image = image.copy()
+    bad_image[0, 0] = value
+    with pytest.raises(ValueError, match="finite"):
+        bf.gaussian_smoothing(bad_image, 1.0)
+    with pytest.raises(ValueError, match="finite"):
+        bf.gaussian_smoothing(image, value)
+    with pytest.raises(ValueError, match="finite"):
+        bf.gaussian_smoothing(image, 1.0, window_size=value)
+
+
 SHAPES_2D = [(7, 11), (32, 32), (48, 64)]
 SHAPES_3D = [(5, 7, 11), (8, 12, 16)]
 SIGMAS = [0.7, 1.5, 3.0]

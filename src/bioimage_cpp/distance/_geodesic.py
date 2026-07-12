@@ -5,15 +5,9 @@ Geodesic distance is the shortest-path length constrained to a geometry:
 - **masks** (regular grid): distances stay inside the nonzero region and never
   cross background voxels (fast-marching / Eikonal formulation, à la
   scikit-fmm).
-- **surfaces** (triangle meshes): distances are measured across the mesh
-  surface (exact MMP geodesics, à la pygeodesic).
-
-.. note::
-
-    The C++ solvers are not implemented yet. These wrappers validate their
-    arguments fully and dispatch to the ``_core`` bindings, which currently
-    raise ``RuntimeError("... not yet implemented")``. The reference behaviour
-    lives in ``development/distance/``.
+- **surfaces** (triangle meshes): first-order Kimmel--Sethian fast marching
+  across the mesh surface. This approximates exact MMP geodesics; error grows
+  on very obtuse triangulations because obtuse-angle unfolding is not used.
 """
 
 from __future__ import annotations
@@ -23,12 +17,13 @@ from collections.abc import Sequence
 import numpy as np
 
 from .. import _core
+from .._validation import strict_integer_array
 from ._distance import _as_binary_input, _normalize_sampling, _normalize_threads
 
 
 def _as_coordinates(points: np.ndarray, ndim: int, function: str, name: str) -> np.ndarray:
     """Coerce a point set to a C-contiguous ``(n, ndim)`` int64 array."""
-    array = np.ascontiguousarray(points)
+    array = np.asarray(points)
     if array.ndim == 1 and array.size == ndim:
         # A single coordinate may be given as a flat (ndim,) vector.
         array = array.reshape(1, ndim)
@@ -41,17 +36,17 @@ def _as_coordinates(points: np.ndarray, ndim: int, function: str, name: str) -> 
             f"{function}: {name}.shape[1] must equal the mask ndim ({ndim}), "
             f"got {name}.shape[1]={array.shape[1]}"
         )
-    return np.ascontiguousarray(array, dtype=np.int64)
+    return strict_integer_array(array, name, dtype=np.int64, ndim=2)
 
 
 def _as_vertex_indices(indices: np.ndarray, function: str, name: str) -> np.ndarray:
     """Coerce vertex indices to a C-contiguous 1-D int64 array."""
-    array = np.atleast_1d(np.ascontiguousarray(indices))
+    array = np.atleast_1d(np.asarray(indices))
     if array.ndim != 1:
         raise ValueError(
             f"{function}: {name} must be 1-D vertex indices, got ndim={array.ndim}"
         )
-    return np.ascontiguousarray(array, dtype=np.int64)
+    return strict_integer_array(array, name, dtype=np.int64, ndim=1)
 
 
 def _as_mesh(vertices: np.ndarray, faces: np.ndarray, function: str):
@@ -62,7 +57,9 @@ def _as_mesh(vertices: np.ndarray, faces: np.ndarray, function: str):
             f"{function}: vertices must have shape (n_vertices, 3), "
             f"got shape={vertices.shape}"
         )
-    faces = np.ascontiguousarray(faces, dtype=np.int64)
+    if not np.all(np.isfinite(vertices)):
+        raise ValueError(f"{function}: vertices must contain only finite values")
+    faces = strict_integer_array(faces, "faces", dtype=np.int64, ndim=2)
     if faces.ndim != 2 or faces.shape[1] != 3:
         raise ValueError(
             f"{function}: faces must have shape (n_faces, 3), got shape={faces.shape}"
@@ -82,7 +79,21 @@ def _as_speed(
             f"{function}: speed must have shape {tuple(expected_shape)}, "
             f"got shape={array.shape}"
         )
+    if not np.all(np.isfinite(array)) or np.any(array <= 0.0):
+        raise ValueError(f"{function}: speed values must be finite and strictly positive")
     return array
+
+
+def _require_foreground_points(
+    mask: np.ndarray, points: np.ndarray, function: str, name: str
+) -> None:
+    for axis, extent in enumerate(mask.shape):
+        if points.size and (
+            np.any(points[:, axis] < 0) or np.any(points[:, axis] >= extent)
+        ):
+            raise ValueError(f"{function}: {name} contains an out of bounds coordinate")
+    if points.size and np.any(mask[tuple(points.T)] == 0):
+        raise ValueError(f"{function}: {name} must lie inside the foreground mask")
 
 
 def geodesic_distance_field(
@@ -119,8 +130,7 @@ def geodesic_distance_field(
         If ``True``, also return the per-axis gradient of the field (see
         Returns). Analogous to :func:`vector_difference_transform`.
     number_of_threads
-        ``0`` uses ``hardware_concurrency``; a positive value pins the thread
-        count. Default ``1``.
+        Retained for API consistency; a single field solve is serial.
 
     Returns
     -------
@@ -139,6 +149,7 @@ def geodesic_distance_field(
     binary = _as_binary_input(mask, function)
     ndim = binary.ndim
     sources_arr = _as_coordinates(sources, ndim, function, "sources")
+    _require_foreground_points(binary, sources_arr, function, "sources")
     sampling_values = _normalize_sampling(sampling, ndim, function)
     speed_arr = _as_speed(speed, tuple(binary.shape), function)
     n_threads = _normalize_threads(number_of_threads, function)
@@ -215,6 +226,7 @@ def geodesic_distances(
     binary = _as_binary_input(mask, function)
     ndim = binary.ndim
     points_arr = _as_coordinates(points, ndim, function, "points")
+    _require_foreground_points(binary, points_arr, function, "points")
     sampling_values = _normalize_sampling(sampling, ndim, function)
     speed_arr = _as_speed(speed, tuple(binary.shape), function)
     n_threads = _normalize_threads(number_of_threads, function)
@@ -247,8 +259,7 @@ def geodesic_distance_field_mesh(
         Optional per-vertex speed of shape ``(n_vertices,)``. ``None`` gives
         unit-speed geodesic distance.
     number_of_threads
-        ``0`` uses ``hardware_concurrency``; a positive value pins the thread
-        count. Default ``1``.
+        Retained for API consistency; a single field solve is serial.
 
     Returns
     -------

@@ -628,11 +628,18 @@ Graph graph_from_unique_edges(const std::uint64_t number_of_nodes, ConstUInt64Ar
     for (std::size_t index = 0; index < uvs.shape(0); ++index) {
         const auto u = in[2 * index];
         const auto v = in[2 * index + 1];
-        if (u == v) {
-            throw std::invalid_argument("self edges are not supported");
+        if (u >= v) {
+            throw std::invalid_argument(
+                "uvs must contain canonical edges with u < v"
+            );
         }
         if (u >= number_of_nodes || v >= number_of_nodes) {
             throw std::out_of_range("edge endpoint exceeds number_of_nodes");
+        }
+        if (!edges.empty() && !(edges.back() < Graph::Edge{u, v})) {
+            throw std::invalid_argument(
+                "uvs must be strictly lexicographically sorted and duplicate-free"
+            );
         }
         edges.emplace_back(u, v);
     }

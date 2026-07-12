@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/detail/threading.hxx"
 
 #include <algorithm>
@@ -66,9 +67,9 @@ void compute_affinities_2d(
                 }
 
                 // Sub-rectangle where (y, x) AND (y+dy, x+dx) are both in bounds.
-                const auto y_begin = std::max<std::ptrdiff_t>(0, -dy);
+                const auto y_begin = ::bioimage_cpp::detail::axis_begin_offset(dy, height);
                 const auto y_end = height - std::max<std::ptrdiff_t>(0, dy);
-                const auto x_begin = std::max<std::ptrdiff_t>(0, -dx);
+                const auto x_begin = ::bioimage_cpp::detail::axis_begin_offset(dx, width);
                 const auto x_end = width - std::max<std::ptrdiff_t>(0, dx);
                 if (y_begin >= y_end || x_begin >= x_end) {
                     continue;
@@ -143,11 +144,11 @@ void compute_affinities_3d(
                     std::fill_n(mask_channel, volume, std::uint8_t{0});
                 }
 
-                const auto z_begin = std::max<std::ptrdiff_t>(0, -dz);
+                const auto z_begin = ::bioimage_cpp::detail::axis_begin_offset(dz, depth);
                 const auto z_end = depth - std::max<std::ptrdiff_t>(0, dz);
-                const auto y_begin = std::max<std::ptrdiff_t>(0, -dy);
+                const auto y_begin = ::bioimage_cpp::detail::axis_begin_offset(dy, height);
                 const auto y_end = height - std::max<std::ptrdiff_t>(0, dy);
-                const auto x_begin = std::max<std::ptrdiff_t>(0, -dx);
+                const auto x_begin = ::bioimage_cpp::detail::axis_begin_offset(dx, width);
                 const auto x_end = width - std::max<std::ptrdiff_t>(0, dx);
                 if (z_begin >= z_end || y_begin >= y_end || x_begin >= x_end) {
                     continue;

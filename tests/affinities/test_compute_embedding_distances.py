@@ -4,6 +4,14 @@ import pytest
 import bioimage_cpp as bic
 
 
+def test_minimum_int64_offset_is_safely_out_of_bounds():
+    values = np.ones((1, 2, 2), dtype=np.float32)
+    distances = bic.affinities.compute_embedding_distances(
+        values, [[np.iinfo(np.int64).min, 0]], number_of_threads=1
+    )
+    assert not distances.any()
+
+
 def _numpy_reference(values, offsets, norm):
     """Slow but obvious reference: nested Python loops over voxels."""
     values = np.asarray(values, dtype=np.float64)

@@ -4,6 +4,7 @@
 
 #include <nanobind/ndarray.h>
 
+#include <cmath>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -26,7 +27,7 @@ void require_ndim(const ConstImage &image, int expected, const char *function) {
 }
 
 void require_positive_sigma(double sigma, const char *name, const char *function) {
-    if (!(sigma > 0.0)) {
+    if (!(std::isfinite(sigma) && sigma > 0.0)) {
         throw std::invalid_argument(
             std::string(function) + ": " + name + " must be positive, got " +
             std::to_string(sigma)
@@ -44,7 +45,7 @@ void require_order(int order, const char *name, const char *function) {
 }
 
 void require_non_negative_window(double window_size, const char *function) {
-    if (window_size < 0.0) {
+    if (!std::isfinite(window_size) || window_size < 0.0) {
         throw std::invalid_argument(
             std::string(function) + ": window_size must be >= 0 (0 selects the "
             "default), got " + std::to_string(window_size)
