@@ -529,3 +529,38 @@ def test_map_coordinates_invalid_inputs_raise():
         bic.transformation.map_coordinates(data, good, out=np.empty((3, 3), dtype=np.float32))
     with pytest.raises(TypeError, match="dtype"):
         bic.transformation.map_coordinates(data, good, out=np.empty((4, 5), dtype=np.float64))
+
+
+@pytest.mark.parametrize("function", ["affine", "coordinates"])
+def test_resampling_supports_output_aliasing_input(function):
+    data = np.arange(9, dtype=np.int32).reshape(3, 3)
+    matrix = _matrix(2, translation=[-1, 0])
+    if function == "affine":
+        expected = bic.transformation.affine_transform(
+            data, matrix, order=0, fill_value=-1
+        )
+        returned = bic.transformation.affine_transform(
+            data, matrix, order=0, fill_value=-1, out=data
+        )
+    else:
+        coords = _affine_coords(matrix, data.shape)
+        expected = bic.transformation.map_coordinates(
+            data, coords, order=0, fill_value=-1
+        )
+        returned = bic.transformation.map_coordinates(
+            data, coords, order=0, fill_value=-1, out=data
+        )
+    assert returned is data
+    np.testing.assert_array_equal(data, expected)
+
+
+def test_non_finite_coordinates_use_fill_and_matrix_is_rejected():
+    data = np.arange(9, dtype=np.float32).reshape(3, 3)
+    coords = np.indices(data.shape, dtype=np.float64)
+    coords[0, 1, 1] = np.nan
+    result = bic.transformation.map_coordinates(data, coords, order=0, fill_value=-9)
+    assert result[1, 1] == -9
+    matrix = _matrix(2)
+    matrix[0, 2] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        bic.transformation.affine_transform(data, matrix)

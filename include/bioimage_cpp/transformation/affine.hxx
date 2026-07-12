@@ -498,11 +498,23 @@ inline double cubic_3d(
 // Dispatch to the per-voxel sampler for the requested interpolation order. Shared by the affine and
 // map_coordinates kernels so the interpolation backend lives in exactly one place. `order` must be in
 // 0..5 (validated by the public entry points before the sampling loop).
-template <class T>
+//
+// `CheckFinite` gates a per-coordinate `std::isfinite` guard. map_coordinates
+// passes user-supplied coordinates that may be non-finite and instantiates it
+// with `true`. Affine coordinates are `matrix * output_grid` with a
+// finite-validated matrix, so the affine callers use the default `false` and
+// the check is elided at compile time — keeping the affine sampling hot loop
+// identical to the pre-fix code.
+template <bool CheckFinite = false, class T>
 inline double sample_2d(
     const T *data, std::ptrdiff_t in_h, std::ptrdiff_t in_w,
     double cy, double cx, const int order, double fill
 ) {
+    if constexpr (CheckFinite) {
+        if (!std::isfinite(cy) || !std::isfinite(cx)) {
+            return fill;
+        }
+    }
     switch (order) {
         case 0: return nearest_2d(data, in_h, in_w, cy, cx, fill);
         case 1: return linear_2d(data, in_h, in_w, cy, cx, fill);
@@ -513,12 +525,17 @@ inline double sample_2d(
     }
 }
 
-template <class T>
+template <bool CheckFinite = false, class T>
 inline double sample_3d(
     const T *data,
     std::ptrdiff_t in_d, std::ptrdiff_t in_h, std::ptrdiff_t in_w,
     double cz, double cy, double cx, const int order, double fill
 ) {
+    if constexpr (CheckFinite) {
+        if (!std::isfinite(cz) || !std::isfinite(cy) || !std::isfinite(cx)) {
+            return fill;
+        }
+    }
     switch (order) {
         case 0: return nearest_3d(data, in_d, in_h, in_w, cz, cy, cx, fill);
         case 1: return linear_3d(data, in_d, in_h, in_w, cz, cy, cx, fill);

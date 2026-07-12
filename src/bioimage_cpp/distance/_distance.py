@@ -249,7 +249,7 @@ def non_maximum_distance_suppression(
         ``distance_map`` in NumPy axis order. Supported dtypes:
         ``int64``, ``uint64``, ``int32``, ``uint32``.
     number_of_threads
-        Reserved for future parallelization; currently single-threaded.
+        Number of worker threads used for pairwise candidate evaluation.
 
     Returns
     -------
@@ -259,9 +259,7 @@ def non_maximum_distance_suppression(
 
     Notes
     -----
-    Uses an ``O(N^2)`` pairwise distance matrix internally; suitable for ``N``
-    up to roughly 30k points. For larger candidate sets, threshold the
-    distance map more aggressively before calling.
+    Uses ``O(N^2)`` time and ``O(number_of_threads * N)`` auxiliary memory.
     """
     function = "non_maximum_distance_suppression"
 

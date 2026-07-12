@@ -77,7 +77,8 @@ void map_coordinates_2d(
     T *out_ptr = output.data;
 
     for (std::ptrdiff_t p = 0; p < n_out; ++p) {
-        const double value = detail::sample_2d(in_data, in_h, in_w, cy[p], cx[p], order, fill);
+        const double value =
+            detail::sample_2d<true>(in_data, in_h, in_w, cy[p], cx[p], order, fill);
         out_ptr[p] = detail::to_output<T>(value);
     }
 }
@@ -120,8 +121,8 @@ void map_coordinates_3d(
     T *out_ptr = output.data;
 
     for (std::ptrdiff_t p = 0; p < n_out; ++p) {
-        const double value = detail::sample_3d(in_data, in_d, in_h, in_w,
-                                               cz[p], cy[p], cx[p], order, fill);
+        const double value = detail::sample_3d<true>(in_data, in_d, in_h, in_w,
+                                                      cz[p], cy[p], cx[p], order, fill);
         out_ptr[p] = detail::to_output<T>(value);
     }
 }

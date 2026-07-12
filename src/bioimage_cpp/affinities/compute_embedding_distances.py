@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from .. import _core
+from .._validation import strict_index, strict_offsets
 
 
 _COMPUTE_EMBEDDING_DISTANCES_BY_NDIM = {
@@ -67,9 +68,7 @@ def compute_embedding_distances(
         )
 
     spatial_ndim = array.ndim - 1
-    normalized_offsets = [
-        [int(value) for value in offset] for offset in np.asarray(offsets).tolist()
-    ]
+    normalized_offsets = strict_offsets(offsets, spatial_ndim)
     if len(normalized_offsets) == 0:
         raise ValueError("offsets must not be empty")
     if any(len(offset) != spatial_ndim for offset in normalized_offsets):
@@ -85,9 +84,7 @@ def compute_embedding_distances(
             f"norm must be one of ({supported}), got {norm!r}"
         )
 
-    n_threads = int(number_of_threads)
-    if n_threads < 1:
-        raise ValueError("number_of_threads must be >= 1")
+    n_threads = strict_index(number_of_threads, "number_of_threads", minimum=1)
 
     run = _COMPUTE_EMBEDDING_DISTANCES_BY_NDIM[array.ndim]
     return run(array, normalized_offsets, norm_str, n_threads)

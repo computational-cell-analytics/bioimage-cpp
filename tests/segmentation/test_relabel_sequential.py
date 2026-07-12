@@ -219,3 +219,40 @@ def test_rejects_non_int_offset():
 def test_rejects_bool_offset():
     with pytest.raises(ValueError, match="offset must be a positive integer"):
         bic.segmentation.relabel_sequential(np.array([1, 2], dtype=np.uint32), offset=True)
+
+
+def test_maximal_label_raises_instead_of_segfaulting():
+    # max_value + 1 for the dense forward map would wrap size_t to zero; the
+    # kernel must reject this rather than write out of bounds.
+    labels = np.array([0, np.iinfo(np.uint64).max], dtype=np.uint64)
+    with pytest.raises(OverflowError):
+        bic.segmentation.relabel_sequential(labels)
+
+
+def test_offset_plus_label_count_overflowing_dtype_raises():
+    # offset == UINT32_MAX leaves room for exactly one new label; two distinct
+    # labels overflow the label dtype and must raise before allocating the
+    # multi-gigabyte inverse map.
+    labels = np.array([1, 2], dtype=np.uint32)
+    with pytest.raises(OverflowError):
+        bic.segmentation.relabel_sequential(labels, offset=int(np.iinfo(np.uint32).max))
+
+
+def test_offset_plus_label_count_overflowing_uint64_raises():
+    labels = np.array([1, 2], dtype=np.uint64)
+    with pytest.raises(OverflowError):
+        bic.segmentation.relabel_sequential(labels, offset=int(np.iinfo(np.uint64).max))
+
+
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
+def test_maps_remain_plain_ndarrays(dtype):
+    # The minimal safe fix keeps the dense 3-tuple contract: forward_map and
+    # inverse_map are plain ndarrays of the input dtype.
+    labels = np.array([0, 5, 10, 5, 0, 200], dtype=dtype)
+    relabeled, forward_map, inverse_map = bic.segmentation.relabel_sequential(labels)
+    assert isinstance(forward_map, np.ndarray)
+    assert isinstance(inverse_map, np.ndarray)
+    assert forward_map.dtype == np.dtype(dtype)
+    assert inverse_map.dtype == np.dtype(dtype)
+    assert relabeled.dtype == np.dtype(dtype)
+    np.testing.assert_array_equal(inverse_map[relabeled], labels)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 
 from .. import _core
+from .._validation import strict_index, strict_integer_array, strict_offsets
 
 
 _REGION_ADJACENCY_GRAPH_BY_DTYPE = {
@@ -25,46 +26,48 @@ _GRID_FLOAT_DTYPES = (np.dtype(np.float32), np.dtype(np.float64))
 
 
 def _as_shape(shape, ndim: int, name: str = "shape") -> list[int]:
-    array = np.asarray(shape)
+    array = strict_integer_array(shape, name, dtype=np.uint64, ndim=1, non_negative=True)
     if array.ndim != 1 or array.shape[0] != ndim:
         raise ValueError(f"{name} must be a 1D sequence of length {ndim}")
-    if not np.issubdtype(array.dtype, np.integer):
-        raise TypeError(f"{name} must contain integers")
     if np.any(array <= 0):
         raise ValueError(f"{name} dimensions must be greater than zero")
     return [int(axis_size) for axis_size in array]
 
 
 def _as_coordinate_array(coordinate, ndim: int, name: str) -> np.ndarray:
-    array = np.asarray(coordinate, dtype=np.uint64)
+    array = strict_integer_array(
+        coordinate, name, dtype=np.uint64, ndim=1, non_negative=True
+    )
     if array.ndim != 1 or array.shape[0] != ndim:
         raise ValueError(f"{name} must be a 1D sequence of length {ndim}")
     return np.ascontiguousarray(array)
 
 
 def _as_offset_array(offset, ndim: int, name: str) -> np.ndarray:
-    array = np.asarray(offset, dtype=np.int64)
+    array = strict_integer_array(offset, name, dtype=np.int64, ndim=1)
     if array.ndim != 1 or array.shape[0] != ndim:
         raise ValueError(f"{name} must be a 1D sequence of length {ndim}")
     return np.ascontiguousarray(array)
 
 
 def _as_uv_array(uvs, name: str) -> np.ndarray:
-    array = np.asarray(uvs, dtype=np.uint64)
+    array = strict_integer_array(uvs, name, dtype=np.uint64, non_negative=True)
     if array.ndim != 2 or array.shape[1] != 2:
         raise ValueError(f"{name} must have shape (n_edges, 2)")
     return np.ascontiguousarray(array)
 
 
 def _as_node_array(nodes, name: str) -> np.ndarray:
-    array = np.asarray(nodes, dtype=np.uint64)
+    array = strict_integer_array(nodes, name, dtype=np.uint64, ndim=1, non_negative=True)
     if array.ndim != 1:
         raise ValueError(f"{name} must be a 1D array")
     return np.ascontiguousarray(array)
 
 
 def _as_serialization_array(serialization) -> np.ndarray:
-    array = np.asarray(serialization, dtype=np.uint64)
+    array = strict_integer_array(
+        serialization, "serialization", dtype=np.uint64, ndim=1, non_negative=True
+    )
     if array.ndim != 1:
         raise ValueError("serialization must be a 1D array")
     if array.size < 2:
@@ -76,16 +79,11 @@ def _as_serialization_array(serialization) -> np.ndarray:
 
 
 def _copy_graph(graph) -> _core.UndirectedGraph:
-    # `uv_ids()` always returns a unique list (graphs deduplicate on insert),
-    # so we can use the bulk constructor that skips per-edge hash dedup —
-    # significantly faster than `insert_edges` for large graphs. The result
-    # is a ``_core.UndirectedGraph``; downstream code (objectives, solvers,
-    # validators) uses base-class methods that work identically.
-    if graph.number_of_edges == 0:
-        return _core.UndirectedGraph(int(graph.number_of_nodes))
-    return _core.UndirectedGraph.from_unique_edges(
-        int(graph.number_of_nodes), graph.uv_ids()
-    )
+    # `clone()` preserves edge ids and accepts any valid insertion order, and
+    # defers CSR construction. The public `from_unique_edges` fast path is not
+    # usable here: it intentionally requires sorted, canonical, duplicate-free
+    # input, which `uv_ids()` (insertion order) does not guarantee.
+    return graph.clone()
 
 
 def _as_edge_costs(edge_costs, graph) -> np.ndarray:
@@ -98,7 +96,9 @@ def _as_edge_costs(edge_costs, graph) -> np.ndarray:
 
 
 def _as_node_labels(labels, graph) -> np.ndarray:
-    array = np.asarray(labels, dtype=np.uint64)
+    array = strict_integer_array(
+        labels, "labels", dtype=np.uint64, ndim=1, non_negative=True
+    )
     if array.ndim != 1:
         raise ValueError("labels must be a 1D array")
     if array.shape[0] != graph.number_of_nodes:
@@ -118,7 +118,9 @@ def _as_1d_array(values, dtype, name: str, expected_size: int) -> np.ndarray:
 
 
 def _dense_labels(labels) -> np.ndarray:
-    labels = np.asarray(labels, dtype=np.uint64)
+    labels = strict_integer_array(
+        labels, "labels", dtype=np.uint64, non_negative=True
+    )
     _, dense = np.unique(labels, return_inverse=True)
     return np.ascontiguousarray(dense.astype(np.uint64, copy=False))
 
@@ -154,10 +156,7 @@ def _normalize_labels(labels: np.ndarray) -> np.ndarray:
 
 
 def _normalize_number_of_threads(number_of_threads: int) -> int:
-    number_of_threads = int(number_of_threads)
-    if number_of_threads < 0:
-        raise ValueError("number_of_threads must be non-negative")
-    return number_of_threads
+    return strict_index(number_of_threads, "number_of_threads", minimum=0)
 
 
 def _resolve_weight_dtype(array, name: str) -> np.ndarray:
@@ -216,7 +215,7 @@ def _as_grid_data(values, graph, name: str, *, with_channels: bool) -> np.ndarra
 
 
 def _normalize_grid_offsets(offsets, ndim: int, n_channels: int) -> list[tuple[int, ...]]:
-    normalized = [tuple(int(value) for value in offset) for offset in offsets]
+    normalized = strict_offsets(offsets, ndim)
     if len(normalized) != n_channels:
         raise ValueError(
             "offsets length must match affinities channel count, got "

@@ -103,10 +103,32 @@ inline void valid_axis_range(
         const auto d = static_cast<std::size_t>(delta);
         hi = (d >= length) ? 0 : (length - d);
     } else {
-        const auto d = static_cast<std::size_t>(-delta);
+        // Avoid negating PTRDIFF_MIN. Converting first and subtracting from
+        // zero computes the magnitude in the unsigned domain.
+        const auto d = std::size_t{0} - static_cast<std::size_t>(delta);
         lo = (d >= length) ? length : d;
         hi = length;
     }
+}
+
+// Number of leading positions to skip along an axis of length `length` for a
+// signed offset `delta` (i.e. `max(0, -delta)` clamped to `length`). Returns a
+// plain `std::ptrdiff_t` so the affinity kernels keep their inline
+// `ptrdiff_t` loop bounds and inner-loop codegen, while avoiding the undefined
+// behaviour of negating `delta == PTRDIFF_MIN`: magnitudes at least as large as
+// the axis (which make the whole offset channel empty) are clamped to `length`,
+// so the negation only runs when `-length < delta < 0` and is always safe.
+inline std::ptrdiff_t axis_begin_offset(
+    const std::ptrdiff_t delta,
+    const std::ptrdiff_t length
+) {
+    if (delta >= 0) {
+        return 0;
+    }
+    if (delta <= -length) {
+        return length;
+    }
+    return -delta;
 }
 
 } // namespace bioimage_cpp::detail

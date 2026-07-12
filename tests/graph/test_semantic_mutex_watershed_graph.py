@@ -274,3 +274,16 @@ def test_out_of_range_semantic_node_raises():
             graph, edge_costs, mutex_uvs, mutex_costs,
             semantic_node_classes, semantic_costs,
         )
+
+
+def test_semantic_class_above_int64_range_raises():
+    graph = bic.graph.UndirectedGraph(1)
+    with pytest.raises(ValueError, match="semantic class ids"):
+        bic.graph.mutex_watershed.semantic_mutex_watershed_clustering(
+            graph,
+            np.empty(0, np.float64),
+            np.empty((0, 2), np.uint64),
+            np.empty(0, np.float64),
+            np.array([[0, 2**63]], np.uint64),
+            np.array([1.0], np.float64),
+        )

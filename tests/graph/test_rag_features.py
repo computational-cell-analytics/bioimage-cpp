@@ -202,3 +202,14 @@ def test_rag_feature_validation():
         bic.graph.features.affinity_features(
             rag, labels, np.ones((2, 1, 2)), offsets=[[0, 1]]
         )
+
+
+@pytest.mark.parametrize("number_of_threads", [1, 4])
+def test_negative_labels_raise_without_terminating(number_of_threads):
+    labels = np.zeros((8, 8), dtype=np.int32)
+    labels[3, 3] = -1
+    rag = bic.graph.region_adjacency_graph(np.zeros((8, 8), dtype=np.uint32))
+    with pytest.raises(ValueError, match="negative"):
+        bic.graph.features.edge_map_features(
+            rag, labels, np.zeros((8, 8)), number_of_threads=number_of_threads
+        )

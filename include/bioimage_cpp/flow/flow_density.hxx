@@ -118,6 +118,20 @@ inline std::ptrdiff_t round_to_flat_index(
     return flat;
 }
 
+template <std::size_t D>
+inline bool position_is_in_mask(
+    const std::array<float, D> &position,
+    const GridLayout<D> &grid,
+    const std::uint8_t *mask
+) {
+    for (std::size_t axis = 0; axis < D; ++axis) {
+        if (position[axis] < 0.0f || position[axis] > grid.upper[axis]) {
+            return false;
+        }
+    }
+    return mask[round_to_flat_index(position, grid)] != 0;
+}
+
 } // namespace detail
 
 enum class IntegrationMethod {
@@ -213,14 +227,6 @@ void compute_flow_density(
                         auto &position = positions[i];
                         clip_position(position);
 
-                        if (restrict_to_mask) {
-                            const auto here = detail::round_to_flat_index<D>(position, grid);
-                            if (fg_mask.data[here] == 0) {
-                                alive[i] = 0;
-                                continue;
-                            }
-                        }
-
                         const auto corners = detail::compute_corners<D>(position, grid);
                         std::array<float, D> step{};
                         for (std::size_t axis = 0; axis < D; ++axis) {
@@ -250,9 +256,24 @@ void compute_flow_density(
                             alive[i] = 0;
                             continue;
                         }
+                        auto proposed = position;
                         for (std::size_t axis = 0; axis < D; ++axis) {
-                            position[axis] += dt * step[axis];
+                            proposed[axis] += dt * step[axis];
                         }
+                        // A particle whose proposed endpoint leaves the
+                        // foreground is frozen at its last in-mask position
+                        // (only the endpoint is mask-tested, not the RK2
+                        // midpoint). Every alive particle is seeded in the mask
+                        // and only commits in-mask endpoints, so its current
+                        // position is always a valid last position and no
+                        // separate start-of-step mask test is needed.
+                        if (restrict_to_mask && !detail::position_is_in_mask<D>(
+                            proposed, grid, fg_mask.data
+                        )) {
+                            alive[i] = 0;
+                            continue;
+                        }
+                        position = proposed;
                     }
                 }
             );

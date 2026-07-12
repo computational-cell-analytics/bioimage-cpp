@@ -364,6 +364,14 @@ def affine_transform(
     contiguous = np.ascontiguousarray(array)
     typed_fill = _normalize_fill_value(fill_value, dtype)
     output = _validate_or_allocate_out(out, output_shape, dtype)
+    # Guard against `out` aliasing an input: the sampling loop reads input
+    # samples that later output pixels still need.
+    if np.shares_memory(contiguous, output):
+        contiguous = contiguous.copy()
+    if np.shares_memory(normalized_matrix, output):
+        normalized_matrix = normalized_matrix.copy()
+    if np.shares_memory(starts, output):
+        starts = starts.copy()
     run(contiguous, normalized_matrix, starts, output, order, typed_fill)
     return output
 
@@ -444,5 +452,10 @@ def map_coordinates(
     contiguous = np.ascontiguousarray(array)
     typed_fill = _normalize_fill_value(fill_value, dtype)
     output = _validate_or_allocate_out(out, output_shape, dtype)
+    # Guard against `out` aliasing an input (see affine_transform).
+    if np.shares_memory(contiguous, output):
+        contiguous = contiguous.copy()
+    if np.shares_memory(coords, output):
+        coords = coords.copy()
     run(contiguous, coords, output, order, typed_fill)
     return output

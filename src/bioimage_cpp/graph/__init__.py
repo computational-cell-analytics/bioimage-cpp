@@ -43,6 +43,7 @@ from __future__ import annotations
 import numpy as np
 
 from .. import _core
+from .._validation import strict_integer_array, strict_offsets
 from ._shared import (
     _as_1d_array,
     _as_coordinate_array,
@@ -110,19 +111,12 @@ class UndirectedGraph(_core.UndirectedGraph):
 
 
 def _normalize_projection_offsets(offsets, ndim: int) -> list[list[int]]:
-    normalized: list[list[int]] = []
-    for index, offset in enumerate(offsets):
-        values = [int(v) for v in offset]
-        if len(values) != ndim:
-            raise ValueError(
-                f"offsets[{index}] must have length {ndim}, got length={len(values)}"
-            )
-        normalized.append(values)
-    return normalized
+    return [list(offset) for offset in strict_offsets(offsets, ndim)]
 
 
 def _normalize_projection_strides(strides, ndim: int) -> list[int]:
-    values = [int(v) for v in strides]
+    values_array = strict_integer_array(strides, "strides", dtype=np.uint64, ndim=1)
+    values = [int(v) for v in values_array]
     if len(values) != ndim:
         raise ValueError(
             f"strides must have length {ndim}, got length={len(values)}"

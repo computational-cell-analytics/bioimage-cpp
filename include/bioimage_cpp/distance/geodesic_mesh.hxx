@@ -62,7 +62,8 @@ inline void geodesic_distance_field_mesh(
     ArrayView<double> &distances,
     std::size_t /*n_threads*/ = 1
 ) {
-    detail::MeshFastMarching solver(vertices, faces, speed);
+    const detail::MeshTopology topology(vertices, faces);
+    detail::MeshFastMarching solver(topology, speed);
     const auto source_indices =
         detail::vertex_indices(sources, solver.size(), "sources");
     solver.solve(source_indices);
@@ -84,9 +85,8 @@ inline void geodesic_distances_mesh(
     ArrayView<double> &distances,
     std::size_t n_threads = 1
 ) {
-    // Build one solver up front to validate the mesh and the point indices.
-    detail::MeshFastMarching probe(vertices, faces, speed);
-    const auto point_indices = detail::vertex_indices(points, probe.size(), "points");
+    const detail::MeshTopology topology(vertices, faces);
+    const auto point_indices = detail::vertex_indices(points, topology.size(), "points");
     const std::size_t n = point_indices.size();
     double *out = distances.data;
 
@@ -98,7 +98,7 @@ inline void geodesic_distances_mesh(
     bioimage_cpp::detail::parallel_for_chunks(
         threads, n,
         [&](std::size_t /*thread_id*/, std::size_t begin, std::size_t end) {
-            detail::MeshFastMarching solver(vertices, faces, speed);
+            detail::MeshFastMarching solver(topology, speed);
             for (std::size_t i = begin; i < end; ++i) {
                 solver.solve({point_indices[i]});
                 for (std::size_t j = 0; j < n; ++j) {

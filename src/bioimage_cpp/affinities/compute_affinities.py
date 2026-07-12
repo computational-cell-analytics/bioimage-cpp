@@ -8,6 +8,7 @@ from typing import overload
 import numpy as np
 
 from .. import _core
+from .._validation import strict_index, strict_offsets
 
 
 _COMPUTE_AFFINITIES_2D_BY_DTYPE = {
@@ -95,9 +96,7 @@ def compute_affinities(
             f"labels must have one of dtypes ({supported}), got dtype={array.dtype}"
         ) from error
 
-    normalized_offsets = [
-        [int(value) for value in offset] for offset in np.asarray(offsets).tolist()
-    ]
+    normalized_offsets = strict_offsets(offsets, array.ndim)
     if len(normalized_offsets) == 0:
         raise ValueError("offsets must not be empty")
     if any(len(offset) != array.ndim for offset in normalized_offsets):
@@ -106,9 +105,7 @@ def compute_affinities(
             f"spatial ndim={array.ndim}"
         )
 
-    n_threads = int(number_of_threads)
-    if n_threads < 1:
-        raise ValueError("number_of_threads must be >= 1")
+    n_threads = strict_index(number_of_threads, "number_of_threads", minimum=1)
 
     if ignore_label is None:
         typed_ignore: int | None = None

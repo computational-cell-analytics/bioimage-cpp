@@ -22,6 +22,7 @@ from __future__ import annotations
 import numpy as np
 
 from .. import _core
+from ..._validation import strict_offsets
 from .._shared import (
     _as_grid_data,
     _as_uv_array,
@@ -244,7 +245,9 @@ def lifted_edges_from_affinities(
             f"rag shape={tuple(rag.shape)}, labels shape={label_array.shape}"
         )
 
-    normalized_offsets = [tuple(int(value) for value in offset) for offset in offsets]
+    if np.asarray(offsets).size == 0:
+        return np.empty((0, 2), dtype=np.uint64)
+    normalized_offsets = strict_offsets(offsets, label_array.ndim)
     if any(len(offset) != label_array.ndim for offset in normalized_offsets):
         raise ValueError("each offset must have length matching labels ndim")
 
@@ -516,7 +519,7 @@ def _accumulate_affinity_features(
             f"affinities shape={affinity_array.shape}, labels shape={label_array.shape}"
         )
 
-    normalized_offsets = [tuple(int(value) for value in offset) for offset in offsets]
+    normalized_offsets = strict_offsets(offsets, label_array.ndim)
     if len(normalized_offsets) != affinity_array.shape[0]:
         raise ValueError(
             "offsets length must match affinities channel count, got "
@@ -555,7 +558,7 @@ def _accumulate_lifted_affinity_features(
             f"affinities shape={affinity_array.shape}, labels shape={label_array.shape}"
         )
 
-    normalized_offsets = [tuple(int(value) for value in offset) for offset in offsets]
+    normalized_offsets = strict_offsets(offsets, label_array.ndim)
     if len(normalized_offsets) != affinity_array.shape[0]:
         raise ValueError(
             "offsets length must match affinities channel count, got "

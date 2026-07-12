@@ -1,10 +1,12 @@
 #pragma once
 
+#include "bioimage_cpp/detail/checked_arithmetic.hxx"
 #include "bioimage_cpp/detail/edge_hash.hxx"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -89,7 +91,7 @@ public:
         const NodeId number_of_nodes = 0,
         const EdgeId reserve_number_of_edges = 0
     ) {
-        number_of_nodes_ = number_of_nodes;
+        number_of_nodes_ = checked_node_count(number_of_nodes);
         edges_.clear();
         edges_.reserve(static_cast<std::size_t>(reserve_number_of_edges));
         edge_lookup_.clear();
@@ -195,7 +197,11 @@ public:
     }
 
     [[nodiscard]] std::uint64_t serialization_size() const {
-        return 2 + 2 * number_of_edges();
+        const auto n_edges = number_of_edges();
+        if (n_edges > (std::numeric_limits<std::uint64_t>::max() - 2) / 2) {
+            throw std::overflow_error("graph serialization size exceeds uint64 range");
+        }
+        return 2 + 2 * n_edges;
     }
 
     // Force the CSR adjacency to be rebuilt if it's currently stale. Use this
@@ -313,7 +319,7 @@ protected:
         const EdgeId reserve_edges,
         const EdgeId reserve_lookup
     )
-        : number_of_nodes_(number_of_nodes) {
+        : number_of_nodes_(checked_node_count(number_of_nodes)) {
         edges_.reserve(static_cast<std::size_t>(reserve_edges));
         edge_lookup_.reserve(static_cast<std::size_t>(reserve_lookup));
     }
@@ -358,10 +364,13 @@ protected:
     // typically 4-5x faster than the previous vector-of-vectors fill on
     // large grids.
     void rebuild_adjacency_from_edges() {
-        const auto n_nodes = static_cast<std::size_t>(number_of_nodes_);
-        const auto data_size = 2 * edges_.size();
+        const auto n_nodes = detail::checked_size_cast(number_of_nodes_, "number_of_nodes");
+        const auto offsets_size = detail::checked_size_add(n_nodes, 1, "CSR offsets size");
+        const auto data_size = detail::checked_size_multiply(
+            edges_.size(), 2, "CSR adjacency size"
+        );
         // Pass 1: count per-node degree into the offsets buffer (shifted by 1).
-        adjacency_offsets_.assign(n_nodes + 1, 0);
+        adjacency_offsets_.assign(offsets_size, 0);
         for (const auto &edge : edges_) {
             ++adjacency_offsets_[static_cast<std::size_t>(edge.first) + 1];
             ++adjacency_offsets_[static_cast<std::size_t>(edge.second) + 1];
@@ -416,6 +425,12 @@ protected:
     }
 
 private:
+    static NodeId checked_node_count(const NodeId number_of_nodes) {
+        const auto count = detail::checked_size_cast(number_of_nodes, "number_of_nodes");
+        detail::checked_size_add(count, 1, "CSR offsets size");
+        return number_of_nodes;
+    }
+
     void ensure_adjacency_built() const {
         if (adjacency_dirty_) {
             const_cast<UndirectedGraph *>(this)->rebuild_adjacency_from_edges();

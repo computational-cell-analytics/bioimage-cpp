@@ -7,6 +7,7 @@
 
 #include <nanobind/ndarray.h>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -61,6 +62,18 @@ OutputArray<T> affine_transform_t(
     const auto input_shape = shape_of(input);
     const auto input_strides = detail::c_order_strides(input_shape);
     const auto matrix_shape = shape_of(matrix);
+    // The affine sampler assumes finite coordinates (matrix * grid), so the
+    // matrix is validated finite here, at the single binding boundary, rather
+    // than per output pixel.
+    std::size_t matrix_size = 1;
+    for (const auto extent : matrix_shape) {
+        matrix_size *= static_cast<std::size_t>(extent);
+    }
+    for (std::size_t index = 0; index < matrix_size; ++index) {
+        if (!std::isfinite(matrix.data()[index])) {
+            throw std::invalid_argument("matrix must contain only finite values");
+        }
+    }
     const auto matrix_strides = detail::c_order_strides(matrix_shape);
     const auto starts_shape = shape_of(starts);
     const auto starts_strides = detail::c_order_strides(starts_shape);
