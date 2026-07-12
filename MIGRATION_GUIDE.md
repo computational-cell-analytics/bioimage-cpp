@@ -2293,9 +2293,10 @@ Important differences:
   per-point radius is dynamic (the distance value at each point), matching
   nifty; there is no fixed-radius mode.
 - The algorithm is otherwise identical to nifty, including its float
-  arithmetic, so results match element-for-element. It uses an O(N²)
-  pairwise distance matrix; threshold the distance map first to keep the
-  candidate count modest.
+  arithmetic, so results match element-for-element. It is O(N²) in time but
+  uses only O(`number_of_threads` · N) auxiliary memory (no dense N×N matrix),
+  and `number_of_threads` parallelizes the pairwise evaluation. Still threshold
+  the distance map first to keep the candidate count modest.
 
 ## scikit-fmm
 

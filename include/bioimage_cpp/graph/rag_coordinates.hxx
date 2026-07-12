@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/label_cast.hxx"
 #include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/detail/threading.hxx"
 #include "bioimage_cpp/graph/region_adjacency_graph.hxx"
@@ -33,9 +34,9 @@ void scan_contacts_2d(
         const auto row_offset = y * width;
         for (std::size_t x = 0; x < width; ++x) {
             const auto pixel = row_offset + x;
-            const auto u = static_cast<std::uint64_t>(data[pixel]);
+            const auto u = bioimage_cpp::detail::checked_label_to_node(data[pixel]);
             if (x + 1 < width) {
-                const auto v = static_cast<std::uint64_t>(data[pixel + 1]);
+                const auto v = bioimage_cpp::detail::checked_label_to_node(data[pixel + 1]);
                 if (u != v) {
                     const auto edge = rag.find_edge(u, v);
                     if (edge >= 0) {
@@ -44,7 +45,7 @@ void scan_contacts_2d(
                 }
             }
             if (y + 1 < height) {
-                const auto v = static_cast<std::uint64_t>(data[pixel + width]);
+                const auto v = bioimage_cpp::detail::checked_label_to_node(data[pixel + width]);
                 if (u != v) {
                     const auto edge = rag.find_edge(u, v);
                     if (edge >= 0) {
@@ -75,9 +76,9 @@ void scan_contacts_3d(
             const auto row_offset = slice_offset + y * width;
             for (std::size_t x = 0; x < width; ++x) {
                 const auto pixel = row_offset + x;
-                const auto u = static_cast<std::uint64_t>(data[pixel]);
+                const auto u = bioimage_cpp::detail::checked_label_to_node(data[pixel]);
                 if (x + 1 < width) {
-                    const auto v = static_cast<std::uint64_t>(data[pixel + 1]);
+                    const auto v = bioimage_cpp::detail::checked_label_to_node(data[pixel + 1]);
                     if (u != v) {
                         const auto edge = rag.find_edge(u, v);
                         if (edge >= 0) {
@@ -86,7 +87,7 @@ void scan_contacts_3d(
                     }
                 }
                 if (y + 1 < height) {
-                    const auto v = static_cast<std::uint64_t>(data[pixel + width]);
+                    const auto v = bioimage_cpp::detail::checked_label_to_node(data[pixel + width]);
                     if (u != v) {
                         const auto edge = rag.find_edge(u, v);
                         if (edge >= 0) {
@@ -95,7 +96,7 @@ void scan_contacts_3d(
                     }
                 }
                 if (z + 1 < depth) {
-                    const auto v = static_cast<std::uint64_t>(data[pixel + slice_size]);
+                    const auto v = bioimage_cpp::detail::checked_label_to_node(data[pixel + slice_size]);
                     if (u != v) {
                         const auto edge = rag.find_edge(u, v);
                         if (edge >= 0) {

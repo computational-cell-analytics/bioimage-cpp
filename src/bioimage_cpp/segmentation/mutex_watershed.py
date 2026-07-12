@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from .. import _core
+from .._validation import strict_index, strict_offsets
 
 _MUTEX_WATERSHED_BY_DTYPE = {
     np.dtype("float32"): _core._mutex_watershed_grid_float32,
@@ -80,8 +81,8 @@ def mutex_watershed(
             f"affinities must have one of dtypes ({supported}), got dtype={dtype}"
         ) from error
 
-    normalized_offsets = [tuple(int(value) for value in offset) for offset in offsets]
     spatial_ndim = array.ndim - 1
+    normalized_offsets = strict_offsets(offsets, spatial_ndim)
     if len(normalized_offsets) != array.shape[0]:
         raise ValueError(
             "offsets length must match affinities channel count, got "
@@ -92,8 +93,9 @@ def mutex_watershed(
             "each offset must have length matching the spatial ndim, got "
             f"spatial ndim={spatial_ndim}"
         )
-    if number_of_attractive_channels < 0:
-        raise ValueError("number_of_attractive_channels must be non-negative")
+    number_of_attractive_channels = strict_index(
+        number_of_attractive_channels, "number_of_attractive_channels", minimum=0
+    )
     if number_of_attractive_channels > array.shape[0]:
         raise ValueError("number_of_attractive_channels must be <= number of channels")
 
@@ -199,10 +201,10 @@ def semantic_mutex_watershed(
             f"affinities must have one of dtypes ({supported}), got dtype={dtype}"
         ) from error
 
-    normalized_offsets = [tuple(int(value) for value in offset) for offset in offsets]
-    number_of_offsets = len(normalized_offsets)
     number_of_channels = int(array.shape[0])
     spatial_ndim = array.ndim - 1
+    normalized_offsets = strict_offsets(offsets, spatial_ndim)
+    number_of_offsets = len(normalized_offsets)
     if number_of_offsets == 0:
         raise ValueError("offsets must not be empty")
     if number_of_channels <= number_of_offsets:
@@ -216,8 +218,9 @@ def semantic_mutex_watershed(
             "each offset must have length matching the spatial ndim, got "
             f"spatial ndim={spatial_ndim}"
         )
-    if number_of_attractive_channels < 0:
-        raise ValueError("number_of_attractive_channels must be non-negative")
+    number_of_attractive_channels = strict_index(
+        number_of_attractive_channels, "number_of_attractive_channels", minimum=0
+    )
     if number_of_attractive_channels > number_of_offsets:
         raise ValueError(
             "number_of_attractive_channels must be <= len(offsets)"
@@ -259,7 +262,9 @@ def _normalize_strides(
             raise ValueError("randomized_strides requires strides")
         return None
 
-    normalized = tuple(int(stride) for stride in strides)
+    normalized = tuple(
+        strict_index(stride, "stride", minimum=1) for stride in strides
+    )
     if len(normalized) != spatial_ndim:
         raise ValueError(
             "strides length must match the spatial ndim, got "

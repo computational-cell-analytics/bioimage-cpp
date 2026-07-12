@@ -99,6 +99,17 @@ DensityArray compute_flow_density_t(
     if (number_of_threads < 1) {
         throw std::invalid_argument("number_of_threads must be >= 1");
     }
+    // Single authoritative finiteness check over the (contiguous) flow buffer;
+    // the Python wrapper deliberately does not repeat this scan.
+    std::size_t flow_size = D;
+    for (std::size_t axis = 0; axis < D; ++axis) {
+        flow_size *= flow.shape(axis + 1);
+    }
+    for (std::size_t index = 0; index < flow_size; ++index) {
+        if (!std::isfinite(flow.data()[index])) {
+            throw std::invalid_argument("flow must contain only finite values");
+        }
+    }
 
     std::vector<std::size_t> out_shape(D);
     std::vector<std::ptrdiff_t> view_shape(D);

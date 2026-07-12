@@ -200,8 +200,6 @@ nb::ndarray<nb::numpy, PointT, nb::c_contig> non_maximum_distance_suppression_im
     nb::ndarray<nb::numpy, const PointT, nb::c_contig> points,
     const std::size_t n_threads
 ) {
-    (void)n_threads;  // Reserved for future parallelization; single-threaded.
-
     if (distance_map.ndim() == 0) {
         throw std::invalid_argument("distance_map must have ndim >= 1, got ndim=0");
     }
@@ -253,7 +251,9 @@ nb::ndarray<nb::numpy, PointT, nb::c_contig> non_maximum_distance_suppression_im
     std::vector<std::size_t> kept_indices;
     {
         nb::gil_scoped_release release;
-        distance::non_maximum_distance_suppression(map_view, points_view, kept_indices);
+        distance::non_maximum_distance_suppression(
+            map_view, points_view, kept_indices, n_threads
+        );
     }
 
     const std::size_t n_kept = kept_indices.size();

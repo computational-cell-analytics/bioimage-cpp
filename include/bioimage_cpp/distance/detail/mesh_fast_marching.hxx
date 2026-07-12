@@ -30,25 +30,74 @@ namespace bioimage_cpp::distance::detail {
 
 inline constexpr double kMeshFmmInfinity = std::numeric_limits<double>::infinity();
 
-class MeshFastMarching {
+class MeshTopology {
 public:
-    MeshFastMarching(
+    MeshTopology(
         const ConstArrayView<double> &vertices,
-        const ConstArrayView<std::int64_t> &faces,
-        const ConstArrayView<double> *speed
+        const ConstArrayView<std::int64_t> &faces
     )
         : vertices_(vertices.data),
           n_vertices_(static_cast<std::size_t>(vertices.shape[0])),
           faces_(faces.data),
-          n_faces_(static_cast<std::size_t>(faces.shape[0])),
-          speed_(speed != nullptr ? speed->data : nullptr),
-          dist_(n_vertices_, kMeshFmmInfinity),
-          state_(n_vertices_, MeshState::Far),
-          heap_(n_vertices_) {
+          n_faces_(static_cast<std::size_t>(faces.shape[0])) {
         build_vertex_face_incidence();
     }
 
     [[nodiscard]] std::size_t size() const { return n_vertices_; }
+    [[nodiscard]] const double *vertices() const { return vertices_; }
+    [[nodiscard]] const std::int64_t *faces() const { return faces_; }
+    [[nodiscard]] const std::vector<std::size_t> &face_offsets() const {
+        return face_offsets_;
+    }
+    [[nodiscard]] const std::vector<std::size_t> &face_ids() const { return face_ids_; }
+
+private:
+    void build_vertex_face_incidence() {
+        face_offsets_.assign(n_vertices_ + 1, 0);
+        for (std::size_t f = 0; f < n_faces_; ++f) {
+            for (std::size_t corner = 0; corner < 3; ++corner) {
+                const std::int64_t v = faces_[f * 3 + corner];
+                if (v < 0 || static_cast<std::size_t>(v) >= n_vertices_) {
+                    throw std::invalid_argument(
+                        "faces contains vertex index " + std::to_string(v) +
+                        " out of range [0, " + std::to_string(n_vertices_) + ")"
+                    );
+                }
+                ++face_offsets_[static_cast<std::size_t>(v) + 1];
+            }
+        }
+        for (std::size_t i = 1; i < face_offsets_.size(); ++i) {
+            face_offsets_[i] += face_offsets_[i - 1];
+        }
+        face_ids_.resize(face_offsets_.back());
+        std::vector<std::size_t> insert_pos(face_offsets_.begin(), face_offsets_.end() - 1);
+        for (std::size_t f = 0; f < n_faces_; ++f) {
+            for (std::size_t corner = 0; corner < 3; ++corner) {
+                const auto v = static_cast<std::size_t>(faces_[f * 3 + corner]);
+                face_ids_[insert_pos[v]++] = f;
+            }
+        }
+    }
+
+    const double *vertices_;
+    std::size_t n_vertices_;
+    const std::int64_t *faces_;
+    std::size_t n_faces_;
+    std::vector<std::size_t> face_offsets_;
+    std::vector<std::size_t> face_ids_;
+};
+
+class MeshFastMarching {
+public:
+    MeshFastMarching(const MeshTopology &topology, const ConstArrayView<double> *speed)
+        : topology_(topology),
+          speed_(speed != nullptr ? speed->data : nullptr),
+          dist_(topology.size(), kMeshFmmInfinity),
+          state_(topology.size(), MeshState::Far),
+          heap_(topology.size()) {
+    }
+
+    [[nodiscard]] std::size_t size() const { return topology_.size(); }
     [[nodiscard]] double distance(std::size_t vertex) const { return dist_[vertex]; }
     [[nodiscard]] const std::vector<double> &distances() const { return dist_; }
 
@@ -81,10 +130,13 @@ public:
             // and already reflects every other incident face's contribution from
             // the earlier freeze of that face's corner, so min(dist_[w], full
             // rescan) collapses to min(dist_[w], this-face candidate).
-            for (std::size_t k = face_offsets_[v]; k < face_offsets_[v + 1]; ++k) {
-                const std::size_t f = face_ids_[k];
+            const auto &face_offsets = topology_.face_offsets();
+            const auto &face_ids = topology_.face_ids();
+            const auto *faces = topology_.faces();
+            for (std::size_t k = face_offsets[v]; k < face_offsets[v + 1]; ++k) {
+                const std::size_t f = face_ids[k];
                 for (std::size_t corner = 0; corner < 3; ++corner) {
-                    const std::size_t w = static_cast<std::size_t>(faces_[f * 3 + corner]);
+                    const std::size_t w = static_cast<std::size_t>(faces[f * 3 + corner]);
                     if (w == v || state_[w] == MeshState::Frozen) {
                         continue;
                     }
@@ -96,7 +148,7 @@ public:
                     std::array<std::size_t, 2> others{};
                     std::size_t count = 0;
                     for (std::size_t c2 = 0; c2 < 3; ++c2) {
-                        const auto u = static_cast<std::size_t>(faces_[f * 3 + c2]);
+                        const auto u = static_cast<std::size_t>(faces[f * 3 + c2]);
                         if (u != w) {
                             others[count++] = u;
                         }
@@ -133,35 +185,6 @@ private:
         heap_.clear();
     }
 
-    // Build the vertex -> incident-faces CSR (offsets + face ids), mirroring the
-    // count-then-scatter pattern in detail::mesh_smoothing::build_adjacency.
-    void build_vertex_face_incidence() {
-        face_offsets_.assign(n_vertices_ + 1, 0);
-        for (std::size_t f = 0; f < n_faces_; ++f) {
-            for (std::size_t corner = 0; corner < 3; ++corner) {
-                const std::int64_t v = faces_[f * 3 + corner];
-                if (v < 0 || static_cast<std::size_t>(v) >= n_vertices_) {
-                    throw std::invalid_argument(
-                        "faces contains vertex index " + std::to_string(v) +
-                        " out of range [0, " + std::to_string(n_vertices_) + ")"
-                    );
-                }
-                ++face_offsets_[static_cast<std::size_t>(v) + 1];
-            }
-        }
-        for (std::size_t i = 1; i < face_offsets_.size(); ++i) {
-            face_offsets_[i] += face_offsets_[i - 1];
-        }
-        face_ids_.resize(face_offsets_.back());
-        std::vector<std::size_t> insert_pos(face_offsets_.begin(), face_offsets_.end() - 1);
-        for (std::size_t f = 0; f < n_faces_; ++f) {
-            for (std::size_t corner = 0; corner < 3; ++corner) {
-                const auto v = static_cast<std::size_t>(faces_[f * 3 + corner]);
-                face_ids_[insert_pos[v]++] = f;
-            }
-        }
-    }
-
     [[nodiscard]] double slowness(std::size_t vertex) const {
         if (speed_ == nullptr) {
             return 1.0;
@@ -171,8 +194,8 @@ private:
     }
 
     [[nodiscard]] double edge_length(std::size_t u, std::size_t v) const {
-        const double *pu = vertices_ + u * 3;
-        const double *pv = vertices_ + v * 3;
+        const double *pu = topology_.vertices() + u * 3;
+        const double *pv = topology_.vertices() + v * 3;
         const double dx = pu[0] - pv[0];
         const double dy = pu[1] - pv[1];
         const double dz = pu[2] - pv[2];
@@ -192,9 +215,9 @@ private:
             return edge_cand;
         }
 
-        const double *pc = vertices_ + c * 3;
-        const double *pa = vertices_ + a * 3;
-        const double *pb = vertices_ + b * 3;
+        const double *pc = topology_.vertices() + c * 3;
+        const double *pa = topology_.vertices() + a * 3;
+        const double *pb = topology_.vertices() + b * 3;
         double dot = 0.0;
         for (std::size_t d = 0; d < 3; ++d) {
             dot += (pa[d] - pc[d]) * (pb[d] - pc[d]);
@@ -229,14 +252,8 @@ private:
         return edge_cand;
     }
 
-    const double *vertices_;
-    std::size_t n_vertices_;
-    const std::int64_t *faces_;
-    std::size_t n_faces_;
+    const MeshTopology &topology_;
     const double *speed_;
-
-    std::vector<std::size_t> face_offsets_;
-    std::vector<std::size_t> face_ids_;
 
     std::vector<double> dist_;
     std::vector<MeshState> state_;

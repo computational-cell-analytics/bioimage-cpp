@@ -153,6 +153,28 @@ def test_restrict_to_mask_keeps_density_inside_mask():
     assert (density[~mask] == 0).all()
 
 
+@pytest.mark.parametrize("method", ["euler", "rk2"])
+def test_restrict_to_mask_freezes_at_last_valid_position(method):
+    flow = np.zeros((2, 3, 3), dtype=np.float32)
+    flow[1] = 1.0
+    mask = np.zeros((3, 3), dtype=bool)
+    mask[1, 1] = True
+    density = bic.flow.compute_flow_density(
+        flow, mask, n_iter=3, dt=1.0, tol=0.0,
+        method=method, restrict_to_mask=True,
+    )
+    expected = np.zeros((3, 3), dtype=np.float32)
+    expected[1, 1] = 1.0
+    np.testing.assert_array_equal(density, expected)
+
+
+def test_flow_rejects_non_finite_values():
+    flow = np.zeros((2, 3, 3), dtype=np.float32)
+    flow[0, 1, 1] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        bic.flow.compute_flow_density(flow, np.ones((3, 3), bool))
+
+
 def test_rk2_runs():
     rng = np.random.default_rng(0)
     flow = rng.normal(scale=0.3, size=(2, 12, 12)).astype(np.float32)

@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from .. import _core
+from .._validation import strict_offsets
 
 _WATERSHED_BY_DTYPE: dict[np.dtype, dict[np.dtype, object]] = {
     np.dtype("float32"): {
@@ -47,10 +48,11 @@ def watershed(
 ) -> np.ndarray:
     """Run a marker-controlled watershed on a 2D or 3D heightmap.
 
-    Pixels with non-zero ``markers`` values are treated as seeds. Their
-    label is propagated to neighbouring pixels in order of increasing
-    ``image`` value, using axis-aligned connectivity (4-neighbours in 2D,
-    6-neighbours in 3D). Tie-breaking on equal heights is unspecified.
+    Pixels with non-zero ``markers`` values are treated as seeds. Heights are
+    quantized to 65,536 levels and propagated with Meyer-style monotone
+    flooding using axis-aligned connectivity. Ordering within one quantization
+    level is unspecified, including for distinct input values that quantize to
+    the same level.
 
     Parameters
     ----------
@@ -201,7 +203,7 @@ def watershed_from_affinities(
             f"markers must have one of dtypes ({supported}), got dtype={markers_array.dtype}"
         ) from error
 
-    normalized_offsets = [tuple(int(value) for value in offset) for offset in offsets]
+    normalized_offsets = strict_offsets(offsets, spatial_ndim)
     if len(normalized_offsets) != n_channels:
         raise ValueError(
             "offsets count must equal affinities channel count, got "

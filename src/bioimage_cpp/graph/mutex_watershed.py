@@ -183,6 +183,10 @@ def semantic_mutex_watershed_clustering(
         int(mutex_uv_array.shape[0]),
     )
     semantic_uv_array = _as_uv_array(semantic_node_classes, "semantic_node_classes")
+    if semantic_uv_array.size and np.any(
+        semantic_uv_array[:, 1] > np.iinfo(np.int64).max
+    ):
+        raise ValueError("semantic class ids must be <= np.iinfo(np.int64).max")
     semantic_cost_array = _as_1d_array(
         semantic_cost_array,
         semantic_cost_array.dtype,

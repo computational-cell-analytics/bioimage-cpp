@@ -186,14 +186,10 @@ class LiftedMulticutObjective:
         base_graph = graph
         base_costs = _as_edge_costs(edge_costs, base_graph)
 
-        # Use the bulk constructor for the lifted graph's base portion to
-        # bypass the per-edge hash dedup that ``insert_edges`` performs.
-        if int(base_graph.number_of_edges) > 0:
-            lifted_graph = _core.UndirectedGraph.from_unique_edges(
-                int(base_graph.number_of_nodes), base_graph.uv_ids()
-            )
-        else:
-            lifted_graph = _core.UndirectedGraph(int(base_graph.number_of_nodes))
+        # Preserve the base graph's edge IDs: base costs are indexed in that
+        # order, whereas the sorted bulk constructor is only valid when its
+        # input already has lexicographic edge order.
+        lifted_graph = base_graph.clone()
 
         weights_list = [base_costs.copy()]
 

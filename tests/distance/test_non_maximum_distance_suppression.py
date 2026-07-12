@@ -128,6 +128,15 @@ def test_deterministic():
     assert np.array_equal(a, b)
 
 
+def test_thread_counts_are_identical():
+    rng = np.random.default_rng(17)
+    dm = rng.uniform(0, 5, size=(40, 40)).astype(np.float32)
+    points = rng.integers(0, 40, size=(300, 2), dtype=np.int64)
+    single = nms(dm, points, number_of_threads=1)
+    multi = nms(dm, points, number_of_threads=4)
+    np.testing.assert_array_equal(single, multi)
+
+
 def test_invalid_points_ndim():
     dm = np.ones((10, 10), dtype=np.float32)
     with pytest.raises(ValueError):

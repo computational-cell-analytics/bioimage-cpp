@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <exception>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -29,17 +30,23 @@ inline std::size_t normalize_thread_count(
 
 // Split [0, number_of_work_items) into n_threads contiguous chunks and invoke
 // `chunk(thread_id, begin, end)` on each chunk. Thread 0 runs on the calling
-// thread; threads 1..n_threads-1 run in parallel std::threads. The caller is
+// thread; threads 1..n_threads-1 run in parallel std::jthreads. The caller is
 // responsible for picking n_threads via normalize_thread_count and for the
-// thread safety of `chunk`. If any chunk throws, every thread is still joined
-// and the first exception is rethrown on the calling thread (the remaining
-// chunks run to completion; there is no cancellation).
+// thread safety of `chunk`.
+//
+// Exceptions thrown by `chunk` are captured rather than allowed to escape a
+// worker thread (which would call std::terminate). The first exception on any
+// thread is stored and rethrown on the calling thread after every worker has
+// been joined, so nanobind can translate it into a Python exception.
 template <class Chunk>
 void parallel_for_chunks(
     const std::size_t n_threads,
     const std::size_t number_of_work_items,
     Chunk &&chunk
 ) {
+    if (n_threads == 0) {
+        throw std::invalid_argument("parallel_for_chunks requires n_threads >= 1");
+    }
     const auto bounds = [&](const std::size_t thread_id) {
         const auto begin = thread_id * number_of_work_items / n_threads;
         const auto end = (thread_id + 1) * number_of_work_items / n_threads;
@@ -48,8 +55,10 @@ void parallel_for_chunks(
 
     std::exception_ptr first_exception;
     std::mutex exception_mutex;
-    const auto guarded_chunk = [&](
-        const std::size_t thread_id, const std::size_t begin, const std::size_t end
+    const auto guarded_chunk = [&] (
+        const std::size_t thread_id,
+        const std::size_t begin,
+        const std::size_t end
     ) {
         try {
             chunk(thread_id, begin, end);
@@ -61,7 +70,11 @@ void parallel_for_chunks(
         }
     };
 
-    std::vector<std::thread> threads;
+    // jthread's destructor joins, so a failure while creating a later worker
+    // cannot destroy an earlier still-joinable thread and terminate the
+    // process. We still join explicitly below to rethrow only after all work
+    // has completed.
+    std::vector<std::jthread> threads;
     threads.reserve(n_threads > 0 ? n_threads - 1 : 0);
     for (std::size_t thread_id = 1; thread_id < n_threads; ++thread_id) {
         const auto [begin, end] = bounds(thread_id);

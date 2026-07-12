@@ -158,7 +158,8 @@ def test_undirected_graph_freeze_is_callable_after_inserts_and_after_reads():
 
 
 def test_from_edges_and_from_unique_edges_return_python_subclass():
-    uvs = np.array([[0, 1], [1, 2], [0, 2]], dtype=np.uint64)
+    # from_unique_edges requires lexicographically sorted, canonical edges.
+    uvs = np.array([[0, 1], [0, 2], [1, 2]], dtype=np.uint64)
     core = bic._core.UndirectedGraph.from_unique_edges(3, uvs)
 
     for graph in (
@@ -172,7 +173,7 @@ def test_from_edges_and_from_unique_edges_return_python_subclass():
         assert graph.number_of_edges == core.number_of_edges
         np.testing.assert_array_equal(graph.uv_ids(), core.uv_ids())
         np.testing.assert_array_equal(
-            graph.find_edges([[0, 1], [2, 0]]), np.array([0, 2], dtype=np.int64)
+            graph.find_edges([[0, 1], [2, 1]]), np.array([0, 2], dtype=np.int64)
         )
 
 
@@ -185,3 +186,21 @@ def test_from_edges_deduplicates_but_from_unique_edges_requires_unique():
         bic.graph.UndirectedGraph.from_unique_edges(
             3, np.array([[0, 0]], dtype=np.uint64)
         )
+
+
+def test_undirected_graph_rejects_unrepresentable_node_count():
+    with pytest.raises(OverflowError, match="CSR offsets"):
+        bic.graph.UndirectedGraph(np.iinfo(np.uint64).max)
+
+
+@pytest.mark.parametrize(
+    "uvs",
+    [
+        np.array([[1, 0]], np.uint64),
+        np.array([[0, 1], [0, 1]], np.uint64),
+        np.array([[1, 2], [0, 1]], np.uint64),
+    ],
+)
+def test_from_unique_edges_validates_fast_path_preconditions(uvs):
+    with pytest.raises(ValueError):
+        bic.graph.UndirectedGraph.from_unique_edges(3, uvs)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/detail/threading.hxx"
 
 #include <algorithm>
@@ -108,9 +109,9 @@ void compute_embedding_distances_2d(
                     distances.data + static_cast<std::ptrdiff_t>(oi) * plane;
                 std::fill_n(dist_channel, plane, ValueT{0});
 
-                const auto y_begin = std::max<std::ptrdiff_t>(0, -dy);
+                const auto y_begin = ::bioimage_cpp::detail::axis_begin_offset(dy, height);
                 const auto y_end = height - std::max<std::ptrdiff_t>(0, dy);
-                const auto x_begin = std::max<std::ptrdiff_t>(0, -dx);
+                const auto x_begin = ::bioimage_cpp::detail::axis_begin_offset(dx, width);
                 const auto x_end = width - std::max<std::ptrdiff_t>(0, dx);
                 if (y_begin >= y_end || x_begin >= x_end) {
                     continue;
@@ -180,11 +181,11 @@ void compute_embedding_distances_3d(
                     distances.data + static_cast<std::ptrdiff_t>(oi) * volume;
                 std::fill_n(dist_channel, volume, ValueT{0});
 
-                const auto z_begin = std::max<std::ptrdiff_t>(0, -dz);
+                const auto z_begin = ::bioimage_cpp::detail::axis_begin_offset(dz, depth);
                 const auto z_end = depth - std::max<std::ptrdiff_t>(0, dz);
-                const auto y_begin = std::max<std::ptrdiff_t>(0, -dy);
+                const auto y_begin = ::bioimage_cpp::detail::axis_begin_offset(dy, height);
                 const auto y_end = height - std::max<std::ptrdiff_t>(0, dy);
-                const auto x_begin = std::max<std::ptrdiff_t>(0, -dx);
+                const auto x_begin = ::bioimage_cpp::detail::axis_begin_offset(dx, width);
                 const auto x_end = width - std::max<std::ptrdiff_t>(0, dx);
                 if (z_begin >= z_end || y_begin >= y_end || x_begin >= x_end) {
                     continue;
