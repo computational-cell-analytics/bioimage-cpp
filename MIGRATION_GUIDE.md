@@ -1941,6 +1941,37 @@ API likewise moved from `#include "bioimage_cpp/mesh_smoothing.hxx"` and
 `bioimage_cpp::smooth_mesh` to `#include "bioimage_cpp/mesh/smoothing.hxx"`
 and `bioimage_cpp::mesh::smooth_mesh`.
 
+### Mesh Simplification
+
+Topology-preserving triangle-mesh simplification is available as
+`bic.mesh.simplify_mesh`. It uses quadric-error edge collapses, preserves
+manifold topology and open boundaries, and applies configurable soft penalties
+to sharp features:
+
+    vertices, faces, _, values = bic.mesh.marching_cubes(
+        volume, level=0.5, allow_degenerate=False
+    )
+    vertices, faces, normals, values = bic.mesh.simplify_mesh(
+        vertices,
+        faces,
+        reduction=0.8,
+        values=values,
+        feature_angle=45.0,
+        feature_weight=10.0,
+    )
+
+`reduction` is the approximate fraction of input faces to remove. A mesh can
+stop above its target if no topology- and boundary-safe collapse remains.
+Normals are recomputed from the final face geometry. Optional scalar values are
+interpolated along collapsed edges; the fourth return item is `None` when
+values are omitted. Vertices and values preserve float32/float64 input dtypes,
+while returned faces are int64.
+
+The input must be a non-empty, consistently oriented triangle 2-manifold with
+no duplicate, zero-area, or unreferenced geometry. Use
+`marching_cubes(..., allow_degenerate=False)` before simplification; invalid
+meshes are rejected rather than silently repaired.
+
 
 
 ### Anti-Aliased Resampling

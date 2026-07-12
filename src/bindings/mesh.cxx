@@ -3,6 +3,7 @@
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/mesh/marching_cubes.hxx"
+#include "bioimage_cpp/mesh/simplification.hxx"
 #include "bioimage_cpp/mesh/smoothing.hxx"
 
 #include <nanobind/ndarray.h>
@@ -27,6 +28,7 @@ using FloatInput = nb::ndarray<nb::numpy, const float, nb::c_contig>;
 using UInt8Input = nb::ndarray<nb::numpy, const std::uint8_t, nb::c_contig>;
 using FloatOutput = nb::ndarray<nb::numpy, float, nb::c_contig>;
 using Int32Output = nb::ndarray<nb::numpy, std::int32_t, nb::c_contig>;
+using Int64Output = nb::ndarray<nb::numpy, std::int64_t, nb::c_contig>;
 
 template <class T>
 using InputArray = nb::ndarray<nb::numpy, const T, nb::c_contig>;
@@ -137,6 +139,83 @@ std::pair<OutputArray<V>, OutputArray<V>> smooth_mesh_t(
     return {std::move(out_verts), std::move(out_normals)};
 }
 
+template <class V, class S>
+nb::tuple simplify_mesh_t(
+    InputArray<V> vertices,
+    FacesArray faces,
+    double reduction,
+    std::optional<InputArray<S>> values,
+    double feature_angle,
+    double feature_weight
+) {
+    if (vertices.ndim() != 2 || vertices.shape(1) != 3) {
+        throw std::invalid_argument("vertices must have shape (n_vertices, 3)");
+    }
+    if (faces.ndim() != 2 || faces.shape(1) != 3) {
+        throw std::invalid_argument("faces must have shape (n_faces, 3)");
+    }
+    if (values.has_value()
+        && (values->ndim() != 1 || values->shape(0) != vertices.shape(0))) {
+        throw std::invalid_argument("values must have shape (n_vertices,)");
+    }
+
+    const std::vector<std::ptrdiff_t> vertex_shape{
+        static_cast<std::ptrdiff_t>(vertices.shape(0)), std::ptrdiff_t{3}
+    };
+    const std::vector<std::ptrdiff_t> face_shape{
+        static_cast<std::ptrdiff_t>(faces.shape(0)), std::ptrdiff_t{3}
+    };
+    ConstArrayView<V> vertex_view{vertices.data(), vertex_shape, {}};
+    ConstArrayView<std::int64_t> face_view{faces.data(), face_shape, {}};
+    ConstArrayView<S> value_view;
+    const ConstArrayView<S> *value_ptr = nullptr;
+    if (values.has_value()) {
+        value_view = ConstArrayView<S>{
+            values->data(), {static_cast<std::ptrdiff_t>(values->shape(0))}, {}
+        };
+        value_ptr = &value_view;
+    }
+
+    mesh::SimplifyMeshResult<V, S> result;
+    {
+        nb::gil_scoped_release release;
+        result = mesh::simplify_mesh<V, std::int64_t, S>(
+            vertex_view,
+            face_view,
+            reduction,
+            value_ptr,
+            feature_angle,
+            feature_weight
+        );
+    }
+
+    const std::size_t n_vertices = result.vertices.size() / 3;
+    const std::size_t n_faces = result.faces.size() / 3;
+    auto out_vertices = output_array<V, OutputArray<V>>(
+        std::move(result.vertices), {n_vertices, 3}
+    );
+    auto out_faces = output_array<std::int64_t, Int64Output>(
+        std::move(result.faces), {n_faces, 3}
+    );
+    auto out_normals = output_array<V, OutputArray<V>>(
+        std::move(result.normals), {n_vertices, 3}
+    );
+    if (!result.values.has_value()) {
+        return nb::make_tuple(
+            std::move(out_vertices), std::move(out_faces), std::move(out_normals), nb::none()
+        );
+    }
+    auto out_values = output_array<S, OutputArray<S>>(
+        std::move(*result.values), {n_vertices}
+    );
+    return nb::make_tuple(
+        std::move(out_vertices),
+        std::move(out_faces),
+        std::move(out_normals),
+        std::move(out_values)
+    );
+}
+
 nb::tuple marching_cubes_float32(
     FloatInput volume,
     const double level,
@@ -229,6 +308,50 @@ nb::tuple marching_cubes_float32(
 } // namespace
 
 void bind_mesh(nb::module_ &m) {
+    m.def(
+        "_simplify_mesh_float32_float32",
+        &simplify_mesh_t<float, float>,
+        nb::arg("vertices"),
+        nb::arg("faces"),
+        nb::arg("reduction"),
+        nb::arg("values") = nb::none(),
+        nb::arg("feature_angle") = 45.0,
+        nb::arg("feature_weight") = 10.0,
+        "Constrained QEM simplification with float32 vertices and values."
+    );
+    m.def(
+        "_simplify_mesh_float32_float64",
+        &simplify_mesh_t<float, double>,
+        nb::arg("vertices"),
+        nb::arg("faces"),
+        nb::arg("reduction"),
+        nb::arg("values") = nb::none(),
+        nb::arg("feature_angle") = 45.0,
+        nb::arg("feature_weight") = 10.0,
+        "Constrained QEM simplification with float32 vertices and float64 values."
+    );
+    m.def(
+        "_simplify_mesh_float64_float32",
+        &simplify_mesh_t<double, float>,
+        nb::arg("vertices"),
+        nb::arg("faces"),
+        nb::arg("reduction"),
+        nb::arg("values") = nb::none(),
+        nb::arg("feature_angle") = 45.0,
+        nb::arg("feature_weight") = 10.0,
+        "Constrained QEM simplification with float64 vertices and float32 values."
+    );
+    m.def(
+        "_simplify_mesh_float64_float64",
+        &simplify_mesh_t<double, double>,
+        nb::arg("vertices"),
+        nb::arg("faces"),
+        nb::arg("reduction"),
+        nb::arg("values") = nb::none(),
+        nb::arg("feature_angle") = 45.0,
+        nb::arg("feature_weight") = 10.0,
+        "Constrained QEM simplification with float64 vertices and values."
+    );
     m.def(
         "_smooth_mesh_float32",
         &smooth_mesh_t<float>,
