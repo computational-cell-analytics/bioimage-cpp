@@ -365,6 +365,28 @@ Kept so these avenues are not blindly re-attempted.
   regressed the EPYC 3D fixture by about 5% at 1T and 2% at 8T. The warm-kernel
   counter run reported only about 1.45% L1-data load misses, so the extra
   prefetch instructions cost more than the avoided demand-load latency.
+- **Next-sample software prefetching** (closed after the `perf` gate,
+  2026-07-13; not implemented). A production, plain-flag build of `e426920` was
+  measured on an AMD EPYC 7513 (Zen 3) with the registered 3D fixture, pinned to
+  one core. Each `perf stat -r 3` process loaded the fixture once, made one warm
+  kernel call, then made eight more calls; process setup and loading were
+  included but amortized by the repeated kernel work. The performance governor
+  was active (boost remained enabled), so cycles and counter repeatability were
+  used as the gate rather than wall time alone.
+  - Measurement noise was low enough for the decision: cycles varied by
+    0.03--0.12% and wall time by 0.3--0.7% across the three runs.
+  - The warm process sustained 2.77 instructions/cycle. L1 data-load misses
+    were about 1.54% (roughly 500 million misses from 32.3 billion loads).
+  - Of the observed demand data reads reaching L2, about 453.5 million hit and
+    19.5 million missed (approximately a 4.1% L2 miss rate). An L2 fill was
+    pending for roughly 7% of counted cycles; this is an upper bound on cycles
+    prefetching might overlap, not a direct stall measurement.
+  These counters do not show enough residual cache-miss cost to justify the
+  extra instructions and code complexity. The existing 3-way RK2 interleave
+  already overlaps independent load chains, current-sample prefetching regressed
+  on this CPU, and a next-iteration address is only known late in the dependent
+  trajectory update. The prefetch target is therefore closed unless a future
+  workload or architecture supplies contrary profile evidence.
 - **Interleaved (channel-last) layout + hand-written AVX2 FMA** (earlier, rolled
   back, 2026-06-12) — codegen was confirmed optimal via `objdump` (8× packed
   `vfmadd132ps`, zero gathers) yet was no faster than scalar, and `VS=4` padding
@@ -416,27 +438,20 @@ Kept so these avenues are not blindly re-attempted.
     now propagated through `trace_particle` (landed; instruction streams verified
     identical to the pre-change build in both TUs).
 
-## What remains worth trying
+## Optimization status and future validation
 
-Lower priority than the landed work; all need a fixed-clock host with `perf`
-(the Tiger Lake laptop's ~±8 % thermal-throttle noise swamps sub-10 % effects).
+The 2026-07-13 Zen 3 counter run completed the final `perf` gate and did not
+support another kernel implementation experiment. Flow-density optimization is
+concluded for now at `e426920`; reopen it only for a demonstrated regression, a
+new representative workload, or hardware-counter evidence of a substantial
+bottleneck not covered above.
 
-1. **Software prefetching of the next sample's cache lines.** Targets the residual
-   load latency on the existing channel-first layout. Expected modest; the failed
-   16-block experiment shows added machinery to expose independent loads can lose
-   more than it gains, so measure carefully. The rejected midpoint-reuse
-   experiment further weakens this idea: eliminating half the per-step loads
-   outright bought only ~2–3 % at 1T, so the loads are already latency-hidden.
-2. **A real `perf stat`** around a warm-kernel harness (fixture loaded once,
-   several kernel calls) to confirm where the remaining cycles go (front-end vs
-   back-end memory vs back-end core) and to provide a low-noise environment for
-   evaluating (1).
-3. **Cross-architecture confirmation** on macOS x86-64 and Windows x86-64 for
-   the FMA dispatch, plus the truncation gain magnitude on arm64 (macOS
-   AppleClang and Linux aarch64). The particle-major and direct-interpolation
-   gains are portable C++20; the x86 dispatch is compiler-specific and the
-   truncation magnitude depends on how `floor` is lowered without SSE4.1 / on
-   the arm equivalent.
+Cross-architecture validation remains useful but is not an active optimization
+target: confirm the FMA dispatch on macOS x86-64 and Windows x86-64, and confirm
+the truncation gain magnitude on arm64 (macOS AppleClang and a Linux arm64 wheel
+environment). The particle-major and direct-interpolation changes are portable
+C++20; the x86 dispatch is compiler-specific and the truncation magnitude can
+vary with how `floor` is lowered on each target.
 
 ## Reproducing these measurements
 
