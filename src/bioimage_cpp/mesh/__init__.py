@@ -1,4 +1,4 @@
-"""Triangle-mesh extraction from 3-D scalar volumes."""
+"""Triangle-mesh extraction and processing."""
 
 from __future__ import annotations
 
@@ -8,6 +8,11 @@ import operator
 import numpy as np
 
 from .. import _core
+
+_SMOOTH_MESH_BY_DTYPE = {
+    np.dtype("float32"): _core._smooth_mesh_float32,
+    np.dtype("float64"): _core._smooth_mesh_float64,
+}
 
 
 def _as_spacing(spacing: float | Sequence[float]) -> np.ndarray:
@@ -176,4 +181,109 @@ def marching_cubes(
     return vertices, faces, normals, values
 
 
-__all__ = ["marching_cubes"]
+def smooth_mesh(
+    verts: np.ndarray,
+    normals: np.ndarray,
+    faces: np.ndarray,
+    iterations: int,
+    *,
+    n_threads: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Laplacian smoothing of a triangular mesh.
+
+    Each vertex (and the corresponding normal) is iteratively replaced by the
+    mean of itself and its 1-ring neighbours in the mesh. Updates are applied
+    in Jacobi (double-buffered) style: every vertex in an iteration is updated
+    from the same input state, independent of vertex order. The adjacency is
+    built once from ``faces``; each interior edge is treated as a single
+    undirected edge regardless of how many faces share it.
+
+    Parameters
+    ----------
+    verts:
+        2D ``float32`` or ``float64`` array of shape ``(n_verts, dim)``.
+    normals:
+        Array with the same shape and dtype as ``verts``.
+    faces:
+        2D integer array of shape ``(n_faces, 3)`` with values in
+        ``[0, n_verts)``. Non-``int64`` inputs are converted internally.
+    iterations:
+        Number of smoothing passes. ``0`` returns copies of the inputs.
+    n_threads:
+        Number of threads for the inner smoothing loop. ``0`` (the default)
+        picks the hardware concurrency; ``1`` forces serial execution.
+
+    Returns
+    -------
+    (np.ndarray, np.ndarray)
+        Smoothed vertices and normals with the same shape and dtype as the
+        inputs.
+    """
+    verts_array = np.asarray(verts)
+    normals_array = np.asarray(normals)
+    faces_array = np.asarray(faces)
+
+    if verts_array.ndim != 2:
+        raise ValueError(
+            f"verts must have ndim=2, got ndim={verts_array.ndim}"
+        )
+    if normals_array.shape != verts_array.shape:
+        raise ValueError(
+            "normals must have the same shape as verts, got "
+            f"verts shape={verts_array.shape}, normals shape={normals_array.shape}"
+        )
+    if verts_array.dtype != normals_array.dtype:
+        raise TypeError(
+            "verts and normals must have the same dtype, got "
+            f"verts dtype={verts_array.dtype}, normals dtype={normals_array.dtype}"
+        )
+
+    try:
+        smooth = _SMOOTH_MESH_BY_DTYPE[verts_array.dtype]
+    except KeyError as error:
+        supported = ", ".join(str(dtype) for dtype in _SMOOTH_MESH_BY_DTYPE)
+        raise TypeError(
+            f"verts must have one of dtypes ({supported}), got dtype={verts_array.dtype}"
+        ) from error
+
+    if faces_array.ndim != 2 or faces_array.shape[1] != 3:
+        raise ValueError(
+            f"faces must have shape (n_faces, 3), got shape={faces_array.shape}"
+        )
+    if not np.issubdtype(faces_array.dtype, np.integer):
+        raise TypeError(
+            f"faces must have an integer dtype, got dtype={faces_array.dtype}"
+        )
+
+    n_verts = verts_array.shape[0]
+    if faces_array.size > 0:
+        face_min = int(faces_array.min())
+        face_max = int(faces_array.max())
+        if face_min < 0 or face_max >= n_verts:
+            raise ValueError(
+                "faces must contain indices in [0, n_verts), got values in "
+                f"[{face_min}, {face_max}] with n_verts={n_verts}"
+            )
+
+    iterations_int = int(iterations)
+    if iterations_int < 0:
+        raise ValueError(f"iterations must be non-negative, got {iterations_int}")
+
+    n_threads_int = int(n_threads)
+    if n_threads_int < 0:
+        raise ValueError(f"n_threads must be non-negative, got {n_threads_int}")
+
+    verts_contiguous = np.ascontiguousarray(verts_array)
+    normals_contiguous = np.ascontiguousarray(normals_array)
+    faces_contiguous = np.ascontiguousarray(faces_array, dtype=np.int64)
+
+    return smooth(
+        verts_contiguous,
+        normals_contiguous,
+        faces_contiguous,
+        iterations_int,
+        n_threads_int,
+    )
+
+
+__all__ = ["marching_cubes", "smooth_mesh"]

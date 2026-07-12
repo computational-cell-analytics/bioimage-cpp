@@ -1933,6 +1933,16 @@ Important details:
 See `development/mesh/check_marching_cubes.py` for reference comparisons and
 `development/mesh/benchmark_marching_cubes.py` for reproducible timings.
 
+### Mesh Smoothing
+
+Laplacian mesh smoothing is available as `bic.mesh.smooth_mesh`. It was moved
+from `bic.utils.smooth_mesh`; the old location is no longer available. The C++
+API likewise moved from `#include "bioimage_cpp/mesh_smoothing.hxx"` and
+`bioimage_cpp::smooth_mesh` to `#include "bioimage_cpp/mesh/smoothing.hxx"`
+and `bioimage_cpp::mesh::smooth_mesh`.
+
+
+
 ### Anti-Aliased Resampling
 
 `affine_transform` itself never pre-smooths the input; downsampling without
