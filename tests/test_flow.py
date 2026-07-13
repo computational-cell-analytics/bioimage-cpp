@@ -168,6 +168,66 @@ def test_restrict_to_mask_freezes_at_last_valid_position(method):
     np.testing.assert_array_equal(density, expected)
 
 
+def test_rk2_midpoint_cell_crossing_is_exact():
+    # Constant flow of 3 px along x: the RK2 midpoint always lands outside the
+    # interpolation cell of the current position, while the constant flow keeps
+    # the exact trajectory independent of which cell is sampled.
+    shape = (3, 16)
+    flow = np.zeros((2,) + shape, dtype=np.float32)
+    flow[1] = 3.0
+    mask = np.ones(shape, dtype=bool)
+
+    density = bic.flow.compute_flow_density(
+        flow, mask, n_iter=2, dt=1.0, tol=0.0, method="rk2", restrict_to_mask=False
+    )
+
+    # Each particle advances 3 px per iteration and is clipped at x=15, so
+    # x_final = min(x + 6, 15): starts 0..8 land on 6..14, starts 9..15 pile
+    # up on the boundary column.
+    expected = np.zeros(shape, dtype=np.float32)
+    expected[:, 6:15] = 1.0
+    expected[:, 15] = 7.0
+    np.testing.assert_array_equal(density, expected)
+
+
+def test_rk2_large_flow_multithreaded_matches_single_threaded():
+    # Large flow steps make the RK2 midpoint cross interpolation cells; the
+    # result must stay independent of the thread count.
+    rng = np.random.default_rng(99)
+    flow = rng.normal(scale=8.0, size=(3, 6, 20, 20)).astype(np.float32)
+    mask = rng.random((6, 20, 20)) > 0.3
+
+    kwargs = dict(n_iter=20, dt=0.2, tol=0.005, method="rk2", restrict_to_mask=True)
+    single = bic.flow.compute_flow_density(flow, mask, number_of_threads=1, **kwargs)
+    multi = bic.flow.compute_flow_density(flow, mask, number_of_threads=4, **kwargs)
+
+    np.testing.assert_array_equal(single, multi)
+
+
+def test_rk2_mixed_lifetimes_thread_equality():
+    # 65 foreground particles (not divisible by 2/3/4) with strongly divergent
+    # lifetimes: zero-flow columns converge on the first step while drift
+    # columns run until frozen at the mask border. Different thread counts
+    # split the particle range differently, so equality across them exercises
+    # the lockstep block/remainder boundaries of the interleaved RK2 tracer.
+    shape = (5, 13)
+    flow = np.zeros((2,) + shape, dtype=np.float32)
+    flow[1, :, 1::2] = 2.0
+    mask = np.ones(shape, dtype=bool)
+    kwargs = dict(n_iter=50, dt=0.2, tol=0.005, method="rk2", restrict_to_mask=True)
+
+    results = [
+        bic.flow.compute_flow_density(flow, mask, number_of_threads=t, **kwargs)
+        for t in (1, 2, 3, 4, 5)
+    ]
+    for other in results[1:]:
+        np.testing.assert_array_equal(results[0], other)
+    # restrict_to_mask freezes particles instead of dropping them
+    assert results[0].sum() == mask.sum()
+    # zero-flow columns converge in place and keep their particle
+    assert (results[0][:, 0::2] >= 1.0).all()
+
+
 def test_flow_rejects_non_finite_values():
     flow = np.zeros((2, 3, 3), dtype=np.float32)
     flow[0, 1, 1] = np.nan

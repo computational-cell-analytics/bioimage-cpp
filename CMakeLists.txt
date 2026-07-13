@@ -36,6 +36,36 @@ target_compile_options(_core PRIVATE
     $<$<NOT:$<CONFIG:Debug>>:-O3>
 )
 
+option(
+    BIOIMAGE_FLOW_FMA_DISPATCH
+    "Build an x86 FMA-specialized flow tracer with runtime CPU dispatch"
+    ON
+)
+if(BIOIMAGE_FLOW_FMA_DISPATCH)
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _bioimage_system_processor)
+    if(_bioimage_system_processor MATCHES "^(x86_64|amd64|i[3-6]86)$")
+        if(MSVC)
+            target_sources(_core PRIVATE src/cpp/flow/flow_density_fma.cxx)
+            set_property(
+                SOURCE src/cpp/flow/flow_density_fma.cxx
+                APPEND PROPERTY COMPILE_OPTIONS /arch:AVX2
+            )
+            target_compile_definitions(
+                _core PRIVATE
+                BIOIMAGE_FLOW_FMA_DISPATCH=1
+                BIOIMAGE_FLOW_FMA_REQUIRES_AVX2=1
+            )
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_sources(_core PRIVATE src/cpp/flow/flow_density_fma.cxx)
+            set_property(
+                SOURCE src/cpp/flow/flow_density_fma.cxx
+                APPEND PROPERTY COMPILE_OPTIONS -mavx -mfma
+            )
+            target_compile_definitions(_core PRIVATE BIOIMAGE_FLOW_FMA_DISPATCH=1)
+        endif()
+    endif()
+endif()
+
 option(BIOIMAGE_PROFILE "Enable per-phase profiling instrumentation (development only)" OFF)
 if(BIOIMAGE_PROFILE)
     target_compile_definitions(_core PRIVATE BIOIMAGE_PROFILE)
