@@ -8,8 +8,8 @@ adjacency; if either library is missing, the corresponding column is skipped.
 
 Run::
 
-    python development/utils/benchmark_mesh_smoothing.py --n-vertices 5000 --iterations 5 --repeats 3
-    python development/utils/benchmark_mesh_smoothing.py --n-vertices 20000 --threads 1,2,4,0
+    python development/mesh/benchmark_mesh_smoothing.py --n-vertices 5000 --iterations 5 --repeats 3
+    python development/mesh/benchmark_mesh_smoothing.py --n-vertices 20000 --threads 1,2,4,0
 
 Notes
 -----
@@ -117,7 +117,7 @@ def main() -> int:
         label = f"bioimage_cpp[n_threads={n_threads}]"
 
         def run(verts=mesh.verts, normals=mesh.normals, faces=mesh.faces, n=n_threads):
-            bic.utils.smooth_mesh(verts, normals, faces, iterations=args.iterations, n_threads=n)
+            bic.mesh.smooth_mesh(verts, normals, faces, iterations=args.iterations, n_threads=n)
 
         times = time_call(run, args.repeats, args.warmup)
         rows.append(
@@ -141,7 +141,7 @@ def main() -> int:
     # exact agreement; see module docstring).
     if reference is not None:
         ref_v, ref_n = reference(mesh.verts, mesh.normals, mesh.faces, 1)
-        ours_v, ours_n = bic.utils.smooth_mesh(mesh.verts, mesh.normals, mesh.faces, iterations=1)
+        ours_v, ours_n = bic.mesh.smooth_mesh(mesh.verts, mesh.normals, mesh.faces, iterations=1)
         v_max_diff = float(np.max(np.abs(ours_v - ref_v)))
         n_max_diff = float(np.max(np.abs(ours_n - ref_n)))
         print(f"Correctness vs reference (iterations=1): "

@@ -8,7 +8,7 @@
 Image processing and segmentation functionality in C++ with light-weight python bindings through nanobind and minimal dependencies to enable distribution via pip.
 
 The package includes dependency-free triangle-mesh extraction from 3D volumes
-and segmentation masks under `bioimage_cpp.mesh`.
+and segmentation masks, plus Laplacian mesh smoothing, under `bioimage_cpp.mesh`.
 
 The `bioimage_cpp` python library can be installed via pip:
 ```bash

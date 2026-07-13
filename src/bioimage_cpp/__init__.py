@@ -56,7 +56,7 @@ This library provides the following functionality:
 - `distance`: distance transform functionality.
 - `filters`: efficient implementation of convolutional image filters.
 - `graph`: graph creation and graph (partitioning) algorithms.
-- `mesh`: triangle-mesh extraction from 3D volumes and segmentation masks.
+- `mesh`: triangle-mesh extraction and processing.
 - `segmentation`: image segmentation functionality.
 - `transformation`: affine transformations.
 - `utils`: misc utility functionality.

@@ -12,9 +12,9 @@
 #include <utility>
 #include <vector>
 
-namespace bioimage_cpp {
+namespace bioimage_cpp::mesh {
 
-namespace detail::mesh_smoothing {
+namespace detail::smoothing {
 
 template <class I>
 struct Adjacency {
@@ -74,7 +74,7 @@ Adjacency<I> build_adjacency(const ConstArrayView<I> &faces, std::ptrdiff_t n_ve
     return Adjacency<I>{std::move(offsets), std::move(neighbours)};
 }
 
-} // namespace detail::mesh_smoothing
+} // namespace detail::smoothing
 
 // Laplacian smoothing of a triangular mesh: each vertex (and corresponding
 // normal) is replaced by the mean of itself and its 1-ring neighbours,
@@ -120,7 +120,7 @@ void smooth_mesh(
         return;
     }
 
-    const auto adjacency = detail::mesh_smoothing::build_adjacency<I>(faces, n_verts);
+    const auto adjacency = detail::smoothing::build_adjacency<I>(faces, n_verts);
 
     std::vector<V> scratch_verts(n_total);
     std::vector<V> scratch_normals(n_total);
@@ -140,13 +140,13 @@ void smooth_mesh(
 
     const auto &offsets = adjacency.offsets;
     const auto &neighbours = adjacency.neighbours;
-    const std::size_t threads = detail::normalize_thread_count(
+    const std::size_t threads = bioimage_cpp::detail::normalize_thread_count(
         n_threads < 0 ? 0 : static_cast<std::size_t>(n_threads),
         static_cast<std::size_t>(n_verts)
     );
 
     auto smooth_pass = [&](const V *src_verts, const V *src_normals, V *dst_verts, V *dst_normals) {
-        detail::parallel_for_chunks(
+        bioimage_cpp::detail::parallel_for_chunks(
             threads,
             static_cast<std::size_t>(n_verts),
             [&](std::size_t, std::size_t begin, std::size_t end) {
@@ -184,4 +184,4 @@ void smooth_mesh(
     }
 }
 
-} // namespace bioimage_cpp
+} // namespace bioimage_cpp::mesh
