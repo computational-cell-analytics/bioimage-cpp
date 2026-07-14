@@ -2395,6 +2395,9 @@ TEASAR therefore uses Dijkstra where it must reconstruct and join paths.
 
 See `development/distance/benchmark_dijkstra.py` for a standalone benchmark of
 the Dijkstra field, predecessor field, weighted field, and early-stopping path.
+The implementation uses reusable fixed neighbor metadata and specialized heap
+strategies internally, but these do not change dtype, tie-breaking, or public
+results.
 
 ## scikit-fmm
 
@@ -2545,15 +2548,20 @@ Important differences and current scope:
   cross-section metadata, or postprocessing heuristics. These differences can
   change branch positions and vertex counts, so output is not expected to be
   vertex-for-vertex identical to kimimaro.
-- The C++ core is dependency-free and single-threaded. It deliberately reuses
-  the same public grid-Dijkstra implementation described above for root fields
-  and penalized rail paths.
+- The C++ core is dependency-free and single-threaded. TEASAR uses an internal
+  FP64 compact-foreground Dijkstra backend for root fields and penalized rail
+  paths. Compact IDs retain C-order tie-breaking, so it is bitwise identical to
+  the dense public grid solver on the tested TEASAR workloads while avoiding
+  full-volume shortest-path fields. The public Dijkstra functions remain dense
+  and exact FP64.
 
 Correctness tests are under `tests/skeleton/test_teasar.py`. The independent
 Dijkstra benchmark is `development/distance/benchmark_dijkstra.py`; the
 end-to-end synthetic branching-tube benchmark is
 `development/skeleton/benchmark_teasar.py` and can optionally add kimimaro with
-`--kimimaro` when it is installed.
+`--kimimaro` when it is installed. Pass `--sequential-backends` to reproduce
+the dense/compact/precision design matrix; extended density, spacing, and PDRF
+regimes are in `development/skeleton/benchmark_teasar_sequential.py`.
 
 ## I/O and Build Dependencies
 

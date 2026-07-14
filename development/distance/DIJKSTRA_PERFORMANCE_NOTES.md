@@ -205,6 +205,340 @@ Any optimization should preserve:
 - all connectivity, anisotropy, zero-cost, and weighted-mode tests;
 - public validation and error behavior.
 
-Current full-suite baseline: `1126 passed`. Re-run
+Pre-optimization full-suite baseline: `1126 passed`. Re-run
 `tests/distance/test_grid_dijkstra.py` after every kernel/data-structure change,
 then the full suite before accepting benchmark gains.
+
+## Implemented sequential optimization results
+
+Implemented and measured on 2026-07-14. The public API and FP64 results remain
+unchanged. The kernel now uses fixed 2D/3D neighbor tables, direct boundary
+tests, cost-mode dispatch outside the neighbor loop, a lazy binary heap for
+physical costs, first-discovery insertion for directed node costs, and the
+dense indexed heap only for node-times-physical costs. `DijkstraWorkspace`
+retains state, heap, predecessor, and geometry capacities for C++ callers.
+
+Default-tier medians (one warmup, three measured calls) changed as follows:
+
+| operation | `1024^2` before | after | speedup | `64x160x160` before | after | speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| physical field | 224.94 ms | 129.80 ms | 1.73x | 1.102 s | 384.40 ms | 2.87x |
+| field + predecessors | 239.55 ms | 138.53 ms | 1.73x | 1.120 s | 403.02 ms | 2.78x |
+| node-cost field | 215.45 ms | 128.04 ms | 1.68x | 1.113 s | 306.53 ms | 3.63x |
+| far-target physical path | 224.11 ms | 139.83 ms | 1.60x | 1.101 s | 373.07 ms | 2.95x |
+
+All modes continue to pass the independent Python heap oracle, deterministic
+path, predecessor-chain, zero-cost, connectivity, anisotropy, and validation
+tests. The public implementation stays dense and FP64; compact indexing and
+reduced precision were evaluated only for the internal TEASAR workload.
+
+The final large-tier medians (same one-warmup/three-repeat protocol as the
+original table) were 568.17 ms / 626.03 ms / 569.91 ms / 620.64 ms in 2D and
+3.565 s / 3.813 s / 2.179 s / 3.629 s in 3D for physical, predecessors, node,
+and far-target path respectively. Relative to the committed baseline, the
+large 3D speedups are 2.84x, 2.62x, 4.10x, and 2.75x.
+
+Final verification after the optimization: `1129 passed`.
+
+## Implementation details and alternatives evaluated
+
+The final implementation is not one universal Dijkstra loop with a different
+edge-cost callback. The measurements showed that the three cost conventions
+have different queue behavior, so dimension and cost mode are dispatched once
+before entering the hot loop.
+
+### Fixed grid traversal
+
+The old kernel recursively constructed dynamic neighbor offsets for every
+solve and called generic offset-validation logic for every candidate edge. The
+new workspace caches at most 8 neighbors in 2D or 26 in 3D. Each entry stores:
+
+- signed per-axis steps for border checks;
+- the signed C-order flat-index delta;
+- the physical step length under the requested spacing.
+
+A popped node is decoded once. Interior nodes use only flat deltas; border
+nodes additionally check the signed steps against the shape. Neighbor order is
+still lexicographic, and heap entries are ordered by `(distance, flat_index)`,
+so deterministic tie behavior is retained.
+
+A zero-halo specialization was also prototyped for TEASAR, where every
+foreground node is known to be surrounded by an explicit background border.
+Removing all bounds checks from that path was only about 5% faster after the
+fixed-neighbor rewrite. Compact foreground indexing offered much larger gains,
+so a separate public zero-halo API was not added.
+
+### Queue choice by cost mode
+
+Three queue strategies were tested:
+
+1. the original generic dense addressable heap;
+2. a smaller Dijkstra-specific addressable heap with fixed grid traversal;
+3. a vector-backed binary heap with lazy duplicate entries and stale-pop
+   rejection.
+
+Representative direct-kernel prototype timings were:
+
+| workload and mode | generic indexed | specialized indexed | specialized lazy |
+| --- | ---: | ---: | ---: |
+| default 3D physical | 1.063 s | 430 ms | **386 ms** |
+| default 3D node | 1.077 s | 420 ms | **349 ms** |
+| large 3D physical | 8.257 s | 5.027 s | **4.310 s** |
+| large 3D node | 7.576 s | 4.249 s | **3.460 s** |
+
+These were development-kernel measurements rather than the public Python
+benchmark, so their absolute numbers should not be mixed with the final tables.
+They were used to choose the queue design.
+
+For directed node costs, every edge entering node `v` has the same weight,
+`costs[v]`. The first settled neighbor that discovers `v` therefore supplies
+an optimal distance; a later decrease is impossible. Random-cost stress tests
+confirmed zero decreases. The final node kernel consequently inserts each node
+only once and needs neither a locator nor stale duplicates. On a random 3D
+field this specialized lazy/discovery kernel took 763 ms versus 1.468 s for the
+generic indexed implementation.
+
+That property does not hold for `node_times_physical`: different incoming
+directions have different physical lengths. A random weighted benchmark
+measured 896 ms for the specialized indexed heap and 1.089 s for lazy
+duplicates. The lazy heap reached 199,205 entries versus 83,243 live entries
+for the indexed heap. The final implementation therefore keeps the dense
+indexed heap for this mode, while physical distances use lazy duplicates and
+node costs use one-time discovery.
+
+Bucket and radix queues were not pursued for the sequential public solver.
+Physical step lengths and user node costs are arbitrary floating-point values,
+including zero, so an integer queue would either narrow the API or introduce a
+quantization policy. Bucketing is reconsidered below as a parallel scheduling
+mechanism, where it need not change the exact FP64 distance calculation.
+
+### Workspace, state, and validation
+
+`DijkstraWorkspace` retains state, heap storage, predecessor scratch space,
+distance scratch space, strides, and neighbor metadata. Allocation-owning C++
+and Python functions remain available as before. Path calls track touched
+indices and clear only reached state after early termination; full fields still
+initialize the requested full output because background and unreachable voxels
+must be `+inf`/`-1`.
+
+Discovered, settled, and target flags share one byte per dense node. Weighted
+cost validation now happens once in the C++ boundary/kernel path; the duplicate
+full-array NumPy scan was removed. The Python wrapper still converts costs to a
+C-contiguous FP64 array and checks shape before releasing the GIL.
+
+### Compact foreground indexing for TEASAR
+
+The standalone public functions stay dense because callers expect a dense
+field. TEASAR only needs distances and predecessors on its foreground, so it
+now builds deterministic compact IDs in ascending padded flat-index order. The
+selected on-the-fly representation stores:
+
+- a `uint32` full-to-compact lookup over the padded volume;
+- a `uint32` compact-to-full array;
+- compact FP64 root/PDRF fields;
+- compact byte state, `uint32` predecessors and heap nodes;
+- compact skeleton-target and voxel-to-vertex arrays.
+
+The padded mask, exact distance-to-boundary field, and invalidation bitmap stay
+dense. The implementation falls back to optimized dense FP64 if padded flat
+indices or foreground IDs cannot be represented below the `uint32` sentinel.
+
+For the padded `256^3` branching tube, the domain has 17,173,512 total voxels,
+132,619 foreground voxels (129.5x compression), and 3,180,936 directed
+foreground adjacencies. The full-to-compact lookup is 65.5 MiB and
+compact-to-full is 0.51 MiB. The alternative CSR representation adds about
+1.01 MiB of `size_t` offsets, 12.13 MiB of targets, and 3.03 MiB of neighbor
+codes, then releases the full lookup.
+
+Both compact FP64 variants produced bitwise-identical TEASAR vertices, edges,
+and radii versus dense FP64 across all tested sizes, density regimes, spacings,
+and PDRF ranges. End-to-end medians were:
+
+| backend | `128^3` | `192^3` | `256^3` |
+| --- | ---: | ---: | ---: |
+| optimized dense FP64 | 134.66 ms | 618.82 ms | 1.169 s |
+| compact on-the-fly FP64 | **74.04 ms** | **267.21 ms** | **686.58 ms** |
+| compact CSR FP64 | 75.19 ms | 284.57 ms | 730.72 ms |
+
+CSR was 6--7% slower on the two large tiers. It was 2.3% faster on a very
+sparse `192^3` object but 40% slower on a relatively dense `96^3` ball. Peak
+RSS was effectively the same because CSR must construct the full lookup before
+releasing it. On-the-fly traversal was selected, but the compact ID scheme does
+not lock a future parallel backend into that choice; parallel CSR locality must
+be measured again.
+
+### Reduced precision result
+
+Compact CSR was also instantiated with FP32 root distances, PDRF values, and
+heap priorities. It did not pass either side of the adoption gate. On `256^3`,
+combined root/path Dijkstra was 113.9 ms in FP32 versus 108.9 ms in FP64,
+end-to-end time was slightly slower, and peak RSS stayed near 266.5 MiB because
+dense EDT/mask storage and compact adjacency dominated. On `192^3`, FP32 also
+changed the contracted topology, had a 2.0-voxel bidirectional 95th-percentile
+distance, a 7.07-voxel Hausdorff distance, and a 2.26% skeleton-length error.
+Production TEASAR therefore remains FP64.
+
+### Remaining sequential bottleneck and speedup ceiling
+
+The selected `256^3` profile is:
+
+| phase | time | fraction |
+| --- | ---: | ---: |
+| exact distance transform | 495.0 ms | 77.4% |
+| compact-domain construction | 41.6 ms | 6.5% |
+| two root Dijkstra fields | 58.8 ms | 9.2% |
+| all rail-path Dijkstra calls | 29.0 ms | 4.5% |
+| PDRF, selection and invalidation | 15.4 ms | 2.4% |
+
+Root and path shortest paths together are now only 13.7% of end-to-end time.
+Even an infinitely fast parallel shortest-path backend would improve this case
+by at most 1.16x. A fourfold Dijkstra speedup alone would improve end-to-end
+time by about 1.11x. The parallel follow-up should therefore expose one thread
+budget to the existing threaded EDT as well as to shortest paths; otherwise a
+successful parallel Dijkstra implementation will look modest end-to-end.
+
+## Parallel implementation strategy
+
+The first parallel target should be the compact internal TEASAR backend, not
+the dense public field. It has much less mutable state, immutable on-the-fly
+neighbor lookup, and realistic downstream workloads. The current sequential
+heap remains the `number_of_threads=1` implementation and fallback.
+
+### What can and cannot run concurrently
+
+- The two root sweeps are dependent: the second source is selected from the
+  first field, so they cannot run concurrently.
+- TEASAR rails are also dependent. Each accepted rail changes the skeleton
+  target set, PDRF zeros, and active invalidation state used by the next rail.
+  Running complete rails concurrently would change the algorithm and is not
+  the initial plan.
+- Neighbor relaxations within one root field or one rail search are the useful
+  parallel unit.
+- EDT and compact-domain setup are independent of the rail loop and should use
+  the same user thread budget. Compact ID construction can later use block
+  counts plus a prefix sum if profiling shows it remains significant.
+
+### Proposed shortest-path algorithm: deterministic delta stepping
+
+Implement a separate compact FP64 delta-stepping backend. Delta stepping groups
+tentative distances into buckets of width `Delta`, permitting many nodes to be
+relaxed together while retaining exact non-negative FP64 distances. It is a
+scheduling change, not distance quantization.
+
+For each non-empty bucket:
+
+1. Take its current frontier in compact-ID order.
+2. Use `detail::parallel_for_chunks` to scan frontier nodes. Workers only read
+   the immutable compact domain and the current distance snapshot and append
+   relaxation proposals to per-thread buffers.
+3. Concatenate and deterministically reduce proposals by
+   `(target, candidate_distance, predecessor_key)`. Apply the winning updates
+   on the calling thread, eliminating data races on distances and
+   predecessors.
+4. Repeat light-edge relaxations (`weight <= Delta`) until the current bucket
+   is closed.
+5. Relax heavy edges from all nodes removed from the bucket and insert their
+   updates into later buckets.
+
+This bulk-synchronous proposal/reduction design avoids non-portable atomic
+`{distance, predecessor}` pairs and makes results repeatable. The predecessor
+key should include predecessor distance, compact ID, and neighbor code so equal
+candidate distances have an explicit order. Exact fields should match the
+sequential solver; an equal-cost predecessor path may differ only if the new
+documented tie rule differs from serial discovery order.
+
+Physical edge classification uses the precomputed neighbor length. Directed
+node-cost classification uses `pdrf[target]`; zero-cost edges are light and
+must participate in the current-bucket closure. `node_times_physical` can use
+`cost[target] * length` if the backend is later generalized to the public
+solver.
+
+For early-stop rail searches, do not stop when a worker first sees a skeleton
+target. Finish closing the current bucket and applying all proposals that can
+reach it from the same or an earlier bucket. Then select the target with the
+minimum final `(distance, compact_id)` and reconstruct its predecessor chain.
+
+### Bucket width and small-frontier fallback
+
+`Delta` controls available parallelism versus redundant work and must be
+benchmarked rather than fixed from theory alone:
+
+- physical fields: start with `min(spacing)` and test 0.5x, 1x, 2x and 4x;
+- node-cost paths: sample positive foreground PDRF values and test lower
+  quartile, median and scaled-median widths;
+- treat an all-zero sampled cost field as one light-edge closure.
+
+The existing threading helper creates and joins workers per invocation. Thin
+buckets or short rail searches should therefore stay on the sequential heap.
+Start with a frontier threshold around several thousand nodes, record worker
+launch and deterministic-merge time, and tune the threshold on `64^3` through
+`256^3`. This uses the repository's existing threading primitive and avoids a
+second worker-pool implementation.
+
+Both compact adjacency layouts should be retested. On-the-fly neighbors won
+sequentially, but CSR's contiguous edge ranges may scale better when several
+threads scan different frontier chunks. Select on end-to-end time and peak RSS,
+not relaxation throughput alone.
+
+### API and workspace shape
+
+- Add `number_of_threads` to TEASAR, normalized with
+  `detail::normalize_thread_count`; retain `1` as the conservative behavior
+  while the backend is experimental.
+- Pass the normalized count to the existing distance transform and compact
+  shortest-path backend.
+- Add a parallel workspace containing FP64 distances, `uint32` predecessors,
+  bucket membership/generation marks, and one reusable proposal buffer per
+  thread. Bound and reuse proposal capacity so a difficult bucket cannot cause
+  repeated allocation spikes.
+- Keep the sequential `CompactDijkstraWorkspace` intact. Do not put atomics in
+  its fast single-threaded arrays or regress the established fallback.
+- Keep the GIL released for the full C++ call and touch no Python objects from
+  workers.
+
+The existing choices do not need to be unwound: compact IDs and on-the-fly
+lookup are immutable and safe for concurrent reads, FP64 is suitable for the
+parallel backend, and the heap implementation is isolated behind the
+sequential path. The byte state array is not safe for concurrent mutation, so
+the parallel workspace must use staged proposal application or explicit atomic
+state rather than sharing it directly.
+
+### Alternatives not selected initially
+
+- **Concurrent complete rails:** conflicts with TEASAR's evolving target and
+  invalidation state and would be a separate approximate algorithm.
+- **Relaxed multi-queue Dijkstra:** offers more asynchronous parallelism but
+  makes early stopping, repeatability, and predecessor ties harder. It is a
+  fallback experiment only if deterministic delta stepping cannot scale.
+- **Parallel Bellman-Ford/frontier relaxation:** simple, but likely performs
+  too many grid-edge scans on long weighted paths.
+- **Reintroducing FP32:** does not address synchronization or bucket work and
+  already failed the sequential performance and quality gates.
+- **Replacing `detail::parallel_for_chunks`:** would violate the repository's
+  single-threading-primitive policy; first make bucket/frontier size large
+  enough to amortize its launches.
+
+### Parallel benchmarks and acceptance gates
+
+Extend the sequential matrix with `number_of_threads = 1, 2, 4, 8` and record:
+
+- EDT, compact-build, root-field and rail-path phase totals;
+- bucket count, light-closure rounds, relaxations, accepted updates,
+  duplicates, proposal/merge time, and peak per-thread buffer capacity;
+- early-stop settled-node counts and rail count;
+- end-to-end time and peak RSS for on-the-fly and CSR adjacency.
+
+Use deterministic backend-order shuffling, one warmup and five measured calls.
+The first acceptance target is at least 1.75x combined root/path speedup at four
+threads on both `192^3` and `256^3`, at least 5% end-to-end improvement when
+shortest-path threading is considered alone, and no regression over 5% on
+small or relatively dense cases. Peak RSS should stay within 30% of compact
+sequential FP64.
+
+Correctness tests must cover exact fields, zero weights, anisotropic physical
+weights, disconnected masks, multiple/equal targets, and targets reached in a
+light-edge closure. Calls at each thread count must be repeatable. If exact
+predecessor parity is intentionally relaxed, retain the previously used TEASAR
+gate: matching contracted branch/leaf topology, bidirectional 95th-percentile
+distance at most one normalized voxel, Hausdorff distance at most two voxels,
+and total physical length within 2% of sequential compact FP64.

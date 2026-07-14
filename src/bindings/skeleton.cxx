@@ -4,6 +4,7 @@
 #include "bioimage_cpp/skeleton/teasar.hxx"
 
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace nb = nanobind;
@@ -34,13 +36,14 @@ Array make_array(const std::vector<std::size_t> &shape) {
     return Array(data, shape.size(), shape.data(), owner);
 }
 
-nb::tuple teasar_uint8(
+nb::tuple teasar_uint8_impl(
     UInt8Input mask,
     const std::vector<double> &spacing,
     const double scale,
     const double constant,
     const double pdrf_scale,
-    const double pdrf_exponent
+    const double pdrf_exponent,
+    const skeleton::TeasarBackend backend
 ) {
     if (spacing.size() != 3) {
         throw std::invalid_argument("spacing must contain exactly three values");
@@ -53,13 +56,14 @@ nb::tuple teasar_uint8(
     skeleton::SkeletonGraph result;
     {
         nb::gil_scoped_release release;
-        result = skeleton::teasar(
+        result = skeleton::teasar_with_backend(
             mask_view,
             {{spacing[0], spacing[1], spacing[2]},
              scale,
              constant,
              pdrf_scale,
-             pdrf_exponent}
+             pdrf_exponent},
+            backend
         );
     }
 
@@ -81,6 +85,46 @@ nb::tuple teasar_uint8(
     return nb::make_tuple(vertices, edges, radii);
 }
 
+nb::tuple teasar_uint8(
+    UInt8Input mask,
+    const std::vector<double> &spacing,
+    const double scale,
+    const double constant,
+    const double pdrf_scale,
+    const double pdrf_exponent
+) {
+    return teasar_uint8_impl(
+        mask, spacing, scale, constant, pdrf_scale, pdrf_exponent,
+        skeleton::TeasarBackend::Auto
+    );
+}
+
+nb::tuple teasar_uint8_backend(
+    UInt8Input mask,
+    const std::vector<double> &spacing,
+    const double scale,
+    const double constant,
+    const double pdrf_scale,
+    const double pdrf_exponent,
+    const std::string &backend
+) {
+    skeleton::TeasarBackend selected;
+    if (backend == "dense-fp64") {
+        selected = skeleton::TeasarBackend::DenseFloat64;
+    } else if (backend == "compact-on-the-fly-fp64") {
+        selected = skeleton::TeasarBackend::CompactOnTheFlyFloat64;
+    } else if (backend == "compact-csr-fp64") {
+        selected = skeleton::TeasarBackend::CompactCsrFloat64;
+    } else if (backend == "compact-csr-fp32") {
+        selected = skeleton::TeasarBackend::CompactCsrFloat32;
+    } else {
+        throw std::invalid_argument("unknown TEASAR development backend: " + backend);
+    }
+    return teasar_uint8_impl(
+        mask, spacing, scale, constant, pdrf_scale, pdrf_exponent, selected
+    );
+}
+
 } // namespace
 
 void bind_skeleton(nb::module_ &m) {
@@ -94,6 +138,18 @@ void bind_skeleton(nb::module_ &m) {
         nb::arg("pdrf_scale"),
         nb::arg("pdrf_exponent"),
         "Core binary 3D TEASAR skeletonization."
+    );
+    m.def(
+        "_teasar_uint8_backend",
+        &teasar_uint8_backend,
+        nb::arg("mask"),
+        nb::arg("spacing"),
+        nb::arg("scale"),
+        nb::arg("constant"),
+        nb::arg("pdrf_scale"),
+        nb::arg("pdrf_exponent"),
+        nb::arg("backend"),
+        "Development-only TEASAR backend selector."
     );
 }
 

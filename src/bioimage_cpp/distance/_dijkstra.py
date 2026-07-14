@@ -69,8 +69,6 @@ def _normalize_dijkstra_inputs(
             raise ValueError(
                 f"{function}: costs must have shape {binary.shape}, got shape={costs_array.shape}"
             )
-        if not np.all(np.isfinite(costs_array)) or np.any(costs_array < 0.0):
-            raise ValueError(f"{function}: costs must contain finite non-negative values")
 
     return binary, connectivity_value, spacing_values, costs_array, mode_value
 

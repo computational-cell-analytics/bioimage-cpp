@@ -10,6 +10,7 @@ Examples
 --------
 python development/skeleton/benchmark_teasar.py --small --repeats 3
 python development/skeleton/benchmark_teasar.py --repeats 5
+python development/skeleton/benchmark_teasar.py --large --sequential-backends
 python development/skeleton/benchmark_teasar.py --large --kimimaro --repeats 3 \
     --json /tmp/teasar.json
 """
@@ -27,6 +28,7 @@ from time import perf_counter
 import numpy as np
 
 import bioimage_cpp as bic
+from bioimage_cpp import _core
 
 
 def draw_ball(mask: np.ndarray, center: np.ndarray, radius: int) -> None:
@@ -85,6 +87,43 @@ def count_bic(result) -> tuple[int, int]:
     return len(vertices), len(edges)
 
 
+def compare_skeletons(reference, candidate, spacing):
+    """Return the FP32 acceptance metrics used by OPTIM_DIJKSTRA.md."""
+    ref_vertices, ref_edges, _ = reference
+    got_vertices, got_edges, _ = candidate
+
+    def degree_signature(edges, n_vertices):
+        degrees = np.bincount(edges.ravel().astype(np.int64), minlength=n_vertices)
+        return tuple(sorted(int(degree) for degree in degrees if degree != 2))
+
+    ref_voxels = ref_vertices / np.asarray(spacing, dtype=np.float64)
+    got_voxels = got_vertices / np.asarray(spacing, dtype=np.float64)
+    pairwise = np.linalg.norm(
+        ref_voxels[:, None, :] - got_voxels[None, :, :], axis=2
+    )
+    ref_to_got = pairwise.min(axis=1)
+    got_to_ref = pairwise.min(axis=0)
+
+    def total_length(vertices, edges):
+        if len(edges) == 0:
+            return 0.0
+        return float(
+            np.linalg.norm(vertices[edges[:, 0]] - vertices[edges[:, 1]], axis=1).sum()
+        )
+
+    ref_length = total_length(ref_vertices, ref_edges)
+    got_length = total_length(got_vertices, got_edges)
+    return {
+        "topology_match": degree_signature(ref_edges, len(ref_vertices))
+        == degree_signature(got_edges, len(got_vertices)),
+        "bidirectional_p95_voxels": float(
+            max(np.percentile(ref_to_got, 95), np.percentile(got_to_ref, 95))
+        ),
+        "hausdorff_voxels": float(max(ref_to_got.max(), got_to_ref.max())),
+        "relative_length_error": abs(got_length - ref_length) / max(ref_length, 1e-300),
+    }
+
+
 def kimimaro_call(mask, spacing, scale, constant, pdrf_scale, pdrf_exponent):
     import kimimaro
 
@@ -112,6 +151,19 @@ def kimimaro_call(mask, spacing, scale, constant, pdrf_scale, pdrf_exponent):
     return skeletons[1]
 
 
+def bic_backend_call(mask, spacing, parameters, backend):
+    """Call a development-only C++ backend without changing the public API."""
+    return _core._teasar_uint8_backend(
+        mask,
+        spacing,
+        parameters["scale"],
+        parameters["constant"],
+        parameters["pdrf_scale"],
+        parameters["pdrf_exponent"],
+        backend,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sizes = parser.add_mutually_exclusive_group()
@@ -120,6 +172,11 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--kimimaro", action="store_true")
+    parser.add_argument(
+        "--sequential-backends",
+        action="store_true",
+        help="compare dense FP64, compact on-the-fly/CSR FP64, and CSR FP32",
+    )
     parser.add_argument("--json", default="", help="optional JSON result path")
     args = parser.parse_args()
     if args.repeats < 1 or args.warmup < 0:
@@ -142,13 +199,30 @@ def main() -> int:
         "pdrf_scale": 100000.0,
         "pdrf_exponent": 4.0,
     }
-    backends = [
-        (
-            "bioimage-cpp",
-            lambda mask: bic.skeleton.teasar(mask, spacing=spacing, **parameters),
-            count_bic,
-        )
-    ]
+    if args.sequential_backends:
+        backends = [
+            (
+                backend,
+                lambda mask, backend=backend: bic_backend_call(
+                    mask, spacing, parameters, backend
+                ),
+                count_bic,
+            )
+            for backend in (
+                "dense-fp64",
+                "compact-on-the-fly-fp64",
+                "compact-csr-fp64",
+                "compact-csr-fp32",
+            )
+        ]
+    else:
+        backends = [
+            (
+                "bioimage-cpp",
+                lambda mask: bic.skeleton.teasar(mask, spacing=spacing, **parameters),
+                count_bic,
+            )
+        ]
     if args.kimimaro:
         backends.append(
             (
@@ -162,6 +236,7 @@ def main() -> int:
         )
 
     rows = []
+    quality_rows = []
     header = f"{'backend':>14} {'shape':>14} {'foreground':>11} {'vertices':>9} {'median ms':>11} {'min ms':>10}"
     print(header)
     print("-" * len(header))
@@ -193,7 +268,34 @@ def main() -> int:
                 f"{name:>14} {str(mask.shape):>14} {foreground:11d} {vertices:9d} "
                 f"{median_s * 1e3:11.2f} {min(samples) * 1e3:10.2f}"
             )
-        if len(case_rows) == 2:
+        if args.sequential_backends:
+            dense_result = results_by_backend["dense-fp64"]
+            for exact_backend in (
+                "compact-on-the-fly-fp64", "compact-csr-fp64"
+            ):
+                exact = all(
+                    np.array_equal(got, expected)
+                    for got, expected in zip(
+                        results_by_backend[exact_backend], dense_result
+                    )
+                )
+                print(f"  {exact_backend} exact dense parity: {exact}")
+            quality = compare_skeletons(
+                results_by_backend["compact-csr-fp64"],
+                results_by_backend["compact-csr-fp32"],
+                spacing,
+            )
+            quality_rows.append({"shape": list(mask.shape), **quality})
+            print(
+                "  FP32 quality: "
+                f"topology={quality['topology_match']} "
+                f"p95={quality['bidirectional_p95_voxels']:.3f} vox "
+                f"hausdorff={quality['hausdorff_voxels']:.3f} vox "
+                f"length_error={quality['relative_length_error']:.3%}"
+            )
+        if len(case_rows) == 2 and {row["backend"] for row in case_rows} == {
+            "bioimage-cpp", "kimimaro"
+        }:
             by_name = {row["backend"]: row for row in case_rows}
             ratio = (
                 by_name["bioimage-cpp"]["median_s"]
@@ -203,7 +305,11 @@ def main() -> int:
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as file:
-            json.dump({"repeats": args.repeats, "results": rows}, file, indent=2)
+            json.dump(
+                {"repeats": args.repeats, "results": rows, "quality": quality_rows},
+                file,
+                indent=2,
+            )
         print(f"wrote {args.json}", file=sys.stderr)
     return 0
 

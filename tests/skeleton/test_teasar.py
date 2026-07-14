@@ -2,6 +2,19 @@ import numpy as np
 import pytest
 
 import bioimage_cpp as bic
+from bioimage_cpp import _core
+
+
+def _teasar_backend(mask, backend, *, spacing=(1.5, 1.0, 1.0)):
+    return _core._teasar_uint8_backend(
+        np.ascontiguousarray(mask, dtype=np.uint8),
+        spacing,
+        1.5,
+        1.0,
+        100000.0,
+        4.0,
+        backend,
+    )
 
 
 def _assert_valid_tree(mask, vertices, edges, radii, spacing=(1.0, 1.0, 1.0)):
@@ -162,6 +175,33 @@ def test_output_is_deterministic():
     first = bic.skeleton.teasar(mask)
     second = bic.skeleton.teasar(mask)
     for got, expected in zip(first, second):
+        np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("spacing", [(1.0, 1.0, 1.0), (2.5, 1.25, 0.75)])
+def test_compact_fp64_backends_have_exact_dense_parity(spacing):
+    zz, yy, xx = np.indices((17, 21, 25))
+    first = ((zz - 8) ** 2 + (yy - 7) ** 2 <= 3**2) & (xx >= 3) & (xx <= 16)
+    second = ((zz - 8) ** 2 + (xx - 16) ** 2 <= 3**2) & (yy >= 7) & (yy <= 17)
+    mask = first | second
+    dense = _teasar_backend(mask, "dense-fp64", spacing=spacing)
+    for backend in ("compact-on-the-fly-fp64", "compact-csr-fp64"):
+        compact = _teasar_backend(mask, backend, spacing=spacing)
+        for got, expected in zip(compact, dense):
+            np.testing.assert_array_equal(got, expected)
+
+
+def test_public_teasar_uses_exact_compact_fp64_backend():
+    mask = np.zeros((9, 11, 10), dtype=np.uint8)
+    mask[4, 5, 1:5] = 1
+    for step in range(5):
+        mask[4, 5 - step, 4 + step] = 1
+        mask[4, 5 + step, 4 + step] = 1
+    public = bic.skeleton.teasar(
+        mask, spacing=(1.5, 1.0, 1.0), constant=1.0
+    )
+    compact = _teasar_backend(mask, "compact-on-the-fly-fp64")
+    for got, expected in zip(public, compact):
         np.testing.assert_array_equal(got, expected)
 
 

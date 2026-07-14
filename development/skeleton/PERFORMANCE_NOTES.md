@@ -233,6 +233,71 @@ intentionally change the graph. Land those separately with explicit expected
 topology/radius tests and rerun the kimimaro comparison without asserting
 vertex-for-vertex parity.
 
-Current full-suite baseline: `1126 passed`. Use the `256³` three-repeat median
+Pre-optimization full-suite baseline: `1126 passed`. Use the `256³` three-repeat median
 and peak RSS as the performance acceptance benchmark for the next optimization
 step.
+
+## Implemented compact-indexing results
+
+The sequential design matrix in `OPTIM_DIJKSTRA.md` was implemented and
+measured on 2026-07-14. Reproduce the size sweep and extended regimes with:
+
+```bash
+python development/skeleton/benchmark_teasar.py \
+    --large --sequential-backends --repeats 5
+python development/skeleton/benchmark_teasar_sequential.py --repeats 5
+```
+
+Compact IDs follow ascending full C-order indices. Compact FP64 therefore
+preserves dense FP64 heap tie-breaking and produced bitwise-identical vertices,
+edges, and radii for every size, spacing, density, and PDRF regime tested.
+
+Five-repeat end-to-end medians for the main anisotropic branching tubes:
+
+| backend | `128^3` | `192^3` | `256^3` |
+| --- | ---: | ---: | ---: |
+| optimized dense FP64 | 134.66 ms | 618.82 ms | 1.169 s |
+| compact on-the-fly FP64 | **74.04 ms** | **267.21 ms** | **686.58 ms** |
+| compact CSR FP64 | 75.19 ms | 284.57 ms | 730.72 ms |
+| compact CSR FP32 | 74.66 ms | 284.70 ms | 730.21 ms |
+
+CSR was 1.6%, 6.5%, and 6.4% slower than on-the-fly FP64 on these tiers. It
+was only 2.3% faster on the separate extremely sparse `192^3` case and was
+40% slower on the relatively dense `96^3` ball. It therefore failed the rule
+requiring a 5% win on both large tiers. The selected production backend is
+compact on-the-fly FP64: a temporary/full `uint32` lookup plus
+`compact_to_full`, with root, PDRF, heap state, predecessors, skeleton targets,
+and voxel-to-vertex data indexed only over foreground.
+
+On the `256^3` case, process peak RSS fell from 1,143,572 KiB in the original
+implementation to 266,536 KiB, a 76.7% reduction. The optimized dense backend
+measured 839,596 KiB in the same single-call process. Compact on-the-fly and
+CSR had effectively identical peaks because both must first construct the
+65.5 MiB full-to-compact lookup; CSR releases it only after its adjacency is
+built.
+
+Profile-build phase totals on `256^3` show where the improvement lands:
+
+| phase | optimized dense FP64 | selected compact FP64 |
+| --- | ---: | ---: |
+| compact-domain build | -- | 41.6 ms |
+| root Dijkstra (two fields) | 178.7 ms | 58.8 ms |
+| PDRF construction | 53.4 ms | 3.7 ms |
+| rail-path Dijkstra | 274.3 ms | 29.0 ms |
+| total TEASAR | 995.0 ms | 639.9 ms |
+
+The exact distance-to-boundary transform is now 77% of selected-backend time;
+combined root/path Dijkstra is 5.2x faster than the optimized dense backend and
+12.5x faster than the original recorded Dijkstra phases.
+
+### FP32 decision
+
+Internal FP32 was rejected. On `256^3`, CSR FP32 combined root/path Dijkstra
+was 113.9 ms versus 108.9 ms for CSR FP64, end-to-end time was slightly slower,
+and peak RSS was unchanged at about 266.5 MiB. It also failed the quality gate
+on `192^3`: the contracted degree signature changed, bidirectional 95th
+percentile distance was 2.0 voxels, Hausdorff distance was 7.07 voxels, and
+total physical length differed by 2.26%. Automatic TEASAR execution therefore
+remains FP64. Parallel shortest paths remain a separate follow-up.
+
+Final verification after selecting compact on-the-fly FP64: `1129 passed`.

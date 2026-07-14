@@ -5,11 +5,13 @@
 #include "bioimage_cpp/detail/indexed_heap.hxx"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -17,97 +19,97 @@
 
 namespace bioimage_cpp::distance {
 
-// Cost assigned to a directed grid edge u -> v.
 enum class DijkstraCostMode {
-    Physical,             // Euclidean length of the neighbour offset.
-    Node,                 // costs[v].
-    NodeTimesPhysical,    // costs[v] * physical edge length.
+    Physical,
+    Node,
+    NodeTimesPhysical,
 };
 
 struct DijkstraOptions {
-    int connectivity = 0;  // 0 means full connectivity (ndim).
-    // Empty means unit spacing. Must be empty for Node mode, where physical
-    // step lengths do not contribute to the edge cost.
+    int connectivity = 0;
     std::vector<double> spacing;
     DijkstraCostMode cost_mode = DijkstraCostMode::Physical;
 };
 
 struct DijkstraResult {
     std::vector<double> distances;
-    // Flat C-order predecessor indices. Empty when predecessors were not
-    // requested. Sources point to themselves; unreachable/background is -1.
     std::vector<std::int64_t> predecessors;
 };
 
 namespace detail_grid_dijkstra {
 
 inline constexpr double kInfinity = std::numeric_limits<double>::infinity();
+inline constexpr std::size_t kNoTarget = std::numeric_limits<std::size_t>::max();
+inline constexpr std::uint8_t kDiscovered = 1;
+inline constexpr std::uint8_t kSettled = 2;
+inline constexpr std::uint8_t kTarget = 4;
 
 struct Neighbor {
-    std::vector<std::ptrdiff_t> offset;
+    std::array<std::int8_t, 3> step{0, 0, 0};
+    std::ptrdiff_t delta = 0;
     double physical_length = 0.0;
 };
 
-inline void build_neighbors_recursive(
-    const std::size_t axis,
-    const int connectivity,
-    const std::vector<double> &spacing,
-    std::vector<std::ptrdiff_t> &offset,
-    int nonzero_axes,
-    std::vector<Neighbor> &neighbors
-) {
-    if (axis == spacing.size()) {
-        if (nonzero_axes == 0 || nonzero_axes > connectivity) {
-            return;
-        }
-        double squared_length = 0.0;
-        for (std::size_t d = 0; d < spacing.size(); ++d) {
-            const double step = static_cast<double>(offset[d]) * spacing[d];
-            squared_length += step * step;
-        }
-        neighbors.push_back({offset, std::sqrt(squared_length)});
-        return;
+struct HeapEntry {
+    double distance = 0.0;
+    std::size_t node = 0;
+};
+
+struct HeapGreater {
+    bool operator()(const HeapEntry &a, const HeapEntry &b) const noexcept {
+        return a.distance > b.distance ||
+            (a.distance == b.distance && a.node > b.node);
     }
+};
 
-    for (std::ptrdiff_t step = -1; step <= 1; ++step) {
-        offset[axis] = step;
-        build_neighbors_recursive(
-            axis + 1,
-            connectivity,
-            spacing,
-            offset,
-            nonzero_axes + (step != 0 ? 1 : 0),
-            neighbors
-        );
-    }
-}
-
-inline std::vector<Neighbor> build_neighbors(
-    const std::size_t ndim,
-    const int connectivity,
-    const std::vector<double> &spacing
-) {
-    std::vector<Neighbor> neighbors;
-    std::vector<std::ptrdiff_t> offset(ndim, 0);
-    build_neighbors_recursive(0, connectivity, spacing, offset, 0, neighbors);
-    return neighbors;
-}
-
-using HeapPriority = std::pair<double, std::size_t>;
-using MinHeap = bioimage_cpp::detail::DenseIndexedHeap<
-    HeapPriority,
-    std::greater<HeapPriority>
+using IndexedPriority = std::pair<double, std::size_t>;
+using IndexedMinHeap = bioimage_cpp::detail::DenseIndexedHeap<
+    IndexedPriority,
+    std::greater<IndexedPriority>
 >;
 
-struct SolveResult {
-    DijkstraResult result;
-    std::size_t reached_target = std::numeric_limits<std::size_t>::max();
+inline void lazy_push(std::vector<HeapEntry> &heap, const HeapEntry entry) {
+    heap.push_back(entry);
+    std::push_heap(heap.begin(), heap.end(), HeapGreater{});
+}
+
+inline HeapEntry lazy_pop(std::vector<HeapEntry> &heap) {
+    std::pop_heap(heap.begin(), heap.end(), HeapGreater{});
+    const auto entry = heap.back();
+    heap.pop_back();
+    return entry;
+}
+
+} // namespace detail_grid_dijkstra
+
+// Reusable scratch storage for dense grid Dijkstra calls. Capacities are kept
+// between invocations. A workspace is single-threaded and must not be used by
+// concurrent calls.
+struct DijkstraWorkspace {
+    std::vector<std::uint8_t> state;
+    std::vector<double> scratch_distances;
+    std::vector<std::int64_t> scratch_predecessors;
+    std::vector<std::size_t> touched;
+    std::vector<detail_grid_dijkstra::HeapEntry> lazy_heap;
+    detail_grid_dijkstra::IndexedMinHeap indexed_heap;
+    std::size_t indexed_capacity = 0;
+
+    std::array<detail_grid_dijkstra::Neighbor, 26> neighbors{};
+    std::size_t neighbor_count = 0;
+    std::vector<std::ptrdiff_t> prepared_shape;
+    std::vector<std::ptrdiff_t> strides;
+    std::vector<double> prepared_spacing;
+    int prepared_connectivity = -1;
+    bool state_is_clean = true;
 };
+
+namespace detail_grid_dijkstra {
 
 inline void validate_inputs(
     const ConstArrayView<std::uint8_t> &mask,
     DijkstraOptions &options,
-    const ConstArrayView<double> *costs
+    const ConstArrayView<double> *costs,
+    const bool validate_cost_values = true
 ) {
     const auto ndim = mask.shape.size();
     if (ndim != 2 && ndim != 3) {
@@ -115,8 +117,8 @@ inline void validate_inputs(
             "mask must have ndim 2 or 3, got ndim=" + std::to_string(ndim)
         );
     }
-    for (std::size_t axis = 0; axis < ndim; ++axis) {
-        if (mask.shape[axis] < 0) {
+    for (const auto extent : mask.shape) {
+        if (extent < 0) {
             throw std::invalid_argument("mask shape entries must be non-negative");
         }
     }
@@ -166,6 +168,9 @@ inline void validate_inputs(
     if (costs->shape != mask.shape) {
         throw std::invalid_argument("costs must have the same shape as mask");
     }
+    if (!validate_cost_values) {
+        return;
+    }
     const auto n = bioimage_cpp::detail::number_of_elements(mask.shape);
     for (std::size_t index = 0; index < n; ++index) {
         const double value = costs->data[index];
@@ -178,19 +183,14 @@ inline void validate_inputs(
     }
 }
 
-inline SolveResult solve(
+inline void validate_sources(
     const ConstArrayView<std::uint8_t> &mask,
-    const std::vector<std::size_t> &sources,
-    DijkstraOptions options,
-    const ConstArrayView<double> *costs,
-    const bool return_predecessors,
-    const std::vector<std::uint8_t> *target_mask = nullptr
+    const std::span<const std::size_t> sources
 ) {
-    validate_inputs(mask, options, costs);
-    const auto n = bioimage_cpp::detail::number_of_elements(mask.shape);
     if (sources.empty()) {
         throw std::invalid_argument("sources must contain at least one coordinate");
     }
+    const auto n = bioimage_cpp::detail::number_of_elements(mask.shape);
     for (const auto source : sources) {
         if (source >= n) {
             throw std::invalid_argument("source index is out of bounds");
@@ -199,118 +199,16 @@ inline SolveResult solve(
             throw std::invalid_argument("sources must lie inside the foreground mask");
         }
     }
-    if (target_mask != nullptr && target_mask->size() != n) {
-        throw std::invalid_argument("target mask must have the same number of elements as mask");
-    }
-
-    SolveResult solved;
-    solved.result.distances.assign(n, kInfinity);
-    if (return_predecessors) {
-        solved.result.predecessors.assign(n, -1);
-    }
-
-    std::vector<std::uint8_t> settled(n, 0);
-    MinHeap heap(n);
-    std::vector<std::size_t> ordered_sources = sources;
-    std::sort(ordered_sources.begin(), ordered_sources.end());
-    ordered_sources.erase(
-        std::unique(ordered_sources.begin(), ordered_sources.end()),
-        ordered_sources.end()
-    );
-    for (const auto source : ordered_sources) {
-        solved.result.distances[source] = 0.0;
-        if (return_predecessors) {
-            solved.result.predecessors[source] = static_cast<std::int64_t>(source);
-        }
-        heap.push(source, {0.0, source});
-    }
-
-    const auto strides = bioimage_cpp::detail::c_order_strides(mask.shape);
-    const auto neighbors = build_neighbors(
-        mask.shape.size(), options.connectivity, options.spacing
-    );
-
-    while (!heap.empty()) {
-        const auto entry = heap.pop();
-        const std::size_t node = entry.key;
-        if (settled[node] != 0) {
-            continue;
-        }
-        settled[node] = 1;
-
-        if (target_mask != nullptr && (*target_mask)[node] != 0) {
-            solved.reached_target = node;
-            break;
-        }
-
-        const double node_distance = solved.result.distances[node];
-        for (const auto &neighbor : neighbors) {
-            std::uint64_t target_u64 = 0;
-            if (!bioimage_cpp::detail::valid_offset_target(
-                    static_cast<std::uint64_t>(node),
-                    neighbor.offset,
-                    mask.shape,
-                    strides,
-                    target_u64
-                )) {
-                continue;
-            }
-            const auto target = static_cast<std::size_t>(target_u64);
-            if (mask.data[target] == 0 || settled[target] != 0) {
-                continue;
-            }
-
-            double edge_cost = neighbor.physical_length;
-            if (options.cost_mode == DijkstraCostMode::Node) {
-                edge_cost = costs->data[target];
-            } else if (options.cost_mode == DijkstraCostMode::NodeTimesPhysical) {
-                edge_cost = costs->data[target] * neighbor.physical_length;
-            }
-            const double candidate = node_distance + edge_cost;
-            if (candidate < solved.result.distances[target]) {
-                solved.result.distances[target] = candidate;
-                if (return_predecessors) {
-                    solved.result.predecessors[target] = static_cast<std::int64_t>(node);
-                }
-                heap.push_or_change(target, {candidate, target});
-            }
-        }
-    }
-
-    return solved;
 }
 
-} // namespace detail_grid_dijkstra
-
-// Full multi-source Dijkstra distance field on a 2D/3D mask. `sources` are
-// flat C-order indices. See DijkstraCostMode for the edge-cost contract.
-inline DijkstraResult dijkstra_distance_field(
+inline void validate_targets(
     const ConstArrayView<std::uint8_t> &mask,
-    const std::vector<std::size_t> &sources,
-    DijkstraOptions options = {},
-    const ConstArrayView<double> *costs = nullptr,
-    const bool return_predecessors = false
+    const std::span<const std::size_t> targets
 ) {
-    return detail_grid_dijkstra::solve(
-        mask, sources, std::move(options), costs, return_predecessors
-    ).result;
-}
-
-// Early-stopping one-source/multi-target Dijkstra. Returns flat C-order voxel
-// indices from source to the cheapest reached target. Equal target distances
-// are resolved by flat index because the heap priority includes the key.
-inline std::vector<std::size_t> dijkstra_path(
-    const ConstArrayView<std::uint8_t> &mask,
-    const std::size_t source,
-    const std::vector<std::size_t> &targets,
-    DijkstraOptions options = {},
-    const ConstArrayView<double> *costs = nullptr
-) {
-    const auto n = bioimage_cpp::detail::number_of_elements(mask.shape);
     if (targets.empty()) {
         throw std::invalid_argument("targets must contain at least one coordinate");
     }
-    std::vector<std::uint8_t> target_mask(n, 0);
+    const auto n = bioimage_cpp::detail::number_of_elements(mask.shape);
     for (const auto target : targets) {
         if (target >= n) {
             throw std::invalid_argument("target index is out of bounds");
@@ -318,34 +216,584 @@ inline std::vector<std::size_t> dijkstra_path(
         if (mask.data[target] == 0) {
             throw std::invalid_argument("targets must lie inside the foreground mask");
         }
-        target_mask[target] = 1;
+    }
+}
+
+inline void build_neighbors(
+    DijkstraWorkspace &workspace,
+    const std::vector<std::ptrdiff_t> &shape,
+    const int connectivity,
+    const std::vector<double> &spacing
+) {
+    workspace.neighbor_count = 0;
+    workspace.strides = bioimage_cpp::detail::c_order_strides(shape);
+    if (shape.size() == 2) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int nonzero = (dy != 0) + (dx != 0);
+                if (nonzero == 0 || nonzero > connectivity) {
+                    continue;
+                }
+                const double py = static_cast<double>(dy) * spacing[0];
+                const double px = static_cast<double>(dx) * spacing[1];
+                workspace.neighbors[workspace.neighbor_count++] = {
+                    {static_cast<std::int8_t>(dy), static_cast<std::int8_t>(dx), 0},
+                    static_cast<std::ptrdiff_t>(dy) * workspace.strides[0] + dx,
+                    std::sqrt(py * py + px * px),
+                };
+            }
+        }
+    } else {
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int nonzero = (dz != 0) + (dy != 0) + (dx != 0);
+                    if (nonzero == 0 || nonzero > connectivity) {
+                        continue;
+                    }
+                    const double pz = static_cast<double>(dz) * spacing[0];
+                    const double py = static_cast<double>(dy) * spacing[1];
+                    const double px = static_cast<double>(dx) * spacing[2];
+                    workspace.neighbors[workspace.neighbor_count++] = {
+                        {
+                            static_cast<std::int8_t>(dz),
+                            static_cast<std::int8_t>(dy),
+                            static_cast<std::int8_t>(dx),
+                        },
+                        static_cast<std::ptrdiff_t>(dz) * workspace.strides[0] +
+                            static_cast<std::ptrdiff_t>(dy) * workspace.strides[1] + dx,
+                        std::sqrt(pz * pz + py * py + px * px),
+                    };
+                }
+            }
+        }
+    }
+    workspace.prepared_shape = shape;
+    workspace.prepared_connectivity = connectivity;
+    workspace.prepared_spacing = spacing;
+}
+
+inline void prepare_geometry(
+    DijkstraWorkspace &workspace,
+    const std::vector<std::ptrdiff_t> &shape,
+    const DijkstraOptions &options
+) {
+    if (workspace.prepared_shape != shape ||
+        workspace.prepared_connectivity != options.connectivity ||
+        workspace.prepared_spacing != options.spacing) {
+        build_neighbors(workspace, shape, options.connectivity, options.spacing);
+    }
+}
+
+inline void ensure_state(DijkstraWorkspace &workspace, const std::size_t n) {
+    if (workspace.state.size() != n) {
+        workspace.state.assign(n, 0);
+        workspace.state_is_clean = true;
+    }
+}
+
+inline void begin_full(DijkstraWorkspace &workspace, const std::size_t n) {
+    ensure_state(workspace, n);
+    std::fill(workspace.state.begin(), workspace.state.end(), std::uint8_t{0});
+    workspace.state_is_clean = false;
+    workspace.touched.clear();
+    workspace.lazy_heap.clear();
+}
+
+inline void begin_path(DijkstraWorkspace &workspace, const std::size_t n) {
+    ensure_state(workspace, n);
+    if (!workspace.state_is_clean) {
+        std::fill(workspace.state.begin(), workspace.state.end(), std::uint8_t{0});
+        workspace.state_is_clean = true;
+    }
+    workspace.touched.clear();
+    workspace.lazy_heap.clear();
+}
+
+inline void prepare_indexed_heap(DijkstraWorkspace &workspace, const std::size_t n) {
+    if (workspace.indexed_capacity != n) {
+        workspace.indexed_heap.reset_capacity(n);
+        workspace.indexed_capacity = n;
+    } else {
+        workspace.indexed_heap.clear();
+    }
+}
+
+inline void cleanup_path_state(
+    DijkstraWorkspace &workspace,
+    const std::span<const std::size_t> targets
+) {
+    for (const auto node : workspace.touched) {
+        workspace.state[node] = 0;
+    }
+    for (const auto target : targets) {
+        workspace.state[target] = 0;
+    }
+    workspace.touched.clear();
+    workspace.lazy_heap.clear();
+    workspace.indexed_heap.clear();
+    workspace.state_is_clean = true;
+}
+
+template <int NDim, bool ZeroHalo, class Body>
+inline void for_each_neighbor(
+    const std::size_t node,
+    const ConstArrayView<std::uint8_t> &mask,
+    const DijkstraWorkspace &workspace,
+    const Body &body
+) {
+    if constexpr (ZeroHalo) {
+        for (std::size_t i = 0; i < workspace.neighbor_count; ++i) {
+            const auto &neighbor = workspace.neighbors[i];
+            const auto target = static_cast<std::size_t>(
+                static_cast<std::ptrdiff_t>(node) + neighbor.delta
+            );
+            body(target, neighbor.physical_length);
+        }
+        return;
     }
 
-    auto solved = detail_grid_dijkstra::solve(
-        mask, {source}, std::move(options), costs, true, &target_mask
+    if constexpr (NDim == 2) {
+        const auto width = static_cast<std::size_t>(mask.shape[1]);
+        const auto y = node / width;
+        const auto x = node - y * width;
+        const bool interior = y > 0 && y + 1 < static_cast<std::size_t>(mask.shape[0]) &&
+            x > 0 && x + 1 < width;
+        for (std::size_t i = 0; i < workspace.neighbor_count; ++i) {
+            const auto &neighbor = workspace.neighbors[i];
+            if (!interior && (
+                static_cast<std::size_t>(static_cast<std::ptrdiff_t>(y) + neighbor.step[0]) >=
+                    static_cast<std::size_t>(mask.shape[0]) ||
+                static_cast<std::size_t>(static_cast<std::ptrdiff_t>(x) + neighbor.step[1]) >=
+                    width)) {
+                continue;
+            }
+            const auto target = static_cast<std::size_t>(
+                static_cast<std::ptrdiff_t>(node) + neighbor.delta
+            );
+            body(target, neighbor.physical_length);
+        }
+    } else {
+        const auto height = static_cast<std::size_t>(mask.shape[1]);
+        const auto width = static_cast<std::size_t>(mask.shape[2]);
+        const auto slice = height * width;
+        const auto z = node / slice;
+        const auto remainder = node - z * slice;
+        const auto y = remainder / width;
+        const auto x = remainder - y * width;
+        const bool interior = z > 0 && z + 1 < static_cast<std::size_t>(mask.shape[0]) &&
+            y > 0 && y + 1 < height && x > 0 && x + 1 < width;
+        for (std::size_t i = 0; i < workspace.neighbor_count; ++i) {
+            const auto &neighbor = workspace.neighbors[i];
+            if (!interior && (
+                static_cast<std::size_t>(static_cast<std::ptrdiff_t>(z) + neighbor.step[0]) >=
+                    static_cast<std::size_t>(mask.shape[0]) ||
+                static_cast<std::size_t>(static_cast<std::ptrdiff_t>(y) + neighbor.step[1]) >=
+                    height ||
+                static_cast<std::size_t>(static_cast<std::ptrdiff_t>(x) + neighbor.step[2]) >=
+                    width)) {
+                continue;
+            }
+            const auto target = static_cast<std::size_t>(
+                static_cast<std::ptrdiff_t>(node) + neighbor.delta
+            );
+            body(target, neighbor.physical_length);
+        }
+    }
+}
+
+template <DijkstraCostMode Mode, int NDim, bool ZeroHalo>
+inline std::size_t run_lazy(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::span<const std::size_t> sources,
+    const ConstArrayView<double> *costs,
+    double *distances,
+    std::int64_t *predecessors,
+    DijkstraWorkspace &workspace,
+    const bool stop_at_target,
+    const bool track_touched
+) {
+    for (const auto source : sources) {
+        if ((workspace.state[source] & kDiscovered) != 0) {
+            continue;
+        }
+        workspace.state[source] |= kDiscovered;
+        if (track_touched) {
+            workspace.touched.push_back(source);
+        }
+        if (distances != nullptr) {
+            distances[source] = 0.0;
+        }
+        if (predecessors != nullptr) {
+            predecessors[source] = static_cast<std::int64_t>(source);
+        }
+        lazy_push(workspace.lazy_heap, {0.0, source});
+    }
+
+    while (!workspace.lazy_heap.empty()) {
+        const auto entry = lazy_pop(workspace.lazy_heap);
+        const auto node = entry.node;
+        if ((workspace.state[node] & kSettled) != 0) {
+            continue;
+        }
+        workspace.state[node] |= kSettled;
+        if (stop_at_target && (workspace.state[node] & kTarget) != 0) {
+            return node;
+        }
+
+        for_each_neighbor<NDim, ZeroHalo>(
+            node, mask, workspace,
+            [&](const std::size_t target, const double physical_length) {
+                if (mask.data[target] == 0 ||
+                    (workspace.state[target] & kSettled) != 0) {
+                    return;
+                }
+                if constexpr (Mode == DijkstraCostMode::Node) {
+                    // Every incoming edge to target has the same cost. The
+                    // first settled neighbor to discover it is therefore
+                    // optimal, so no decrease-key is possible.
+                    if ((workspace.state[target] & kDiscovered) != 0) {
+                        return;
+                    }
+                    const double candidate = entry.distance + costs->data[target];
+                    workspace.state[target] |= kDiscovered;
+                    if (track_touched) {
+                        workspace.touched.push_back(target);
+                    }
+                    if (distances != nullptr) {
+                        distances[target] = candidate;
+                    }
+                    if (predecessors != nullptr) {
+                        predecessors[target] = static_cast<std::int64_t>(node);
+                    }
+                    lazy_push(workspace.lazy_heap, {candidate, target});
+                } else {
+                    const double candidate = entry.distance + physical_length;
+                    const bool discovered =
+                        (workspace.state[target] & kDiscovered) != 0;
+                    if (discovered && !(candidate < distances[target])) {
+                        return;
+                    }
+                    if (!discovered) {
+                        workspace.state[target] |= kDiscovered;
+                        if (track_touched) {
+                            workspace.touched.push_back(target);
+                        }
+                    }
+                    distances[target] = candidate;
+                    if (predecessors != nullptr) {
+                        predecessors[target] = static_cast<std::int64_t>(node);
+                    }
+                    lazy_push(workspace.lazy_heap, {candidate, target});
+                }
+            }
+        );
+    }
+    return kNoTarget;
+}
+
+template <int NDim, bool ZeroHalo>
+inline std::size_t run_indexed(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::span<const std::size_t> sources,
+    const ConstArrayView<double> *costs,
+    double *distances,
+    std::int64_t *predecessors,
+    DijkstraWorkspace &workspace,
+    const bool stop_at_target,
+    const bool track_touched
+) {
+    for (const auto source : sources) {
+        if ((workspace.state[source] & kDiscovered) != 0) {
+            continue;
+        }
+        workspace.state[source] |= kDiscovered;
+        if (track_touched) {
+            workspace.touched.push_back(source);
+        }
+        distances[source] = 0.0;
+        if (predecessors != nullptr) {
+            predecessors[source] = static_cast<std::int64_t>(source);
+        }
+        workspace.indexed_heap.push(source, {0.0, source});
+    }
+
+    while (!workspace.indexed_heap.empty()) {
+        const auto entry = workspace.indexed_heap.pop();
+        const auto node = entry.key;
+        workspace.state[node] |= kSettled;
+        if (stop_at_target && (workspace.state[node] & kTarget) != 0) {
+            return node;
+        }
+        const double node_distance = entry.priority.first;
+        for_each_neighbor<NDim, ZeroHalo>(
+            node, mask, workspace,
+            [&](const std::size_t target, const double physical_length) {
+                if (mask.data[target] == 0 ||
+                    (workspace.state[target] & kSettled) != 0) {
+                    return;
+                }
+                const double candidate =
+                    node_distance + costs->data[target] * physical_length;
+                const bool discovered =
+                    (workspace.state[target] & kDiscovered) != 0;
+                if (discovered && !(candidate < distances[target])) {
+                    return;
+                }
+                if (!discovered) {
+                    workspace.state[target] |= kDiscovered;
+                    if (track_touched) {
+                        workspace.touched.push_back(target);
+                    }
+                }
+                distances[target] = candidate;
+                if (predecessors != nullptr) {
+                    predecessors[target] = static_cast<std::int64_t>(node);
+                }
+                workspace.indexed_heap.push_or_change(target, {candidate, target});
+            }
+        );
+    }
+    return kNoTarget;
+}
+
+template <DijkstraCostMode Mode>
+inline std::size_t dispatch_run(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::span<const std::size_t> sources,
+    const ConstArrayView<double> *costs,
+    double *distances,
+    std::int64_t *predecessors,
+    DijkstraWorkspace &workspace,
+    const bool stop_at_target,
+    const bool track_touched,
+    const bool zero_halo
+) {
+    const bool is_2d = mask.shape.size() == 2;
+    if constexpr (Mode == DijkstraCostMode::NodeTimesPhysical) {
+        if (is_2d) {
+            return zero_halo
+                ? run_indexed<2, true>(mask, sources, costs, distances, predecessors,
+                    workspace, stop_at_target, track_touched)
+                : run_indexed<2, false>(mask, sources, costs, distances, predecessors,
+                    workspace, stop_at_target, track_touched);
+        }
+        return zero_halo
+            ? run_indexed<3, true>(mask, sources, costs, distances, predecessors,
+                workspace, stop_at_target, track_touched)
+            : run_indexed<3, false>(mask, sources, costs, distances, predecessors,
+                workspace, stop_at_target, track_touched);
+    } else {
+        if (is_2d) {
+            return zero_halo
+                ? run_lazy<Mode, 2, true>(mask, sources, costs, distances, predecessors,
+                    workspace, stop_at_target, track_touched)
+                : run_lazy<Mode, 2, false>(mask, sources, costs, distances, predecessors,
+                    workspace, stop_at_target, track_touched);
+        }
+        return zero_halo
+            ? run_lazy<Mode, 3, true>(mask, sources, costs, distances, predecessors,
+                workspace, stop_at_target, track_touched)
+            : run_lazy<Mode, 3, false>(mask, sources, costs, distances, predecessors,
+                workspace, stop_at_target, track_touched);
+    }
+}
+
+inline std::size_t dispatch_mode(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::span<const std::size_t> sources,
+    const DijkstraOptions &options,
+    const ConstArrayView<double> *costs,
+    double *distances,
+    std::int64_t *predecessors,
+    DijkstraWorkspace &workspace,
+    const bool stop_at_target,
+    const bool track_touched,
+    const bool zero_halo
+) {
+    switch (options.cost_mode) {
+        case DijkstraCostMode::Physical:
+            return dispatch_run<DijkstraCostMode::Physical>(
+                mask, sources, costs, distances, predecessors, workspace,
+                stop_at_target, track_touched, zero_halo
+            );
+        case DijkstraCostMode::Node:
+            return dispatch_run<DijkstraCostMode::Node>(
+                mask, sources, costs, distances, predecessors, workspace,
+                stop_at_target, track_touched, zero_halo
+            );
+        case DijkstraCostMode::NodeTimesPhysical:
+            return dispatch_run<DijkstraCostMode::NodeTimesPhysical>(
+                mask, sources, costs, distances, predecessors, workspace,
+                stop_at_target, track_touched, zero_halo
+            );
+    }
+    throw std::invalid_argument("invalid Dijkstra cost mode");
+}
+
+inline void distance_field_impl(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::vector<std::size_t> &sources,
+    DijkstraOptions options,
+    const ConstArrayView<double> *costs,
+    const bool return_predecessors,
+    DijkstraWorkspace &workspace,
+    DijkstraResult &result,
+    const bool validate_cost_values,
+    const bool zero_halo
+) {
+    validate_inputs(mask, options, costs, validate_cost_values);
+    validate_sources(mask, sources);
+    prepare_geometry(workspace, mask.shape, options);
+    const auto n = bioimage_cpp::detail::number_of_elements(mask.shape);
+    begin_full(workspace, n);
+    if (options.cost_mode == DijkstraCostMode::NodeTimesPhysical) {
+        prepare_indexed_heap(workspace, n);
+    }
+
+    result.distances.assign(n, kInfinity);
+    if (return_predecessors) {
+        result.predecessors.assign(n, -1);
+    } else {
+        result.predecessors.clear();
+    }
+    std::vector<std::size_t> ordered_sources = sources;
+    std::sort(ordered_sources.begin(), ordered_sources.end());
+    ordered_sources.erase(
+        std::unique(ordered_sources.begin(), ordered_sources.end()),
+        ordered_sources.end()
     );
-    if (solved.reached_target == std::numeric_limits<std::size_t>::max()) {
+    dispatch_mode(
+        mask, ordered_sources, options, costs, result.distances.data(),
+        return_predecessors ? result.predecessors.data() : nullptr,
+        workspace, false, false, zero_halo
+    );
+}
+
+inline void path_impl(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::size_t source,
+    const std::vector<std::size_t> &targets,
+    DijkstraOptions options,
+    const ConstArrayView<double> *costs,
+    DijkstraWorkspace &workspace,
+    std::vector<std::size_t> &path,
+    const bool validate_cost_values,
+    const bool zero_halo
+) {
+    validate_inputs(mask, options, costs, validate_cost_values);
+    const std::array<std::size_t, 1> source_array{source};
+    validate_sources(mask, source_array);
+    validate_targets(mask, targets);
+    prepare_geometry(workspace, mask.shape, options);
+    const auto n = bioimage_cpp::detail::number_of_elements(mask.shape);
+    begin_path(workspace, n);
+    if (options.cost_mode == DijkstraCostMode::NodeTimesPhysical) {
+        prepare_indexed_heap(workspace, n);
+    }
+    workspace.scratch_predecessors.resize(n);
+    double *distances = nullptr;
+    if (options.cost_mode != DijkstraCostMode::Node) {
+        workspace.scratch_distances.resize(n);
+        distances = workspace.scratch_distances.data();
+    }
+    for (const auto target : targets) {
+        workspace.state[target] |= kTarget;
+    }
+
+    const auto reached = dispatch_mode(
+        mask, source_array, options, costs, distances,
+        workspace.scratch_predecessors.data(), workspace,
+        true, true, zero_halo
+    );
+    if (reached == kNoTarget) {
+        cleanup_path_state(workspace, targets);
         throw std::runtime_error("no target is reachable from source");
     }
 
-    std::vector<std::size_t> reverse_path;
-    std::size_t node = solved.reached_target;
+    path.clear();
+    auto node = reached;
     while (true) {
-        reverse_path.push_back(node);
-        const auto parent = solved.result.predecessors[node];
+        path.push_back(node);
+        const auto parent = workspace.scratch_predecessors[node];
         if (parent < 0) {
+            cleanup_path_state(workspace, targets);
             throw std::runtime_error("invalid predecessor chain while reconstructing path");
         }
         if (static_cast<std::size_t>(parent) == node) {
             break;
         }
         node = static_cast<std::size_t>(parent);
-        if (reverse_path.size() > n) {
+        if (path.size() > n) {
+            cleanup_path_state(workspace, targets);
             throw std::runtime_error("cycle in predecessor chain while reconstructing path");
         }
     }
-    std::reverse(reverse_path.begin(), reverse_path.end());
-    return reverse_path;
+    std::reverse(path.begin(), path.end());
+    cleanup_path_state(workspace, targets);
+}
+
+} // namespace detail_grid_dijkstra
+
+inline void dijkstra_distance_field(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::vector<std::size_t> &sources,
+    DijkstraWorkspace &workspace,
+    DijkstraResult &result,
+    DijkstraOptions options = {},
+    const ConstArrayView<double> *costs = nullptr,
+    const bool return_predecessors = false
+) {
+    detail_grid_dijkstra::distance_field_impl(
+        mask, sources, std::move(options), costs, return_predecessors,
+        workspace, result, true, false
+    );
+}
+
+inline DijkstraResult dijkstra_distance_field(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::vector<std::size_t> &sources,
+    DijkstraOptions options = {},
+    const ConstArrayView<double> *costs = nullptr,
+    const bool return_predecessors = false
+) {
+    DijkstraWorkspace workspace;
+    DijkstraResult result;
+    dijkstra_distance_field(
+        mask, sources, workspace, result, std::move(options), costs,
+        return_predecessors
+    );
+    return result;
+}
+
+inline void dijkstra_path(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::size_t source,
+    const std::vector<std::size_t> &targets,
+    DijkstraWorkspace &workspace,
+    std::vector<std::size_t> &path,
+    DijkstraOptions options = {},
+    const ConstArrayView<double> *costs = nullptr
+) {
+    detail_grid_dijkstra::path_impl(
+        mask, source, targets, std::move(options), costs, workspace, path,
+        true, false
+    );
+}
+
+inline std::vector<std::size_t> dijkstra_path(
+    const ConstArrayView<std::uint8_t> &mask,
+    const std::size_t source,
+    const std::vector<std::size_t> &targets,
+    DijkstraOptions options = {},
+    const ConstArrayView<double> *costs = nullptr
+) {
+    DijkstraWorkspace workspace;
+    std::vector<std::size_t> path;
+    dijkstra_path(
+        mask, source, targets, workspace, path, std::move(options), costs
+    );
+    return path;
 }
 
 } // namespace bioimage_cpp::distance
