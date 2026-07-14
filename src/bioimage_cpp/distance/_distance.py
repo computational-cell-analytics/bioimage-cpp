@@ -24,6 +24,8 @@ def _normalize_sampling(
     sampling: float | Sequence[float] | None,
     ndim: int,
     function: str,
+    *,
+    name: str = "sampling",
 ) -> list[float]:
     if sampling is None:
         values = [1.0] * ndim
@@ -33,15 +35,15 @@ def _normalize_sampling(
         values = [float(value) for value in sampling]
         if len(values) != ndim:
             raise ValueError(
-                f"{function}: sampling must be a scalar or a sequence of length "
+                f"{function}: {name} must be a scalar or a sequence of length "
                 f"{ndim}, got length {len(values)}"
             )
 
     for axis, value in enumerate(values):
         if not np.isfinite(value) or value <= 0.0:
             raise ValueError(
-                f"{function}: sampling values must be positive and finite, "
-                f"got sampling[{axis}]={value}"
+                f"{function}: {name} values must be positive and finite, "
+                f"got {name}[{axis}]={value}"
             )
     return values
 

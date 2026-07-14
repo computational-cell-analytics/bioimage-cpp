@@ -9,6 +9,8 @@ Image processing and segmentation functionality in C++ with light-weight python 
 
 The package includes dependency-free triangle-mesh extraction from 3D volumes
 and segmentation masks, plus Laplacian mesh smoothing, under `bioimage_cpp.mesh`.
+It also includes exact masked-grid Dijkstra paths under `bioimage_cpp.distance`
+and binary 3D TEASAR skeletonization under `bioimage_cpp.skeleton`.
 
 The `bioimage_cpp` python library can be installed via pip:
 ```bash

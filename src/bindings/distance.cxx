@@ -2,6 +2,7 @@
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/distance/distance_transform.hxx"
+#include "bioimage_cpp/distance/grid_dijkstra.hxx"
 #include "bioimage_cpp/distance/non_maximum_distance_suppression.hxx"
 #include "bioimage_cpp/distance/geodesic_mask.hxx"
 #include "bioimage_cpp/distance/geodesic_mesh.hxx"
@@ -28,6 +29,7 @@ using UInt8Input = nb::ndarray<nb::numpy, const std::uint8_t, nb::c_contig>;
 using FloatArray = nb::ndarray<nb::numpy, float, nb::c_contig>;
 using Int32Array = nb::ndarray<nb::numpy, std::int32_t, nb::c_contig>;
 using Int64Input = nb::ndarray<nb::numpy, const std::int64_t, nb::c_contig>;
+using Int64Array = nb::ndarray<nb::numpy, std::int64_t, nb::c_contig>;
 using DoubleInput = nb::ndarray<nb::numpy, const double, nb::c_contig>;
 using DoubleArray = nb::ndarray<nb::numpy, double, nb::c_contig>;
 
@@ -271,9 +273,7 @@ nb::ndarray<nb::numpy, PointT, nb::c_contig> non_maximum_distance_suppression_im
 }
 
 // ---------------------------------------------------------------------------
-// Geodesic distances (masks + meshes). Interface only for now: the core
-// functions throw "not yet implemented" until the solvers land, but the full
-// Python -> binding -> core path is wired and validated here.
+// Grid Dijkstra and geodesic distances (masks + meshes).
 // ---------------------------------------------------------------------------
 
 // Build a ConstArrayView<double> over an optional speed ndarray, checking its
@@ -285,15 +285,137 @@ struct OptionalSpeed {
 
 OptionalSpeed make_optional_speed(
     const std::optional<DoubleInput> &speed,
-    const std::vector<std::ptrdiff_t> &shape
+    const std::vector<std::ptrdiff_t> &shape,
+    const char *name = "speed"
 ) {
     OptionalSpeed result;
     if (speed.has_value()) {
-        check_buffer_shape("speed", ndarray_shape(*speed), size_t_shape(shape));
+        check_buffer_shape(name, ndarray_shape(*speed), size_t_shape(shape));
         result.view = ConstArrayView<double>{speed->data(), shape, {}};
         result.ptr = &result.view;
     }
     return result;
+}
+
+distance::DijkstraCostMode dijkstra_cost_mode_from_int(const int value) {
+    switch (value) {
+        case 0:
+            return distance::DijkstraCostMode::Physical;
+        case 1:
+            return distance::DijkstraCostMode::Node;
+        case 2:
+            return distance::DijkstraCostMode::NodeTimesPhysical;
+        default:
+            throw std::invalid_argument("invalid Dijkstra cost mode");
+    }
+}
+
+nb::tuple dijkstra_distance_field_mask(
+    UInt8Input mask,
+    Int64Input sources,
+    const int connectivity,
+    const std::vector<double> &spacing,
+    std::optional<DoubleInput> costs,
+    const int cost_mode,
+    const bool return_predecessors
+) {
+    if (sources.ndim() != 2 || sources.shape(1) != mask.ndim()) {
+        throw std::invalid_argument(
+            "sources must have shape (n_sources, mask.ndim), got ndim=" +
+            std::to_string(sources.ndim())
+        );
+    }
+    const auto shape = ndarray_shape(mask);
+    const auto strides = bioimage_cpp::detail::c_order_strides(shape);
+    ConstArrayView<std::int64_t> sources_view{
+        sources.data(), ndarray_shape(sources), {}
+    };
+    const auto source_indices = distance::detail::linear_indices_from_coords(
+        sources_view, shape, strides, "sources"
+    );
+
+    ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
+    const OptionalSpeed costs_opt = make_optional_speed(costs, shape, "costs");
+    distance::DijkstraResult result;
+    {
+        nb::gil_scoped_release release;
+        result = distance::dijkstra_distance_field(
+            mask_view,
+            source_indices,
+            {connectivity, spacing, dijkstra_cost_mode_from_int(cost_mode)},
+            costs_opt.ptr,
+            return_predecessors
+        );
+    }
+
+    auto distances_array = make_array<double, DoubleArray>(size_t_shape(shape));
+    std::copy(result.distances.begin(), result.distances.end(), distances_array.data());
+
+    nb::object predecessors_result = nb::none();
+    if (return_predecessors) {
+        auto predecessors_array = make_array<std::int64_t, Int64Array>(size_t_shape(shape));
+        std::copy(
+            result.predecessors.begin(),
+            result.predecessors.end(),
+            predecessors_array.data()
+        );
+        predecessors_result = nb::cast(predecessors_array);
+    }
+    return nb::make_tuple(nb::cast(distances_array), predecessors_result);
+}
+
+Int64Array dijkstra_path_mask(
+    UInt8Input mask,
+    Int64Input source,
+    Int64Input targets,
+    const int connectivity,
+    const std::vector<double> &spacing,
+    std::optional<DoubleInput> costs,
+    const int cost_mode
+) {
+    if (source.ndim() != 2 || source.shape(0) != 1 || source.shape(1) != mask.ndim()) {
+        throw std::invalid_argument("source must have shape (1, mask.ndim)");
+    }
+    if (targets.ndim() != 2 || targets.shape(1) != mask.ndim()) {
+        throw std::invalid_argument("targets must have shape (n_targets, mask.ndim)");
+    }
+    const auto shape = ndarray_shape(mask);
+    const auto strides = bioimage_cpp::detail::c_order_strides(shape);
+    ConstArrayView<std::int64_t> source_view{source.data(), ndarray_shape(source), {}};
+    ConstArrayView<std::int64_t> targets_view{targets.data(), ndarray_shape(targets), {}};
+    const auto source_indices = distance::detail::linear_indices_from_coords(
+        source_view, shape, strides, "source"
+    );
+    const auto target_indices = distance::detail::linear_indices_from_coords(
+        targets_view, shape, strides, "targets"
+    );
+
+    ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
+    const OptionalSpeed costs_opt = make_optional_speed(costs, shape, "costs");
+    std::vector<std::size_t> path;
+    {
+        nb::gil_scoped_release release;
+        path = distance::dijkstra_path(
+            mask_view,
+            source_indices.front(),
+            target_indices,
+            {connectivity, spacing, dijkstra_cost_mode_from_int(cost_mode)},
+            costs_opt.ptr
+        );
+    }
+
+    const auto ndim = shape.size();
+    auto output = make_array<std::int64_t, Int64Array>({path.size(), ndim});
+    std::vector<std::ptrdiff_t> coords(ndim, 0);
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        bioimage_cpp::detail::coords_from_index(
+            static_cast<std::uint64_t>(path[i]), strides, ndim, coords.data()
+        );
+        for (std::size_t axis = 0; axis < ndim; ++axis) {
+            output.data()[i * ndim + axis] = static_cast<std::int64_t>(coords[axis]);
+        }
+    }
+    return output;
 }
 
 nb::tuple geodesic_distance_field_mask(
@@ -550,6 +672,23 @@ void bind_distance(nb::module_ &m) {
         "_non_maximum_distance_suppression_uint32",
         &non_maximum_distance_suppression_impl<std::uint32_t>,
         nb::arg("distance_map"), nb::arg("points"), nb::arg("n_threads"), nms_doc
+    );
+
+    m.def(
+        "_dijkstra_distance_field_mask",
+        &dijkstra_distance_field_mask,
+        nb::arg("mask"), nb::arg("sources"), nb::arg("connectivity"),
+        nb::arg("spacing"), nb::arg("costs").none(), nb::arg("cost_mode"),
+        nb::arg("return_predecessors"),
+        "Grid Dijkstra distance field. Returns (distances, predecessors-or-None)."
+    );
+    m.def(
+        "_dijkstra_path_mask",
+        &dijkstra_path_mask,
+        nb::arg("mask"), nb::arg("source"), nb::arg("targets"),
+        nb::arg("connectivity"), nb::arg("spacing"), nb::arg("costs").none(),
+        nb::arg("cost_mode"),
+        "Early-stopping one-source/multi-target grid Dijkstra path."
     );
 
     m.def(

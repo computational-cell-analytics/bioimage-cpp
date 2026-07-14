@@ -31,3 +31,5 @@ venv/
 
 CLAUDE.md
 pypi-release.txt
+
+.old

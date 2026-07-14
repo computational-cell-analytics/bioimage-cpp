@@ -5,6 +5,7 @@ from ._distance import (
     non_maximum_distance_suppression,
     vector_difference_transform,
 )
+from ._dijkstra import dijkstra_distance_field, dijkstra_path
 from ._geodesic import (
     geodesic_distance_field,
     geodesic_distance_field_mesh,
@@ -15,6 +16,8 @@ from ._geodesic import (
 
 __all__ = [
     "distance_transform",
+    "dijkstra_distance_field",
+    "dijkstra_path",
     "non_maximum_distance_suppression",
     "vector_difference_transform",
     "geodesic_distance_field",
