@@ -28,6 +28,7 @@ venv/
 # Data
 *.h5
 *.npz
+*.mrc
 
 CLAUDE.md
 pypi-release.txt

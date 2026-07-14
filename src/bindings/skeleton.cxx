@@ -43,7 +43,8 @@ nb::tuple teasar_uint8_impl(
     const double constant,
     const double pdrf_scale,
     const double pdrf_exponent,
-    const skeleton::TeasarBackend backend
+    const skeleton::TeasarBackend backend,
+    const std::size_t n_threads
 ) {
     if (spacing.size() != 3) {
         throw std::invalid_argument("spacing must contain exactly three values");
@@ -62,7 +63,8 @@ nb::tuple teasar_uint8_impl(
              scale,
              constant,
              pdrf_scale,
-             pdrf_exponent},
+             pdrf_exponent,
+             n_threads},
             backend
         );
     }
@@ -91,11 +93,12 @@ nb::tuple teasar_uint8(
     const double scale,
     const double constant,
     const double pdrf_scale,
-    const double pdrf_exponent
+    const double pdrf_exponent,
+    const std::size_t n_threads
 ) {
     return teasar_uint8_impl(
         mask, spacing, scale, constant, pdrf_scale, pdrf_exponent,
-        skeleton::TeasarBackend::Auto
+        skeleton::TeasarBackend::Auto, n_threads
     );
 }
 
@@ -106,7 +109,8 @@ nb::tuple teasar_uint8_backend(
     const double constant,
     const double pdrf_scale,
     const double pdrf_exponent,
-    const std::string &backend
+    const std::string &backend,
+    const std::size_t n_threads
 ) {
     skeleton::TeasarBackend selected;
     if (backend == "dense-fp64") {
@@ -121,7 +125,8 @@ nb::tuple teasar_uint8_backend(
         throw std::invalid_argument("unknown TEASAR development backend: " + backend);
     }
     return teasar_uint8_impl(
-        mask, spacing, scale, constant, pdrf_scale, pdrf_exponent, selected
+        mask, spacing, scale, constant, pdrf_scale, pdrf_exponent, selected,
+        n_threads
     );
 }
 
@@ -137,6 +142,7 @@ void bind_skeleton(nb::module_ &m) {
         nb::arg("constant"),
         nb::arg("pdrf_scale"),
         nb::arg("pdrf_exponent"),
+        nb::arg("n_threads"),
         "Core binary 3D TEASAR skeletonization."
     );
     m.def(
@@ -149,6 +155,7 @@ void bind_skeleton(nb::module_ &m) {
         nb::arg("pdrf_scale"),
         nb::arg("pdrf_exponent"),
         nb::arg("backend"),
+        nb::arg("n_threads") = 1,
         "Development-only TEASAR backend selector."
     );
 }

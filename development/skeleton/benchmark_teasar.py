@@ -151,7 +151,7 @@ def kimimaro_call(mask, spacing, scale, constant, pdrf_scale, pdrf_exponent):
     return skeletons[1]
 
 
-def bic_backend_call(mask, spacing, parameters, backend):
+def bic_backend_call(mask, spacing, parameters, backend, number_of_threads=1):
     """Call a development-only C++ backend without changing the public API."""
     return _core._teasar_uint8_backend(
         mask,
@@ -161,6 +161,7 @@ def bic_backend_call(mask, spacing, parameters, backend):
         parameters["pdrf_scale"],
         parameters["pdrf_exponent"],
         backend,
+        number_of_threads,
     )
 
 
@@ -178,6 +179,10 @@ def main() -> int:
         help="compare dense FP64, compact on-the-fly/CSR FP64, and CSR FP32",
     )
     parser.add_argument("--json", default="", help="optional JSON result path")
+    parser.add_argument(
+        "--threads", type=int, nargs="+", default=[1],
+        help="public TEASAR thread counts (0 uses hardware concurrency)",
+    )
     args = parser.parse_args()
     if args.repeats < 1 or args.warmup < 0:
         parser.error("--repeats must be >= 1 and --warmup must be >= 0")
@@ -218,10 +223,16 @@ def main() -> int:
     else:
         backends = [
             (
-                "bioimage-cpp",
-                lambda mask: bic.skeleton.teasar(mask, spacing=spacing, **parameters),
+                f"bioimage-cpp/t{number_of_threads}",
+                lambda mask, number_of_threads=number_of_threads: bic.skeleton.teasar(
+                    mask,
+                    spacing=spacing,
+                    number_of_threads=number_of_threads,
+                    **parameters,
+                ),
                 count_bic,
             )
+            for number_of_threads in args.threads
         ]
     if args.kimimaro:
         backends.append(
@@ -293,12 +304,12 @@ def main() -> int:
                 f"hausdorff={quality['hausdorff_voxels']:.3f} vox "
                 f"length_error={quality['relative_length_error']:.3%}"
             )
-        if len(case_rows) == 2 and {row["backend"] for row in case_rows} == {
-            "bioimage-cpp", "kimimaro"
-        }:
+        if len(args.threads) == 1 and len(case_rows) == 2 and {
+            row["backend"] for row in case_rows
+        } == {f"bioimage-cpp/t{args.threads[0]}", "kimimaro"}:
             by_name = {row["backend"]: row for row in case_rows}
             ratio = (
-                by_name["bioimage-cpp"]["median_s"]
+                by_name[f"bioimage-cpp/t{args.threads[0]}"]["median_s"]
                 / by_name["kimimaro"]["median_s"]
             )
             print(f"{'bioimage-cpp / kimimaro':>54}: {ratio:.2f}x")

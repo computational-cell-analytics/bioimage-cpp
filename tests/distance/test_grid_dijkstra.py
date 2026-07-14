@@ -252,3 +252,83 @@ def test_non_contiguous_mask_and_costs_are_accepted():
     )
     assert result.shape == mask.shape
     assert np.all(np.isfinite(result))
+
+
+@pytest.mark.parametrize("mode", ["physical", "node", "node_times_physical"])
+def test_threaded_fields_match_sequential_exactly(mode):
+    shape = (24, 40, 40)  # Above the parallel-backend workload threshold.
+    rng = np.random.default_rng(123)
+    mask = np.ones(shape, dtype=bool)
+    mask[:, 20, 4:36] = False
+    mask[:, 20, 18:22] = True
+    costs = rng.uniform(0.0, 4.0, size=shape)
+    yy, xx = np.indices(shape[1:])
+    sources = np.stack(
+        [np.zeros(yy.size, dtype=np.int64), yy.ravel(), xx.ravel()], axis=1
+    )
+    sources = sources[mask[0].ravel()]
+    kwargs = {"cost_mode": mode}
+    if mode != "physical":
+        kwargs["costs"] = costs
+    if mode != "node":
+        kwargs["spacing"] = (1.5, 0.75, 1.25)
+
+    expected = bic.distance.dijkstra_distance_field(
+        mask, sources, number_of_threads=1, **kwargs
+    )
+    got, predecessors = bic.distance.dijkstra_distance_field(
+        mask,
+        sources,
+        number_of_threads=4,
+        return_predecessors=True,
+        **kwargs,
+    )
+    got_two, predecessors_two = bic.distance.dijkstra_distance_field(
+        mask,
+        sources,
+        number_of_threads=2,
+        return_predecessors=True,
+        **kwargs,
+    )
+    np.testing.assert_array_equal(got, expected)
+    np.testing.assert_array_equal(got_two, got)
+    np.testing.assert_array_equal(predecessors_two, predecessors)
+
+    for coordinate in ((22, 38, 38), (8, 10, 30), (20, 30, 4)):
+        node = np.ravel_multi_index(coordinate, shape)
+        steps = 0
+        while int(predecessors.flat[node]) != node:
+            parent = int(predecessors.flat[node])
+            assert parent >= 0
+            node = parent
+            steps += 1
+            assert steps <= np.prod(shape)
+        assert np.unravel_index(node, shape)[0] == 0
+
+
+def test_threaded_zero_cost_path_is_deterministic_across_thread_counts():
+    mask = np.ones((24, 40, 40), dtype=bool)
+    costs = np.zeros(mask.shape, dtype=np.float64)
+    kwargs = {
+        "costs": costs,
+        "cost_mode": "node_times_physical",
+        "number_of_threads": 2,
+    }
+    first = bic.distance.dijkstra_path(
+        mask, [23, 39, 39], [[0, 0, 0], [0, 39, 39]], **kwargs
+    )
+    second = bic.distance.dijkstra_path(
+        mask,
+        [23, 39, 39],
+        [[0, 0, 0], [0, 39, 39]],
+        **{**kwargs, "number_of_threads": 4},
+    )
+    np.testing.assert_array_equal(first, second)
+    np.testing.assert_array_equal(first[-1], [0, 0, 0])
+
+
+def test_rejects_negative_dijkstra_thread_count():
+    with pytest.raises(ValueError, match="number_of_threads"):
+        bic.distance.dijkstra_distance_field(
+            np.ones((3, 3), dtype=bool), [0, 0], number_of_threads=-1
+        )

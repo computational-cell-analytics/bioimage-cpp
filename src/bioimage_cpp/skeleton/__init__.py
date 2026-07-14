@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from .. import _core
-from ..distance._distance import _as_binary_input, _normalize_sampling
+from ..distance._distance import _as_binary_input, _normalize_sampling, _normalize_threads
 
 
 def _finite_parameter(value, name: str, *, positive: bool) -> float:
@@ -30,6 +30,7 @@ def teasar(
     constant: float = 0.0,
     pdrf_scale: float = 100000.0,
     pdrf_exponent: float = 4.0,
+    number_of_threads: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Skeletonize one 26-connected binary object with 3D TEASAR.
 
@@ -54,6 +55,9 @@ def teasar(
     pdrf_scale, pdrf_exponent:
         Scale and exponent of the boundary-avoidance term in the penalized
         distance-from-root field.
+    number_of_threads:
+        Shared thread budget for the distance transform and compact Dijkstra
+        solves. ``0`` uses hardware concurrency; default ``1`` is sequential.
 
     Returns
     -------
@@ -81,6 +85,7 @@ def teasar(
     pdrf_exponent_value = _finite_parameter(
         pdrf_exponent, "pdrf_exponent", positive=True
     )
+    n_threads = _normalize_threads(number_of_threads, function)
     return _core._teasar_uint8(
         binary,
         spacing_values,
@@ -88,6 +93,7 @@ def teasar(
         constant_value,
         pdrf_scale_value,
         pdrf_exponent_value,
+        n_threads,
     )
 
 

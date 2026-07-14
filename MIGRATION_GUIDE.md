@@ -2355,6 +2355,7 @@ field = bic.distance.dijkstra_distance_field(
     sources,                         # (N, mask.ndim) integer coordinates
     connectivity=None,              # full connectivity by default
     spacing=(2.0, 1.0, 1.0),
+    number_of_threads=4,
 )
 
 # Flat C-order predecessor indices can be requested with the same solve.
@@ -2379,7 +2380,13 @@ All costs must be finite and non-negative. Distances are `float64`; background
 and unreachable voxels are `+inf`. Predecessors are `int64` with the mask shape:
 sources point to their own flat C-order index and background/unreachable voxels
 contain `-1`. Paths are `int64` NumPy-axis-order coordinates from the source to
-the selected target. Ties are deterministic and use flat C-order indices.
+the selected target. Target ties are deterministic and use flat C-order indices.
+`number_of_threads=1` retains the specialized sequential heaps; `0` uses
+hardware concurrency. Threaded solves use exact FP64 delta stepping: distance
+fields are bitwise-identical to the sequential result, while an equal-cost
+predecessor or path may differ from the sequential heap but remains deterministic.
+Small workloads and underperforming cost modes automatically retain the
+sequential implementation.
 
 This Dijkstra field is deliberately distinct from
 `geodesic_distance_field` below. Dijkstra is exact for the chosen 4/8- or
@@ -2526,6 +2533,7 @@ vertices, edges, radii = bic.skeleton.teasar(
     constant=0,
     pdrf_scale=100000,
     pdrf_exponent=4,
+    number_of_threads=4,
 )
 ```
 
@@ -2548,10 +2556,11 @@ Important differences and current scope:
   cross-section metadata, or postprocessing heuristics. These differences can
   change branch positions and vertex counts, so output is not expected to be
   vertex-for-vertex identical to kimimaro.
-- The C++ core is dependency-free and single-threaded. TEASAR uses an internal
-  FP64 compact-foreground Dijkstra backend for root fields and penalized rail
-  paths. Compact IDs retain C-order tie-breaking, so it is bitwise identical to
-  the dense public grid solver on the tested TEASAR workloads while avoiding
+- The C++ core remains dependency-free. `number_of_threads=1` is the default;
+  `0` uses hardware concurrency. One thread budget is shared by the exact
+  distance transform and the internal FP64 compact-foreground Dijkstra backend.
+  Dependent root sweeps and rails remain ordered, while sufficiently large
+  shortest-path wavefronts use deterministic delta stepping. Compact IDs avoid
   full-volume shortest-path fields. The public Dijkstra functions remain dense
   and exact FP64.
 

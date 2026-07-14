@@ -64,7 +64,7 @@ def time_call(function, repeats: int, warmup: int) -> list[float]:
     return samples
 
 
-def build_cases(shape: tuple[int, ...], include_geodesic: bool):
+def build_cases(shape: tuple[int, ...], include_geodesic: bool, number_of_threads: int):
     mask = make_mask(shape)
     source = np.full(len(shape), 2, dtype=np.int64)
     target = np.asarray(shape, dtype=np.int64) - 3
@@ -79,25 +79,48 @@ def build_cases(shape: tuple[int, ...], include_geodesic: bool):
         (
             "dijkstra/physical-field",
             lambda: bic.distance.dijkstra_distance_field(
-                mask, source, spacing=spacing
+                mask, source, spacing=spacing, number_of_threads=number_of_threads
             ),
         ),
         (
             "dijkstra/field+parents",
             lambda: bic.distance.dijkstra_distance_field(
-                mask, source, spacing=spacing, return_predecessors=True
+                mask,
+                source,
+                spacing=spacing,
+                return_predecessors=True,
+                number_of_threads=number_of_threads,
             ),
         ),
         (
             "dijkstra/node-field",
             lambda: bic.distance.dijkstra_distance_field(
-                mask, source, costs=costs, cost_mode="node"
+                mask,
+                source,
+                costs=costs,
+                cost_mode="node",
+                number_of_threads=number_of_threads,
+            ),
+        ),
+        (
+            "dijkstra/node-times-physical-field",
+            lambda: bic.distance.dijkstra_distance_field(
+                mask,
+                source,
+                costs=costs,
+                cost_mode="node_times_physical",
+                spacing=spacing,
+                number_of_threads=number_of_threads,
             ),
         ),
         (
             "dijkstra/early-path",
             lambda: bic.distance.dijkstra_path(
-                mask, source, target, spacing=spacing
+                mask,
+                source,
+                target,
+                spacing=spacing,
+                number_of_threads=number_of_threads,
             ),
         ),
     ]
@@ -106,7 +129,10 @@ def build_cases(shape: tuple[int, ...], include_geodesic: bool):
             (
                 "geodesic/FMM-field",
                 lambda: bic.distance.geodesic_distance_field(
-                    mask, source, sampling=spacing, number_of_threads=1
+                    mask,
+                    source,
+                    sampling=spacing,
+                    number_of_threads=number_of_threads,
                 ),
             )
         )
@@ -121,6 +147,10 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=7)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--include-geodesic", action="store_true")
+    parser.add_argument(
+        "--threads", type=int, nargs="+", default=[1],
+        help="thread counts to benchmark (0 uses hardware concurrency)",
+    )
     parser.add_argument("--json", default="", help="optional JSON result path")
     args = parser.parse_args()
     if args.repeats < 1 or args.warmup < 0:
@@ -134,29 +164,34 @@ def main() -> int:
         shapes = ((1024, 1024), (64, 160, 160))
 
     rows = []
-    header = f"{'case':>29} {'shape':>16} {'median ms':>11} {'min ms':>10} {'ns/fg voxel':>13}"
+    header = f"{'case':>36} {'threads':>7} {'shape':>16} {'median ms':>11} {'min ms':>10} {'ns/fg voxel':>13}"
     print(header)
     print("-" * len(header))
     for shape in shapes:
-        mask, cases = build_cases(shape, args.include_geodesic)
-        foreground = int(np.count_nonzero(mask))
-        for name, function in cases:
-            samples = time_call(function, args.repeats, args.warmup)
-            median_s = median(samples)
-            row = {
-                "case": name,
-                "shape": list(shape),
-                "foreground_voxels": foreground,
-                "samples_s": samples,
-                "median_s": median_s,
-                "min_s": min(samples),
-                "ns_per_foreground_voxel": median_s * 1e9 / foreground,
-            }
-            rows.append(row)
-            print(
-                f"{name:>29} {str(shape):>16} {median_s * 1e3:11.2f} "
-                f"{min(samples) * 1e3:10.2f} {row['ns_per_foreground_voxel']:13.1f}"
+        for number_of_threads in args.threads:
+            mask, cases = build_cases(
+                shape, args.include_geodesic, number_of_threads
             )
+            foreground = int(np.count_nonzero(mask))
+            for name, function in cases:
+                samples = time_call(function, args.repeats, args.warmup)
+                median_s = median(samples)
+                row = {
+                    "case": name,
+                    "number_of_threads": number_of_threads,
+                    "shape": list(shape),
+                    "foreground_voxels": foreground,
+                    "samples_s": samples,
+                    "median_s": median_s,
+                    "min_s": min(samples),
+                    "ns_per_foreground_voxel": median_s * 1e9 / foreground,
+                }
+                rows.append(row)
+                print(
+                    f"{name:>36} {number_of_threads:7d} {str(shape):>16} "
+                    f"{median_s * 1e3:11.2f} {min(samples) * 1e3:10.2f} "
+                    f"{row['ns_per_foreground_voxel']:13.1f}"
+                )
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as file:

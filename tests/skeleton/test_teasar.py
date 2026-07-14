@@ -178,6 +178,16 @@ def test_output_is_deterministic():
         np.testing.assert_array_equal(got, expected)
 
 
+def test_threaded_output_is_deterministic():
+    mask = np.zeros((17, 21, 25), dtype=bool)
+    mask[8, 10, 2:18] = True
+    mask[8, 4:17, 17] = True
+    first = bic.skeleton.teasar(mask, number_of_threads=2)
+    second = bic.skeleton.teasar(mask, number_of_threads=4)
+    for got, expected in zip(first, second):
+        np.testing.assert_array_equal(got, expected)
+
+
 @pytest.mark.parametrize("spacing", [(1.0, 1.0, 1.0), (2.5, 1.25, 0.75)])
 def test_compact_fp64_backends_have_exact_dense_parity(spacing):
     zz, yy, xx = np.indices((17, 21, 25))
@@ -220,6 +230,7 @@ def test_rejects_non_3d_input(shape):
         ({"constant": np.inf}, "constant"),
         ({"pdrf_scale": np.nan}, "pdrf_scale"),
         ({"pdrf_exponent": 0.0}, "pdrf_exponent"),
+        ({"number_of_threads": -1}, "number_of_threads"),
     ],
 )
 def test_rejects_invalid_parameters(kwargs, match):

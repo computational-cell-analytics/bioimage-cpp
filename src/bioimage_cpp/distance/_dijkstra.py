@@ -8,7 +8,7 @@ import numpy as np
 
 from .. import _core
 from .._validation import strict_index
-from ._distance import _as_binary_input, _normalize_sampling
+from ._distance import _as_binary_input, _normalize_sampling, _normalize_threads
 from ._geodesic import _as_coordinates, _require_foreground_points
 
 
@@ -82,6 +82,7 @@ def dijkstra_distance_field(
     costs: np.ndarray | None = None,
     cost_mode: str = "physical",
     return_predecessors: bool = False,
+    number_of_threads: int = 1,
 ):
     """Compute a multi-source Dijkstra distance field on a masked grid.
 
@@ -113,6 +114,9 @@ def dijkstra_distance_field(
         ``"physical"``, ``"node"``, or ``"node_times_physical"``.
     return_predecessors:
         Also return a flat-index predecessor field when true.
+    number_of_threads:
+        ``0`` uses hardware concurrency; a positive value pins the thread
+        count. The default ``1`` uses the optimized sequential heap.
 
     Returns
     -------
@@ -132,6 +136,7 @@ def dijkstra_distance_field(
     if sources_array.shape[0] == 0:
         raise ValueError(f"{function}: sources must contain at least one coordinate")
     _require_foreground_points(binary, sources_array, function, "sources")
+    n_threads = _normalize_threads(number_of_threads, function)
 
     distances, predecessors = _core._dijkstra_distance_field_mask(
         binary,
@@ -141,6 +146,7 @@ def dijkstra_distance_field(
         costs_array,
         mode_value,
         bool(return_predecessors),
+        n_threads,
     )
     if return_predecessors:
         return distances, predecessors
@@ -156,13 +162,16 @@ def dijkstra_path(
     spacing: float | Sequence[float] | None = None,
     costs: np.ndarray | None = None,
     cost_mode: str = "physical",
+    number_of_threads: int = 1,
 ) -> np.ndarray:
     """Return the cheapest path from one source to any supplied target.
 
     The returned ``int64`` coordinates have shape ``(n_path, mask.ndim)`` and
     are ordered from the source to the reached target. The solve stops when
     the cheapest target is settled. Equal-cost targets are resolved by their
-    flat C-order index.
+    flat C-order index. ``number_of_threads`` follows the distance-field
+    convention (``0`` uses hardware concurrency); narrow early-stop searches
+    may retain the faster sequential heap.
     """
     function = "dijkstra_path"
     binary, connectivity_value, spacing_values, costs_array, mode_value = (
@@ -181,6 +190,7 @@ def dijkstra_path(
         raise ValueError(f"{function}: targets must contain at least one coordinate")
     _require_foreground_points(binary, source_array, function, "source")
     _require_foreground_points(binary, targets_array, function, "targets")
+    n_threads = _normalize_threads(number_of_threads, function)
 
     return _core._dijkstra_path_mask(
         binary,
@@ -190,4 +200,5 @@ def dijkstra_path(
         spacing_values,
         costs_array,
         mode_value,
+        n_threads,
     )

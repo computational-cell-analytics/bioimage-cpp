@@ -2,6 +2,7 @@
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/grid.hxx"
+#include "bioimage_cpp/distance/detail/delta_stepping.hxx"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -196,6 +198,9 @@ struct CompactDijkstraWorkspace {
     std::vector<std::uint8_t> state;
     std::vector<std::uint32_t> predecessors;
     std::vector<CompactHeapEntry<Distance>> heap;
+    bioimage_cpp::distance::detail_delta_stepping::DeltaSteppingWorkspace<
+        std::uint32_t
+    > parallel;
 };
 
 inline constexpr std::uint8_t kCompactDiscovered = 1;
@@ -259,12 +264,89 @@ inline void for_each_compact_neighbor(
     }
 }
 
+inline double compact_positive_cost_median(const std::vector<double> &costs) {
+    std::size_t positive_count = 0;
+    for (const auto cost : costs) {
+        positive_count += cost > 0.0 ? 1 : 0;
+    }
+    if (positive_count == 0) {
+        return 1.0;
+    }
+    constexpr std::size_t maximum_samples = 4096;
+    const auto stride = std::max<std::size_t>(
+        1, (positive_count + maximum_samples - 1) / maximum_samples
+    );
+    std::vector<double> samples;
+    samples.reserve(std::min(positive_count, maximum_samples));
+    std::size_t positive_index = 0;
+    for (const auto cost : costs) {
+        if (cost == 0.0) {
+            continue;
+        }
+        if (positive_index % stride == stride / 2) {
+            samples.push_back(cost);
+        }
+        ++positive_index;
+        if (samples.size() == maximum_samples) {
+            break;
+        }
+    }
+    if (samples.empty()) {
+        return 1.0;
+    }
+    const auto middle = samples.begin() + static_cast<std::ptrdiff_t>(samples.size() / 2);
+    std::nth_element(samples.begin(), middle, samples.end());
+    return *middle;
+}
+
+template <CompactAdjacency Adjacency>
+inline bioimage_cpp::distance::detail_delta_stepping::DeltaSteppingResult<
+    std::uint32_t
+> compact_parallel_run(
+    const CompactGridDomain &domain,
+    const std::span<const std::uint32_t> sources,
+    const std::span<const std::uint32_t> targets,
+    const std::vector<double> *costs,
+    const double delta,
+    const std::size_t number_of_threads,
+    CompactDijkstraWorkspace<double> &workspace
+) {
+    const auto neighbors = [&](const std::uint32_t node, const auto &body) {
+        for_each_compact_neighbor<Adjacency>(
+            domain, node,
+            [&](const std::uint32_t target, const double physical_length) {
+                body(target, costs == nullptr ? physical_length : (*costs)[target]);
+            }
+        );
+    };
+    return bioimage_cpp::distance::detail_delta_stepping::run<std::uint32_t>(
+        domain.size(), sources, targets, delta, number_of_threads, 26,
+        neighbors, workspace.parallel
+    );
+}
+
+inline bool compact_use_parallel(
+    const std::size_t number_of_nodes,
+    const std::size_t number_of_threads
+) {
+    // Below this size TEASAR's compact wavefronts are too narrow to amortize
+    // staged delta stepping. EDT still consumes the requested thread budget.
+    constexpr std::size_t compact_parallel_threshold = 1U << 20;
+    if (number_of_threads == 1 || number_of_nodes < compact_parallel_threshold) {
+        return false;
+    }
+    return bioimage_cpp::detail::normalize_thread_count(
+        number_of_threads, number_of_nodes
+    ) > 1;
+}
+
 template <CompactAdjacency Adjacency, class Distance>
 inline void compact_physical_distance_field(
     const CompactGridDomain &domain,
     const std::uint32_t source,
     CompactDijkstraWorkspace<Distance> &workspace,
     std::vector<Distance> &distances,
+    const std::size_t number_of_threads = 1,
     CompactDijkstraStats *stats = nullptr
 ) {
     const auto n = domain.size();
@@ -277,6 +359,29 @@ inline void compact_physical_distance_field(
         }
     } else if (!domain.has_full_lookup()) {
         throw std::invalid_argument("compact full-index lookup is not available");
+    }
+
+    if constexpr (std::is_same_v<Distance, double>) {
+        if (compact_use_parallel(n, number_of_threads)) {
+            double delta = std::numeric_limits<double>::infinity();
+            for (const auto &neighbor : domain.neighbors) {
+                delta = std::min(delta, neighbor.physical_length);
+            }
+            const std::array<std::uint32_t, 1> sources{source};
+            const auto result = compact_parallel_run<Adjacency>(
+                domain, sources, {}, nullptr, delta, number_of_threads, workspace
+            );
+            if (result.completed) {
+                distances.assign(n, std::numeric_limits<double>::infinity());
+                for (const auto node : workspace.parallel.touched) {
+                    distances[node] = workspace.parallel.distances[node];
+                }
+                if (stats != nullptr) {
+                    stats->reset();
+                }
+                return;
+            }
+        }
     }
 
     distances.assign(n, std::numeric_limits<Distance>::infinity());
@@ -326,6 +431,7 @@ inline void compact_node_cost_path(
     const std::vector<Distance> &costs,
     CompactDijkstraWorkspace<Distance> &workspace,
     std::vector<std::uint32_t> &path,
+    const std::size_t number_of_threads = 1,
     CompactDijkstraStats *stats = nullptr
 ) {
     const auto n = domain.size();
@@ -338,6 +444,49 @@ inline void compact_node_cost_path(
         }
     } else if (!domain.has_full_lookup()) {
         throw std::invalid_argument("compact full-index lookup is not available");
+    }
+
+    if constexpr (std::is_same_v<Distance, double>) {
+        if (compact_use_parallel(n, number_of_threads)) {
+            const std::array<std::uint32_t, 1> sources{source};
+            const auto result = compact_parallel_run<Adjacency>(
+                domain,
+                sources,
+                targets,
+                &costs,
+                compact_positive_cost_median(costs),
+                number_of_threads,
+                workspace
+            );
+            if (result.completed) {
+                const auto reached = result.reached_target;
+                if (reached == kNoCompactNode) {
+                    throw std::runtime_error(
+                        "no compact Dijkstra target is reachable from source"
+                    );
+                }
+                path.clear();
+                auto node = reached;
+                while (true) {
+                    path.push_back(node);
+                    const auto parent = workspace.parallel.predecessors[node];
+                    if (parent == node) {
+                        break;
+                    }
+                    node = parent;
+                    if (path.size() > n) {
+                        throw std::runtime_error(
+                            "cycle in compact Dijkstra predecessor chain"
+                        );
+                    }
+                }
+                std::reverse(path.begin(), path.end());
+                if (stats != nullptr) {
+                    stats->reset();
+                }
+                return;
+            }
+        }
     }
 
     workspace.state.assign(n, 0);

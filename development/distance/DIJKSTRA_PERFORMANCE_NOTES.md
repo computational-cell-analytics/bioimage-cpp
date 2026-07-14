@@ -542,3 +542,47 @@ predecessor parity is intentionally relaxed, retain the previously used TEASAR
 gate: matching contracted branch/leaf topology, bidirectional 95th-percentile
 distance at most one normalized voxel, Hausdorff distance at most two voxels,
 and total physical length within 2% of sequential compact FP64.
+
+## Implemented parallel follow-up
+
+Implemented after reviewing the draft above. The implementation scope was
+expanded to the dense public Dijkstra fields as well as the compact TEASAR
+backend. Both use one deterministic FP64 delta-stepping primitive in
+`distance/detail/delta_stepping.hxx`; the optimized heaps remain unchanged.
+
+The concrete design closes several gaps in the draft:
+
+- frontier nodes and proposals are processed in fixed global batches independent
+  of thread count, with at most 1,048,576 worst-case proposals per batch;
+- workers write only per-thread buffers, then the calling thread sorts, reduces,
+  and applies strict improvements in a deterministic order;
+- equal-distance updates do not rewrite existing predecessors, preventing cycles
+  in zero-weight components;
+- the heavy phase uses the unique set removed during the complete light closure;
+- early stopping happens only after both phases and after checking that FP64
+  rounding did not reinsert work into the current bucket;
+- generation-marked compact state avoids clearing every rail-search array;
+- invalid bucket widths or bucket-index overflow restart on the sequential heap.
+
+The bucket width is the minimum physical neighbor length for physical costs, the
+deterministically sampled positive-cost median for node costs, and their product
+for node-times-physical costs. All-zero costs use a positive sentinel width and
+remain entirely in the light closure.
+
+Initial measurements on the four-core development machine also rejected the
+assumption that every large one-source solve benefits from delta stepping.
+Representative one-shot default-tier dense physical fields took about 0.38 s on
+the heap versus 0.64 s with four-thread staged relaxation, while a full source
+plane on the same `64 x 160 x 160` domain improved from about 0.72 s to 0.30 s.
+The directed-node heap remained decisively faster. TEASAR's compact wavefronts
+were likewise too narrow through the `256^3` tier, although threading its EDT
+still improved end-to-end time.
+
+The production dispatch therefore follows the benchmark rather than forcing the
+new backend: one-thread calls, paths, directed-node costs, small fields, and
+narrow multi-source fields retain the heap. Broad multi-source physical and
+node-times-physical fields use delta stepping. Compact TEASAR keeps heap Dijkstra
+through the measured tiers while sharing the requested thread budget with EDT;
+the delta backend remains available for much larger compact domains. The
+development benchmarks now accept thread matrices so these thresholds can be
+revisited with evidence on other machines.

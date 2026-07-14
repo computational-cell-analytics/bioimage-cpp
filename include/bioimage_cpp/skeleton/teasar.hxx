@@ -3,6 +3,7 @@
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/detail/profile.hxx"
+#include "bioimage_cpp/detail/threading.hxx"
 #include "bioimage_cpp/distance/distance_transform.hxx"
 #include "bioimage_cpp/distance/grid_dijkstra.hxx"
 #include "bioimage_cpp/skeleton/detail/compact_grid_dijkstra.hxx"
@@ -25,6 +26,7 @@ struct TeasarOptions {
     double constant = 0.0;
     double pdrf_scale = 100000.0;
     double pdrf_exponent = 4.0;
+    std::size_t number_of_threads = 1;
 };
 
 struct SkeletonGraph {
@@ -117,6 +119,9 @@ inline SkeletonGraph teasar_dense(
     if (foreground_count == 0) {
         return graph;
     }
+    const auto effective_threads = bioimage_cpp::detail::normalize_thread_count(
+        options.number_of_threads, foreground_count
+    );
 
     // A zero halo makes the exterior an explicit background feature for EDT,
     // including when the input object touches a volume boundary.
@@ -158,7 +163,7 @@ inline SkeletonGraph teasar_dense(
             padded_view,
             {options.spacing[0], options.spacing[1], options.spacing[2]},
             {distances_view, {}, {}},
-            1
+            effective_threads
         );
     }
 
@@ -166,6 +171,7 @@ inline SkeletonGraph teasar_dense(
         3,
         {options.spacing[0], options.spacing[1], options.spacing[2]},
         distance::DijkstraCostMode::Physical,
+        effective_threads,
     };
     distance::DijkstraResult first_field;
     distance::DijkstraResult root_field;
@@ -244,7 +250,7 @@ inline SkeletonGraph teasar_dense(
     ConstArrayView<std::uint8_t> padded_view{padded_mask.data(), shape, {}};
     ConstArrayView<double> pdrf_view{pdrf.data(), shape, {}};
     const distance::DijkstraOptions node_options{
-        3, {}, distance::DijkstraCostMode::Node
+        3, {}, distance::DijkstraCostMode::Node, effective_threads
     };
 
     while (active_count > 0) {
@@ -347,6 +353,9 @@ inline SkeletonGraph teasar_compact(
     if (foreground_count == 0) {
         return graph;
     }
+    const auto effective_threads = bioimage_cpp::detail::normalize_thread_count(
+        options.number_of_threads, foreground_count
+    );
 
     const std::vector<std::ptrdiff_t> shape{
         mask.shape[0] + 2,
@@ -382,7 +391,7 @@ inline SkeletonGraph teasar_compact(
             padded_view,
             {options.spacing[0], options.spacing[1], options.spacing[2]},
             {distances_view, {}, {}},
-            1
+            effective_threads
         );
     }
 
@@ -406,7 +415,7 @@ inline SkeletonGraph teasar_compact(
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "root_dijkstra")
         detail::compact_physical_distance_field<Adjacency>(
-            domain, 0, dijkstra_workspace, first_field
+            domain, 0, dijkstra_workspace, first_field, effective_threads
         );
         Distance farthest_distance = Distance{-1};
         for (std::uint32_t node = 0; node < domain.size(); ++node) {
@@ -421,7 +430,7 @@ inline SkeletonGraph teasar_compact(
             }
         }
         detail::compact_physical_distance_field<Adjacency>(
-            domain, root, dijkstra_workspace, root_field
+            domain, root, dijkstra_workspace, root_field, effective_threads
         );
     }
     std::vector<Distance>().swap(first_field);
@@ -499,7 +508,8 @@ inline SkeletonGraph teasar_compact(
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "path_dijkstra")
             detail::compact_node_cost_path<Adjacency>(
-                domain, target, skeleton_nodes, pdrf, dijkstra_workspace, path
+                domain, target, skeleton_nodes, pdrf, dijkstra_workspace, path,
+                effective_threads
             );
         }
 

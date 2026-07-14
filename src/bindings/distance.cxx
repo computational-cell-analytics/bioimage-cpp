@@ -317,7 +317,8 @@ nb::tuple dijkstra_distance_field_mask(
     const std::vector<double> &spacing,
     std::optional<DoubleInput> costs,
     const int cost_mode,
-    const bool return_predecessors
+    const bool return_predecessors,
+    const std::size_t n_threads
 ) {
     if (sources.ndim() != 2 || sources.shape(1) != mask.ndim()) {
         throw std::invalid_argument(
@@ -342,7 +343,12 @@ nb::tuple dijkstra_distance_field_mask(
         result = distance::dijkstra_distance_field(
             mask_view,
             source_indices,
-            {connectivity, spacing, dijkstra_cost_mode_from_int(cost_mode)},
+            {
+                connectivity,
+                spacing,
+                dijkstra_cost_mode_from_int(cost_mode),
+                n_threads,
+            },
             costs_opt.ptr,
             return_predecessors
         );
@@ -371,7 +377,8 @@ Int64Array dijkstra_path_mask(
     const int connectivity,
     const std::vector<double> &spacing,
     std::optional<DoubleInput> costs,
-    const int cost_mode
+    const int cost_mode,
+    const std::size_t n_threads
 ) {
     if (source.ndim() != 2 || source.shape(0) != 1 || source.shape(1) != mask.ndim()) {
         throw std::invalid_argument("source must have shape (1, mask.ndim)");
@@ -399,7 +406,12 @@ Int64Array dijkstra_path_mask(
             mask_view,
             source_indices.front(),
             target_indices,
-            {connectivity, spacing, dijkstra_cost_mode_from_int(cost_mode)},
+            {
+                connectivity,
+                spacing,
+                dijkstra_cost_mode_from_int(cost_mode),
+                n_threads,
+            },
             costs_opt.ptr
         );
     }
@@ -679,7 +691,7 @@ void bind_distance(nb::module_ &m) {
         &dijkstra_distance_field_mask,
         nb::arg("mask"), nb::arg("sources"), nb::arg("connectivity"),
         nb::arg("spacing"), nb::arg("costs").none(), nb::arg("cost_mode"),
-        nb::arg("return_predecessors"),
+        nb::arg("return_predecessors"), nb::arg("n_threads"),
         "Grid Dijkstra distance field. Returns (distances, predecessors-or-None)."
     );
     m.def(
@@ -687,7 +699,7 @@ void bind_distance(nb::module_ &m) {
         &dijkstra_path_mask,
         nb::arg("mask"), nb::arg("source"), nb::arg("targets"),
         nb::arg("connectivity"), nb::arg("spacing"), nb::arg("costs").none(),
-        nb::arg("cost_mode"),
+        nb::arg("cost_mode"), nb::arg("n_threads"),
         "Early-stopping one-source/multi-target grid Dijkstra path."
     );
 
