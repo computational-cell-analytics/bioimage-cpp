@@ -2,7 +2,8 @@
 
 The default benchmark has no optional dependencies and measures only
 ``bioimage_cpp.skeleton.teasar``. Pass ``--kimimaro`` to add kimimaro as an
-external reference backend when it is installed. The implementations do not
+external reference backend when it is installed. ``--threads`` applies the
+same worker-count matrix to both implementations. The implementations do not
 have identical production heuristics, so compare topology and timings rather
 than expecting vertex-for-vertex equality.
 
@@ -11,8 +12,8 @@ Examples
 python development/skeleton/benchmark_teasar.py --small --repeats 3
 python development/skeleton/benchmark_teasar.py --repeats 5
 python development/skeleton/benchmark_teasar.py --large --sequential-backends
-python development/skeleton/benchmark_teasar.py --large --kimimaro --repeats 3 \
-    --json /tmp/teasar.json
+python development/skeleton/benchmark_teasar.py --large --kimimaro \
+    --threads 1 2 4 8 --repeats 3 --json /tmp/teasar.json
 """
 
 from __future__ import annotations
@@ -124,7 +125,15 @@ def compare_skeletons(reference, candidate, spacing):
     }
 
 
-def kimimaro_call(mask, spacing, scale, constant, pdrf_scale, pdrf_exponent):
+def kimimaro_call(
+    mask,
+    spacing,
+    scale,
+    constant,
+    pdrf_scale,
+    pdrf_exponent,
+    number_of_threads=1,
+):
     import kimimaro
 
     skeletons = kimimaro.skeletonize(
@@ -146,7 +155,7 @@ def kimimaro_call(mask, spacing, scale, constant, pdrf_scale, pdrf_exponent):
         fix_branching=True,
         fix_borders=False,
         fill_holes=False,
-        parallel=1,
+        parallel=number_of_threads,
     )
     return skeletons[1]
 
@@ -181,7 +190,7 @@ def main() -> int:
     parser.add_argument("--json", default="", help="optional JSON result path")
     parser.add_argument(
         "--threads", type=int, nargs="+", default=[1],
-        help="public TEASAR thread counts (0 uses hardware concurrency)",
+        help="worker counts for public TEASAR and kimimaro (0 uses all CPUs)",
     )
     args = parser.parse_args()
     if args.repeats < 1 or args.warmup < 0:
@@ -235,15 +244,18 @@ def main() -> int:
             for number_of_threads in args.threads
         ]
     if args.kimimaro:
-        backends.append(
+        kimimaro_thread_counts = (1,) if args.sequential_backends else args.threads
+        backends.extend(
             (
-                "kimimaro",
-                lambda mask: kimimaro_call(
+                f"kimimaro/t{number_of_threads}",
+                lambda mask, number_of_threads=number_of_threads: kimimaro_call(
                     mask, spacing, parameters["scale"], parameters["constant"],
-                    parameters["pdrf_scale"], parameters["pdrf_exponent"]
+                    parameters["pdrf_scale"], parameters["pdrf_exponent"],
+                    number_of_threads,
                 ),
                 lambda skeleton: (len(skeleton.vertices), len(skeleton.edges)),
             )
+            for number_of_threads in kimimaro_thread_counts
         )
 
     rows = []
@@ -304,15 +316,17 @@ def main() -> int:
                 f"hausdorff={quality['hausdorff_voxels']:.3f} vox "
                 f"length_error={quality['relative_length_error']:.3%}"
             )
-        if len(args.threads) == 1 and len(case_rows) == 2 and {
-            row["backend"] for row in case_rows
-        } == {f"bioimage-cpp/t{args.threads[0]}", "kimimaro"}:
+        if args.kimimaro and not args.sequential_backends:
             by_name = {row["backend"]: row for row in case_rows}
-            ratio = (
-                by_name[f"bioimage-cpp/t{args.threads[0]}"]["median_s"]
-                / by_name["kimimaro"]["median_s"]
-            )
-            print(f"{'bioimage-cpp / kimimaro':>54}: {ratio:.2f}x")
+            for number_of_threads in args.threads:
+                bioimage_name = f"bioimage-cpp/t{number_of_threads}"
+                kimimaro_name = f"kimimaro/t{number_of_threads}"
+                ratio = (
+                    by_name[bioimage_name]["median_s"]
+                    / by_name[kimimaro_name]["median_s"]
+                )
+                label = f"{bioimage_name} / {kimimaro_name}"
+                print(f"{label:>54}: {ratio:.2f}x")
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as file:

@@ -5,7 +5,9 @@ import bioimage_cpp as bic
 from bioimage_cpp import _core
 
 
-def _teasar_backend(mask, backend, *, spacing=(1.5, 1.0, 1.0)):
+def _teasar_backend(
+    mask, backend, *, spacing=(1.5, 1.0, 1.0), number_of_threads=1
+):
     return _core._teasar_uint8_backend(
         np.ascontiguousarray(mask, dtype=np.uint8),
         spacing,
@@ -14,6 +16,7 @@ def _teasar_backend(mask, backend, *, spacing=(1.5, 1.0, 1.0)):
         100000.0,
         4.0,
         backend,
+        number_of_threads,
     )
 
 
@@ -199,6 +202,37 @@ def test_compact_fp64_backends_have_exact_dense_parity(spacing):
         compact = _teasar_backend(mask, backend, spacing=spacing)
         for got, expected in zip(compact, dense):
             np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("spacing", [(1.0, 1.0, 1.0), (2.5, 1.25, 0.75)])
+def test_cropped_compact_backends_preserve_dense_parity(spacing):
+    mask = np.zeros((31, 37, 45), dtype=np.uint8)
+    mask[3, 8, 4:30] = 1
+    mask[3, 8:22, 29] = 1
+    mask[3:17, 21, 29] = 1
+    mask[3:12, 8:17, 29] |= np.eye(9, dtype=np.uint8)
+
+    dense = _teasar_backend(mask, "dense-fp64", spacing=spacing)
+    for backend in ("compact-on-the-fly-fp64", "compact-csr-fp64"):
+        compact = _teasar_backend(
+            mask, backend, spacing=spacing, number_of_threads=4
+        )
+        for got, expected in zip(compact, dense):
+            np.testing.assert_array_equal(got, expected)
+
+
+def test_cropped_compact_backend_preserves_boundary_touching_object():
+    mask = np.zeros((13, 17, 21), dtype=np.uint8)
+    mask[0, 0, :] = 1
+    mask[0, :, -1] = 1
+    mask[:, -1, -1] = 1
+
+    dense = _teasar_backend(mask, "dense-fp64")
+    compact = _teasar_backend(
+        mask, "compact-on-the-fly-fp64", number_of_threads=4
+    )
+    for got, expected in zip(compact, dense):
+        np.testing.assert_array_equal(got, expected)
 
 
 def test_public_teasar_uses_exact_compact_fp64_backend():

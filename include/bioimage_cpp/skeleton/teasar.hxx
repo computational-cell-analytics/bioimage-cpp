@@ -7,6 +7,7 @@
 #include "bioimage_cpp/distance/distance_transform.hxx"
 #include "bioimage_cpp/distance/grid_dijkstra.hxx"
 #include "bioimage_cpp/skeleton/detail/compact_grid_dijkstra.hxx"
+#include "bioimage_cpp/skeleton/detail/row_interval_union.hxx"
 
 #include <algorithm>
 #include <array>
@@ -14,8 +15,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bioimage_cpp::skeleton {
@@ -345,48 +348,76 @@ inline SkeletonGraph teasar_compact(
     BIOIMAGE_PROFILE_INIT(profile)
 
     SkeletonGraph graph;
-    const auto input_n = bioimage_cpp::detail::number_of_elements(mask.shape);
+    std::array<std::ptrdiff_t, 3> crop_begin{
+        mask.shape[0], mask.shape[1], mask.shape[2]
+    };
+    std::array<std::ptrdiff_t, 3> crop_end{0, 0, 0};
     std::size_t foreground_count = 0;
-    for (std::size_t index = 0; index < input_n; ++index) {
-        foreground_count += mask.data[index] != 0 ? 1 : 0;
-    }
-    if (foreground_count == 0) {
-        return graph;
+    std::vector<std::ptrdiff_t> shape;
+    std::vector<std::ptrdiff_t> strides;
+    std::size_t n = 0;
+    std::vector<std::uint8_t> padded_mask;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "input_crop")
+        for (std::ptrdiff_t z = 0; z < mask.shape[0]; ++z) {
+            for (std::ptrdiff_t y = 0; y < mask.shape[1]; ++y) {
+                for (std::ptrdiff_t x = 0; x < mask.shape[2]; ++x) {
+                    const auto input_index = static_cast<std::size_t>(
+                        (z * mask.shape[1] + y) * mask.shape[2] + x
+                    );
+                    if (mask.data[input_index] == 0) {
+                        continue;
+                    }
+                    ++foreground_count;
+                    crop_begin[0] = std::min(crop_begin[0], z);
+                    crop_begin[1] = std::min(crop_begin[1], y);
+                    crop_begin[2] = std::min(crop_begin[2], x);
+                    crop_end[0] = std::max(crop_end[0], z + 1);
+                    crop_end[1] = std::max(crop_end[1], y + 1);
+                    crop_end[2] = std::max(crop_end[2], x + 1);
+                }
+            }
+        }
+        if (foreground_count == 0) {
+            return graph;
+        }
+
+        shape = {
+            crop_end[0] - crop_begin[0] + 2,
+            crop_end[1] - crop_begin[1] + 2,
+            crop_end[2] - crop_begin[2] + 2,
+        };
+        n = bioimage_cpp::detail::number_of_elements(shape);
+        strides = bioimage_cpp::detail::c_order_strides(shape);
+        padded_mask.assign(n, 0);
+        for (std::ptrdiff_t z = crop_begin[0]; z < crop_end[0]; ++z) {
+            for (std::ptrdiff_t y = crop_begin[1]; y < crop_end[1]; ++y) {
+                for (std::ptrdiff_t x = crop_begin[2]; x < crop_end[2]; ++x) {
+                    const auto input_index = static_cast<std::size_t>(
+                        (z * mask.shape[1] + y) * mask.shape[2] + x
+                    );
+                    if (mask.data[input_index] == 0) {
+                        continue;
+                    }
+                    const auto padded_index = static_cast<std::size_t>(
+                        (z - crop_begin[0] + 1) * strides[0] +
+                        (y - crop_begin[1] + 1) * strides[1] +
+                        (x - crop_begin[2] + 1)
+                    );
+                    padded_mask[padded_index] = 1;
+                }
+            }
+        }
     }
     const auto effective_threads = bioimage_cpp::detail::normalize_thread_count(
         options.number_of_threads, foreground_count
     );
 
-    const std::vector<std::ptrdiff_t> shape{
-        mask.shape[0] + 2,
-        mask.shape[1] + 2,
-        mask.shape[2] + 2,
-    };
-    const auto n = bioimage_cpp::detail::number_of_elements(shape);
-    const auto strides = bioimage_cpp::detail::c_order_strides(shape);
-    std::vector<std::uint8_t> padded_mask(n, 0);
-    for (std::ptrdiff_t z = 0; z < mask.shape[0]; ++z) {
-        for (std::ptrdiff_t y = 0; y < mask.shape[1]; ++y) {
-            for (std::ptrdiff_t x = 0; x < mask.shape[2]; ++x) {
-                const auto input_index = static_cast<std::size_t>(
-                    (z * mask.shape[1] + y) * mask.shape[2] + x
-                );
-                if (mask.data[input_index] == 0) {
-                    continue;
-                }
-                const auto padded_index = static_cast<std::size_t>(
-                    (z + 1) * strides[0] + (y + 1) * strides[1] + (x + 1)
-                );
-                padded_mask[padded_index] = 1;
-            }
-        }
-    }
-
-    std::vector<float> dbf(n, 0.0f);
+    auto dbf = std::make_unique_for_overwrite<float[]>(n);
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "distance_transform")
         ConstArrayView<std::uint8_t> padded_view{padded_mask.data(), shape, {}};
-        ArrayView<float> distances_view{dbf.data(), shape, {}};
+        ArrayView<float> distances_view{dbf.get(), shape, {}};
         distance::distance_transform(
             padded_view,
             {options.spacing[0], options.spacing[1], options.spacing[2]},
@@ -406,6 +437,19 @@ inline SkeletonGraph teasar_compact(
     }
     if (domain.size() != foreground_count) {
         throw std::runtime_error("TEASAR compact foreground count is inconsistent");
+    }
+
+    double dbf_max = 0.0;
+    std::vector<float> compact_dbf;
+    compact_dbf.reserve(domain.size());
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "dbf_compaction")
+        for (std::uint32_t node = 0; node < domain.size(); ++node) {
+            const auto value = dbf[domain.compact_to_full[node]];
+            compact_dbf.push_back(value);
+            dbf_max = std::max(dbf_max, static_cast<double>(value));
+        }
+        dbf.reset();
     }
 
     detail::CompactDijkstraWorkspace<Distance> dijkstra_workspace;
@@ -435,11 +479,8 @@ inline SkeletonGraph teasar_compact(
     }
     std::vector<Distance>().swap(first_field);
 
-    double dbf_max = 0.0;
     Distance daf_max = Distance{0};
     for (std::uint32_t node = 0; node < domain.size(); ++node) {
-        const auto full = domain.compact_to_full[node];
-        dbf_max = std::max(dbf_max, static_cast<double>(dbf[full]));
         daf_max = std::max(daf_max, root_field[node]);
     }
 
@@ -447,9 +488,12 @@ inline SkeletonGraph teasar_compact(
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "pdrf")
         for (std::uint32_t node = 0; node < domain.size(); ++node) {
-            const auto full = domain.compact_to_full[node];
             const double normalized_dbf = dbf_max > 0.0
-                ? std::clamp(1.0 - static_cast<double>(dbf[full]) / dbf_max, 0.0, 1.0)
+                ? std::clamp(
+                    1.0 - static_cast<double>(compact_dbf[node]) / dbf_max,
+                    0.0,
+                    1.0
+                )
                 : 0.0;
             const double normalized_daf = daf_max > Distance{0}
                 ? static_cast<double>(root_field[node] / daf_max)
@@ -462,7 +506,7 @@ inline SkeletonGraph teasar_compact(
         }
     }
 
-    std::vector<std::uint8_t> active = padded_mask;
+    std::vector<std::uint8_t> active = std::move(padded_mask);
     std::size_t active_count = foreground_count;
     std::vector<std::int64_t> vertex_of_node(domain.size(), -1);
     std::vector<std::uint32_t> skeleton_nodes;
@@ -475,11 +519,11 @@ inline SkeletonGraph teasar_compact(
         );
         const auto vertex_id = static_cast<std::uint64_t>(graph.vertices.size());
         graph.vertices.push_back({
-            static_cast<double>(coords[0] - 1) * options.spacing[0],
-            static_cast<double>(coords[1] - 1) * options.spacing[1],
-            static_cast<double>(coords[2] - 1) * options.spacing[2],
+            static_cast<double>(coords[0] - 1 + crop_begin[0]) * options.spacing[0],
+            static_cast<double>(coords[1] - 1 + crop_begin[1]) * options.spacing[1],
+            static_cast<double>(coords[2] - 1 + crop_begin[2]) * options.spacing[2],
         });
-        graph.radii.push_back(dbf[voxel]);
+        graph.radii.push_back(compact_dbf[node]);
         vertex_of_node[node] = static_cast<std::int64_t>(vertex_id);
         skeleton_nodes.push_back(node);
         pdrf[node] = Distance{0};
@@ -488,6 +532,9 @@ inline SkeletonGraph teasar_compact(
 
     add_vertex(root);
     std::vector<std::uint32_t> path;
+    detail::RowIntervalUnion invalidated_rows(
+        n / static_cast<std::size_t>(shape[2]), shape[2]
+    );
     while (active_count > 0) {
         auto target = detail::kNoCompactNode;
         Distance target_distance = Distance{-1};
@@ -537,7 +584,8 @@ inline SkeletonGraph teasar_compact(
                     static_cast<std::uint64_t>(voxel), strides, 3, coords.data()
                 );
                 const double radius =
-                    options.scale * static_cast<double>(dbf[voxel]) + options.constant;
+                    options.scale * static_cast<double>(compact_dbf[node]) +
+                    options.constant;
                 if (!std::isfinite(radius)) {
                     throw std::runtime_error("TEASAR invalidation radius overflowed");
                 }
@@ -557,15 +605,27 @@ inline SkeletonGraph teasar_compact(
                 }
                 for (std::ptrdiff_t z = lo[0]; z <= hi[0]; ++z) {
                     for (std::ptrdiff_t y = lo[1]; y <= hi[1]; ++y) {
-                        for (std::ptrdiff_t x = lo[2]; x <= hi[2]; ++x) {
-                            const auto index = static_cast<std::size_t>(
-                                z * strides[0] + y * strides[1] + x
-                            );
-                            if (active[index] != 0) {
-                                active[index] = 0;
-                                --active_count;
+                        const auto row = static_cast<std::size_t>(
+                            z * shape[1] + y
+                        );
+                        const auto row_begin = static_cast<std::size_t>(
+                            z * strides[0] + y * strides[1]
+                        );
+                        invalidated_rows.insert(
+                            row,
+                            lo[2],
+                            hi[2],
+                            [&](const std::ptrdiff_t begin, const std::ptrdiff_t end) {
+                                for (auto x = begin; x <= end; ++x) {
+                                    const auto index = row_begin +
+                                        static_cast<std::size_t>(x);
+                                    if (active[index] != 0) {
+                                        active[index] = 0;
+                                        --active_count;
+                                    }
+                                }
                             }
-                        }
+                        );
                     }
                 }
             }

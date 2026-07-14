@@ -301,3 +301,149 @@ total physical length differed by 2.26%. Automatic TEASAR execution therefore
 remains FP64. Parallel shortest paths remain a separate follow-up.
 
 Final verification after selecting compact on-the-fly FP64: `1129 passed`.
+
+## Implemented parallel follow-up
+
+The shared thread budget for the distance transform and compact Dijkstra solves
+was implemented and measured on 2026-07-15. The reference matrix now passes
+the same worker counts to kimimaro through `parallel=N`. Reproduce it with:
+
+```bash
+python development/skeleton/benchmark_teasar.py \
+    --large --kimimaro --threads 1 2 4 8 \
+    --repeats 3 --warmup 1 \
+    --json /tmp/teasar_large_parallel.json
+```
+
+The environment was the same Intel Core i7-1185G7 host (4 cores / 8 hardware
+threads), with kimimaro 5.8.1 and EDT 3.1.1. Each backend received one warmup;
+backend order was shuffled deterministically for each of the three measured
+calls. The table reports the median with the minimum in parentheses. Scaling
+is relative to the corresponding single-worker median, and `bio / kimi` is the
+matched median-time ratio (lower favors bioimage-cpp).
+
+| volume | workers | bioimage-cpp median (min) | bio scaling | kimimaro median (min) | kimi scaling | bio / kimi |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `128^3` | 1 | 77.60 ms (73.83 ms) | 1.00x | 110.43 ms (103.32 ms) | 1.00x | 0.70x |
+| `128^3` | 2 | 60.42 ms (56.16 ms) | 1.28x | 143.28 ms (136.60 ms) | 0.77x | 0.42x |
+| `128^3` | 4 | 50.01 ms (43.15 ms) | 1.55x | 152.51 ms (149.16 ms) | 0.72x | 0.33x |
+| `128^3` | 8 | 55.71 ms (45.21 ms) | 1.39x | 172.32 ms (171.98 ms) | 0.64x | 0.32x |
+| `192^3` | 1 | 303.83 ms (283.12 ms) | 1.00x | 381.02 ms (364.20 ms) | 1.00x | 0.80x |
+| `192^3` | 2 | 235.93 ms (216.57 ms) | 1.29x | 393.61 ms (389.73 ms) | 0.97x | 0.60x |
+| `192^3` | 4 | 209.54 ms (205.03 ms) | 1.45x | 413.88 ms (409.37 ms) | 0.92x | 0.51x |
+| `192^3` | 8 | 195.08 ms (188.79 ms) | 1.56x | 431.37 ms (417.77 ms) | 0.88x | 0.45x |
+| `256^3` | 1 | 694.69 ms (681.63 ms) | 1.00x | 931.81 ms (883.13 ms) | 1.00x | 0.75x |
+| `256^3` | 2 | 510.91 ms (509.73 ms) | 1.36x | 950.05 ms (933.76 ms) | 0.98x | 0.54x |
+| `256^3` | 4 | 444.05 ms (424.72 ms) | 1.56x | 902.87 ms (902.36 ms) | 1.03x | 0.49x |
+| `256^3` | 8 | 434.67 ms (424.57 ms) | 1.60x | 938.22 ms (911.45 ms) | 0.99x | 0.46x |
+
+Bioimage-cpp improved through four workers on every tier and was fastest at
+eight workers on `192^3` and `256^3`. Its best measured scaling was 1.60x on
+`256^3`; at four workers it was approximately 3.0x, 2.0x, and 2.0x faster than
+kimimaro on the three volumes.
+
+Kimimaro's `parallel` path is relevant but not fully exercised by this fixture.
+It threads the full-volume EDT and then uses a process pool to dispatch
+connected components. Each branching tube contains only one component, so the
+pool has one useful tracing task and additional workers mostly add process and
+shared-memory overhead. The only measured kimimaro improvement was about 3%
+at four workers on `256^3`.
+
+Worker count did not change either implementation's graph size:
+
+| volume | bioimage-cpp vertices / edges | kimimaro vertices / edges |
+| --- | ---: | ---: |
+| `128^3` | 213 / 212 | 213 / 212 |
+| `192^3` | 340 / 339 | 323 / 322 |
+| `256^3` | 415 / 414 | 443 / 442 |
+
+Verification after the benchmark update: `24 passed` in
+`tests/skeleton/test_teasar.py`; the matched-matrix and sequential-backend
+smoke runs also completed successfully.
+
+## Implemented non-Dijkstra optimization follow-up
+
+Profiling after the compact and parallel-Dijkstra work showed that further
+Dijkstra changes were no longer the best target. On the `256^3` branching tube
+at four workers, the two root fields plus all rail paths took about 85 ms, while
+the full-volume EDT alone took about 219 ms. The following exact-semantics
+changes were implemented on 2026-07-15:
+
+- the compact TEASAR backends crop to the tight foreground bounding box plus a
+  one-voxel zero halo and restore the integer crop origin before converting
+  vertices to physical coordinates;
+- DBF values are gathered into compact-node order and the dense DBF is released
+  before the root/path solves; the padded mask is moved into active state rather
+  than copied;
+- the shared EDT initializes its uninitialized squared-distance buffer during
+  the first-axis gather and parallelizes distance materialization;
+- invalidation maintains a persistent union of x intervals for each `(z, y)`
+  row, so overlapping cubes scan only newly covered spans.
+
+The dense backend remains unchanged as a correctness oracle. Compact FP64
+vertices, edges, and radii remained array-exact with dense FP64 across embedded,
+boundary-touching, sparse, dense, isotropic, anisotropic, and low/high-PDRF
+cases.
+
+### Profile and memory result
+
+One profile-build call on the `256^3` branching tube at four workers:
+
+| phase | before | after |
+| --- | ---: | ---: |
+| input crop / padding | unprofiled full volume | 30.6 ms |
+| distance transform | 218.5 ms | 48.6 ms |
+| compact domain | 42.0 ms | 14.1 ms |
+| DBF compaction | -- | 3.3 ms |
+| root Dijkstra | 56.6 ms | 57.1 ms |
+| PDRF | 3.8 ms | 3.3 ms |
+| target selection | 0.8 ms | 0.8 ms |
+| rail-path Dijkstra | 28.7 ms | 26.6 ms |
+| invalidation | 11.0 ms | 3.7 ms |
+| measured Python call | 446.3 ms | 202.3 ms |
+| peak RSS | 266,804 KiB | 120,288 KiB |
+
+The unchanged Dijkstra phases confirm that the gain came from the intended
+non-Dijkstra work. Peak RSS fell by 54.9%. On the relatively dense `96^3` ball,
+the row-interval union reduced invalidation from 27.2 ms to 2.7 ms and the full
+call from 159.8 ms to 118.1 ms, comfortably clearing the invalidation retention
+gate.
+
+### Normal-build wall-clock result
+
+Five-repeat medians with one warmup, using the same deterministic backend-order
+shuffle as the earlier matrix:
+
+| volume | workers | optimized median | previous median | speedup |
+| --- | ---: | ---: | ---: | ---: |
+| `128^3` | 1 | 36.71 ms | 77.60 ms | 2.11x |
+| `128^3` | 2 | 29.06 ms | 60.42 ms | 2.08x |
+| `128^3` | 4 | 24.17 ms | 50.01 ms | 2.07x |
+| `128^3` | 8 | 24.09 ms | 55.71 ms | 2.31x |
+| `192^3` | 1 | 124.50 ms | 303.83 ms | 2.44x |
+| `192^3` | 2 | 94.47 ms | 235.93 ms | 2.50x |
+| `192^3` | 4 | 85.25 ms | 209.54 ms | 2.46x |
+| `192^3` | 8 | 78.89 ms | 195.08 ms | 2.47x |
+| `256^3` | 1 | 338.64 ms | 694.69 ms | 2.05x |
+| `256^3` | 2 | 241.10 ms | 510.91 ms | 2.12x |
+| `256^3` | 4 | 207.33 ms | 444.05 ms | 2.14x |
+| `256^3` | 8 | 203.90 ms | 434.67 ms | 2.13x |
+
+The extended sequential matrix also retained exact dense parity. Its production
+compact medians were 65.67 ms for the sparse embedded `192^3` tube, 118.03 ms
+for the relatively dense `96^3` ball, and 35.61--38.84 ms across the `128^3`
+spacing/PDRF cases.
+
+A fresh three-repeat matched reference run put bioimage-cpp at 0.19x, 0.21x,
+and 0.20x kimimaro's four-worker time on `128^3`, `192^3`, and `256^3`
+respectively (28.75 vs 152.76 ms, 81.64 vs 386.13 ms, and 203.82 vs
+1002.83 ms). Kimimaro still has only one useful component-tracing task on these
+single-component fixtures.
+
+The shared EDT change was checked separately on a deterministic 50%-foreground
+`64 x 512 x 512` volume: five-call medians were 1.028 s at one worker and
+344.33 ms at four workers, with exact threaded distances, indices, vectors,
+and preallocated outputs.
+
+Final verification: `1141 passed` with third-party pytest plugin autoload
+disabled. The normal editable build was restored after profiling.
