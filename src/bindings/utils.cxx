@@ -1,4 +1,5 @@
 #include "utils.hxx"
+#include "ndarray.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/run_length.hxx"
@@ -51,14 +52,8 @@ OutputArray<T> take_dict_t(const nb::dict &relabeling, InputArray<T> to_relabel)
         view_shape[axis] = static_cast<std::ptrdiff_t>(to_relabel.shape(axis));
     }
 
-    const auto n = std::accumulate(
-        view_shape.begin(),
-        view_shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    );
-    auto *data = new T[static_cast<std::size_t>(n)]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
+    auto output_array = detail::make_array<T>(ndarray_shape);
+    auto *data = output_array.data();
 
     ConstArrayView<T> input{
         to_relabel.data(),
@@ -77,7 +72,7 @@ OutputArray<T> take_dict_t(const nb::dict &relabeling, InputArray<T> to_relabel)
         take_dict<T>(map, input, output);
     }
 
-    return OutputArray<T>(data, ndarray_shape.size(), ndarray_shape.data(), owner);
+    return output_array;
 }
 
 
@@ -100,14 +95,7 @@ OutputArray<std::int64_t> compute_rle_t(InputArray<T> mask) {
         counts = compute_rle<T>(input);
     }
 
-    auto *data = new std::int64_t[counts.size()];
-    std::copy(counts.begin(), counts.end(), data);
-    nb::capsule owner(data, [](void *p) noexcept {
-        delete[] static_cast<std::int64_t *>(p);
-    });
-
-    std::size_t shape[1] = {counts.size()};
-    return OutputArray<std::int64_t>(data, 1, shape, owner);
+    return detail::copy_vector_to_array(counts);
 }
 
 } // namespace

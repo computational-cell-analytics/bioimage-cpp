@@ -413,69 +413,21 @@ inline std::size_t foreground_count(const ConstArrayView<std::uint8_t> &mask) {
     ));
 }
 
-inline double sampled_positive_cost_median(
-    const ConstArrayView<std::uint8_t> &mask,
-    const ConstArrayView<double> &costs
-) {
-    const auto n = bioimage_cpp::detail::number_of_elements(mask.shape);
-    std::size_t positive_count = 0;
-    for (std::size_t index = 0; index < n; ++index) {
-        positive_count += mask.data[index] != 0 && costs.data[index] > 0.0 ? 1 : 0;
-    }
-    if (positive_count == 0) {
-        return 1.0;
-    }
-    constexpr std::size_t maximum_samples = 4096;
-    const auto stride = std::max<std::size_t>(
-        1, (positive_count + maximum_samples - 1) / maximum_samples
-    );
-    std::vector<double> samples;
-    samples.reserve(std::min(positive_count, maximum_samples));
-    std::size_t positive_index = 0;
-    for (std::size_t index = 0; index < n && samples.size() < maximum_samples; ++index) {
-        if (mask.data[index] == 0 || costs.data[index] == 0.0) {
-            continue;
-        }
-        if (positive_index % stride == stride / 2) {
-            samples.push_back(costs.data[index]);
-        }
-        ++positive_index;
-    }
-    if (samples.empty()) {
-        return 1.0;
-    }
-    const auto middle = samples.begin() + static_cast<std::ptrdiff_t>(samples.size() / 2);
-    std::nth_element(samples.begin(), middle, samples.end());
-    return *middle;
-}
-
-inline double parallel_delta(
-    const ConstArrayView<std::uint8_t> &mask,
-    const DijkstraOptions &options,
-    const ConstArrayView<double> *costs,
-    const DijkstraWorkspace &workspace
-) {
+inline double parallel_physical_delta(const DijkstraWorkspace &workspace) {
     double minimum_length = std::numeric_limits<double>::infinity();
     for (std::size_t neighbor = 0; neighbor < workspace.neighbor_count; ++neighbor) {
         minimum_length = std::min(
             minimum_length, workspace.neighbors[neighbor].physical_length
         );
     }
-    if (options.cost_mode == DijkstraCostMode::Physical) {
-        return minimum_length;
-    }
-    const double node_scale = sampled_positive_cost_median(mask, *costs);
-    return options.cost_mode == DijkstraCostMode::Node
-        ? node_scale
-        : node_scale * minimum_length;
+    return minimum_length;
 }
 
-template <DijkstraCostMode Mode, int NDim, bool ZeroHalo>
+template <int NDim, bool ZeroHalo>
 inline detail_delta_stepping::DeltaSteppingResult<std::size_t> run_parallel(
     const ConstArrayView<std::uint8_t> &mask,
     const std::span<const std::size_t> sources,
     const std::span<const std::size_t> targets,
-    const ConstArrayView<double> *costs,
     DijkstraWorkspace &workspace,
     const double delta,
     const std::size_t number_of_threads
@@ -487,13 +439,7 @@ inline detail_delta_stepping::DeltaSteppingResult<std::size_t> run_parallel(
                 if (mask.data[target] == 0) {
                     return;
                 }
-                double weight = physical_length;
-                if constexpr (Mode == DijkstraCostMode::Node) {
-                    weight = costs->data[target];
-                } else if constexpr (Mode == DijkstraCostMode::NodeTimesPhysical) {
-                    weight = costs->data[target] * physical_length;
-                }
-                body(target, weight);
+                body(target, physical_length);
             }
         );
     };
@@ -509,13 +455,11 @@ inline detail_delta_stepping::DeltaSteppingResult<std::size_t> run_parallel(
     );
 }
 
-template <DijkstraCostMode Mode>
 inline detail_delta_stepping::DeltaSteppingResult<std::size_t>
 dispatch_parallel_dimension(
     const ConstArrayView<std::uint8_t> &mask,
     const std::span<const std::size_t> sources,
     const std::span<const std::size_t> targets,
-    const ConstArrayView<double> *costs,
     DijkstraWorkspace &workspace,
     const double delta,
     const std::size_t number_of_threads,
@@ -523,64 +467,46 @@ dispatch_parallel_dimension(
 ) {
     if (mask.shape.size() == 2) {
         return zero_halo
-            ? run_parallel<Mode, 2, true>(
-                  mask, sources, targets, costs, workspace, delta, number_of_threads
+            ? run_parallel<2, true>(
+                  mask, sources, targets, workspace, delta, number_of_threads
               )
-            : run_parallel<Mode, 2, false>(
-                  mask, sources, targets, costs, workspace, delta, number_of_threads
+            : run_parallel<2, false>(
+                  mask, sources, targets, workspace, delta, number_of_threads
               );
     }
     return zero_halo
-        ? run_parallel<Mode, 3, true>(
-              mask, sources, targets, costs, workspace, delta, number_of_threads
+        ? run_parallel<3, true>(
+              mask, sources, targets, workspace, delta, number_of_threads
           )
-        : run_parallel<Mode, 3, false>(
-              mask, sources, targets, costs, workspace, delta, number_of_threads
+        : run_parallel<3, false>(
+              mask, sources, targets, workspace, delta, number_of_threads
           );
 }
 
 inline detail_delta_stepping::DeltaSteppingResult<std::size_t>
-dispatch_parallel_mode(
+dispatch_parallel_physical(
     const ConstArrayView<std::uint8_t> &mask,
     const std::span<const std::size_t> sources,
     const std::span<const std::size_t> targets,
     const DijkstraOptions &options,
-    const ConstArrayView<double> *costs,
     DijkstraWorkspace &workspace,
     const bool zero_halo
 ) {
-    const double delta = parallel_delta(mask, options, costs, workspace);
-    switch (options.cost_mode) {
-        case DijkstraCostMode::Physical:
-            return dispatch_parallel_dimension<DijkstraCostMode::Physical>(
-                mask, sources, targets, costs, workspace, delta,
-                options.number_of_threads, zero_halo
-            );
-        case DijkstraCostMode::Node:
-            return dispatch_parallel_dimension<DijkstraCostMode::Node>(
-                mask, sources, targets, costs, workspace, delta,
-                options.number_of_threads, zero_halo
-            );
-        case DijkstraCostMode::NodeTimesPhysical:
-            return dispatch_parallel_dimension<DijkstraCostMode::NodeTimesPhysical>(
-                mask, sources, targets, costs, workspace, delta,
-                options.number_of_threads, zero_halo
-            );
-    }
-    return {};
+    return dispatch_parallel_dimension(
+        mask, sources, targets, workspace, parallel_physical_delta(workspace),
+        options.number_of_threads, zero_halo
+    );
 }
 
 inline bool use_parallel_backend(
     const ConstArrayView<std::uint8_t> &mask,
     const DijkstraOptions &options,
-    const std::size_t number_of_sources,
-    const bool stop_at_target
+    const std::size_t number_of_sources
 ) {
-    // Directed node costs admit the especially efficient one-insertion heap
-    // kernel. The staged parallel backend loses decisively to it in the
-    // benchmark matrix, so keep that specialization for every thread request.
-    if (options.number_of_threads == 1 || stop_at_target ||
-        options.cost_mode == DijkstraCostMode::Node) {
+    // Both weighted modes lose to their specialized heaps in the benchmark
+    // matrix. Retain delta stepping only for broad physical wavefronts.
+    if (options.number_of_threads == 1 ||
+        options.cost_mode != DijkstraCostMode::Physical) {
         return false;
     }
     const auto foreground = foreground_count(mask);
@@ -850,9 +776,9 @@ inline void distance_field_impl(
         ordered_sources.end()
     );
 
-    if (use_parallel_backend(mask, options, ordered_sources.size(), false)) {
-        const auto parallel_result = dispatch_parallel_mode(
-            mask, ordered_sources, {}, options, costs, workspace, zero_halo
+    if (use_parallel_backend(mask, options, ordered_sources.size())) {
+        const auto parallel_result = dispatch_parallel_physical(
+            mask, ordered_sources, {}, options, workspace, zero_halo
         );
         if (parallel_result.completed) {
             result.distances.assign(n, kInfinity);
@@ -907,35 +833,6 @@ inline void path_impl(
     validate_targets(mask, targets);
     prepare_geometry(workspace, mask.shape, options);
     const auto n = bioimage_cpp::detail::number_of_elements(mask.shape);
-
-    if (use_parallel_backend(mask, options, 1, true)) {
-        const auto parallel_result = dispatch_parallel_mode(
-            mask, source_array, targets, options, costs, workspace, zero_halo
-        );
-        if (parallel_result.completed) {
-            const auto reached = parallel_result.reached_target;
-            if (reached == kNoTarget) {
-                throw std::runtime_error("no target is reachable from source");
-            }
-            path.clear();
-            auto node = reached;
-            while (true) {
-                path.push_back(node);
-                const auto parent = workspace.parallel.predecessors[node];
-                if (parent == node) {
-                    break;
-                }
-                node = parent;
-                if (path.size() > n) {
-                    throw std::runtime_error(
-                        "cycle in predecessor chain while reconstructing path"
-                    );
-                }
-            }
-            std::reverse(path.begin(), path.end());
-            return;
-        }
-    }
 
     begin_path(workspace, n);
     if (options.cost_mode == DijkstraCostMode::NodeTimesPhysical) {

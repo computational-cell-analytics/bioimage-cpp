@@ -1,4 +1,5 @@
 #include "flow.hxx"
+#include "ndarray.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/grid.hxx"
@@ -31,16 +32,6 @@ std::vector<std::ptrdiff_t> shape_of(const Array &array) {
         shape[axis] = static_cast<std::ptrdiff_t>(array.shape(axis));
     }
     return shape;
-}
-
-DensityArray make_density_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new float[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<float *>(p); });
-    return DensityArray(data, shape.size(), shape.data(), owner);
 }
 
 template <std::size_t D>
@@ -117,11 +108,11 @@ DensityArray compute_flow_density_t(
         out_shape[axis] = fg_mask.shape(axis);
         view_shape[axis] = static_cast<std::ptrdiff_t>(fg_mask.shape(axis));
     }
-    auto density = make_density_array(out_shape);
+    auto density = detail::make_array<float>(out_shape);
 
     const auto flow_shape = shape_of(flow);
-    const auto flow_strides = detail::c_order_strides(flow_shape);
-    const auto mask_strides = detail::c_order_strides(view_shape);
+    const auto flow_strides = bioimage_cpp::detail::c_order_strides(flow_shape);
+    const auto mask_strides = bioimage_cpp::detail::c_order_strides(view_shape);
     ConstArrayView<float> flow_view{flow.data(), flow_shape, flow_strides};
     ConstArrayView<std::uint8_t> mask_view{fg_mask.data(), view_shape, mask_strides};
     ArrayView<float> density_view{density.data(), view_shape, mask_strides};

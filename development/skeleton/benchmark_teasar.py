@@ -88,43 +88,6 @@ def count_bic(result) -> tuple[int, int]:
     return len(vertices), len(edges)
 
 
-def compare_skeletons(reference, candidate, spacing):
-    """Return the FP32 acceptance metrics used by OPTIM_DIJKSTRA.md."""
-    ref_vertices, ref_edges, _ = reference
-    got_vertices, got_edges, _ = candidate
-
-    def degree_signature(edges, n_vertices):
-        degrees = np.bincount(edges.ravel().astype(np.int64), minlength=n_vertices)
-        return tuple(sorted(int(degree) for degree in degrees if degree != 2))
-
-    ref_voxels = ref_vertices / np.asarray(spacing, dtype=np.float64)
-    got_voxels = got_vertices / np.asarray(spacing, dtype=np.float64)
-    pairwise = np.linalg.norm(
-        ref_voxels[:, None, :] - got_voxels[None, :, :], axis=2
-    )
-    ref_to_got = pairwise.min(axis=1)
-    got_to_ref = pairwise.min(axis=0)
-
-    def total_length(vertices, edges):
-        if len(edges) == 0:
-            return 0.0
-        return float(
-            np.linalg.norm(vertices[edges[:, 0]] - vertices[edges[:, 1]], axis=1).sum()
-        )
-
-    ref_length = total_length(ref_vertices, ref_edges)
-    got_length = total_length(got_vertices, got_edges)
-    return {
-        "topology_match": degree_signature(ref_edges, len(ref_vertices))
-        == degree_signature(got_edges, len(got_vertices)),
-        "bidirectional_p95_voxels": float(
-            max(np.percentile(ref_to_got, 95), np.percentile(got_to_ref, 95))
-        ),
-        "hausdorff_voxels": float(max(ref_to_got.max(), got_to_ref.max())),
-        "relative_length_error": abs(got_length - ref_length) / max(ref_length, 1e-300),
-    }
-
-
 def kimimaro_call(
     mask,
     spacing,
@@ -185,7 +148,7 @@ def main() -> int:
     parser.add_argument(
         "--sequential-backends",
         action="store_true",
-        help="compare dense FP64, compact on-the-fly/CSR FP64, and CSR FP32",
+        help="compare dense FP64 and compact on-the-fly/CSR FP64",
     )
     parser.add_argument("--json", default="", help="optional JSON result path")
     parser.add_argument(
@@ -226,7 +189,6 @@ def main() -> int:
                 "dense-fp64",
                 "compact-on-the-fly-fp64",
                 "compact-csr-fp64",
-                "compact-csr-fp32",
             )
         ]
     else:
@@ -259,7 +221,6 @@ def main() -> int:
         )
 
     rows = []
-    quality_rows = []
     header = f"{'backend':>14} {'shape':>14} {'foreground':>11} {'vertices':>9} {'median ms':>11} {'min ms':>10}"
     print(header)
     print("-" * len(header))
@@ -303,19 +264,6 @@ def main() -> int:
                     )
                 )
                 print(f"  {exact_backend} exact dense parity: {exact}")
-            quality = compare_skeletons(
-                results_by_backend["compact-csr-fp64"],
-                results_by_backend["compact-csr-fp32"],
-                spacing,
-            )
-            quality_rows.append({"shape": list(mask.shape), **quality})
-            print(
-                "  FP32 quality: "
-                f"topology={quality['topology_match']} "
-                f"p95={quality['bidirectional_p95_voxels']:.3f} vox "
-                f"hausdorff={quality['hausdorff_voxels']:.3f} vox "
-                f"length_error={quality['relative_length_error']:.3%}"
-            )
         if args.kimimaro and not args.sequential_backends:
             by_name = {row["backend"]: row for row in case_rows}
             for number_of_threads in args.threads:
@@ -330,11 +278,7 @@ def main() -> int:
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as file:
-            json.dump(
-                {"repeats": args.repeats, "results": rows, "quality": quality_rows},
-                file,
-                indent=2,
-            )
+            json.dump({"repeats": args.repeats, "results": rows}, file, indent=2)
         print(f"wrote {args.json}", file=sys.stderr)
     return 0
 

@@ -1,4 +1,5 @@
 #include "util.hxx"
+#include "ndarray.hxx"
 
 #include "bioimage_cpp/util/union_find.hxx"
 
@@ -82,8 +83,8 @@ OutputArray find_nodes(util::UnionFind &uf, NodeArray nodes) {
     const auto *input = nodes.data();
     check_nodes(uf, input, n, "node");
 
-    auto *out = new std::uint64_t[n]();
-    nb::capsule owner(out, [](void *p) noexcept { delete[] static_cast<std::uint64_t *>(p); });
+    auto output = detail::make_array<std::uint64_t>({n});
+    auto *out = output.data();
 
     {
         nb::gil_scoped_release release;
@@ -92,8 +93,7 @@ OutputArray find_nodes(util::UnionFind &uf, NodeArray nodes) {
         }
     }
 
-    std::size_t shape[1] = {n};
-    return OutputArray(out, 1, shape, owner);
+    return output;
 }
 
 std::uint64_t find_node(util::UnionFind &uf, const std::uint64_t node) {
@@ -115,8 +115,8 @@ std::uint64_t merge_to_node(util::UnionFind &uf, const std::uint64_t stable, con
 
 OutputArray element_labeling(util::UnionFind &uf) {
     const auto n = uf.size();
-    auto *out = new std::uint64_t[n]();
-    nb::capsule owner(out, [](void *p) noexcept { delete[] static_cast<std::uint64_t *>(p); });
+    auto output = detail::make_array<std::uint64_t>({n});
+    auto *out = output.data();
 
     {
         nb::gil_scoped_release release;
@@ -125,8 +125,7 @@ OutputArray element_labeling(util::UnionFind &uf) {
         }
     }
 
-    std::size_t shape[1] = {n};
-    return OutputArray(out, 1, shape, owner);
+    return output;
 }
 
 } // namespace

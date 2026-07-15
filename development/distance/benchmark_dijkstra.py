@@ -10,6 +10,8 @@ Examples
 --------
 python development/distance/benchmark_dijkstra.py --small --repeats 3
 python development/distance/benchmark_dijkstra.py --repeats 10 --include-geodesic
+python development/distance/benchmark_dijkstra.py --small --threads 1 2 4 \
+    --broad-multisource
 python development/distance/benchmark_dijkstra.py --large --repeats 3 \
     --include-geodesic --json /tmp/dijkstra.json
 """
@@ -64,7 +66,20 @@ def time_call(function, repeats: int, warmup: int) -> list[float]:
     return samples
 
 
-def build_cases(shape: tuple[int, ...], include_geodesic: bool, number_of_threads: int):
+def source_plane(mask: np.ndarray) -> np.ndarray:
+    """Return all foreground coordinates on the first axis-zero plane."""
+    plane_shape = mask.shape[1:]
+    tail = np.indices(plane_shape, dtype=np.int64).reshape(len(plane_shape), -1).T
+    sources = np.column_stack((np.zeros(len(tail), dtype=np.int64), tail))
+    return np.ascontiguousarray(sources[mask[tuple(sources.T)] != 0])
+
+
+def build_cases(
+    shape: tuple[int, ...],
+    include_geodesic: bool,
+    number_of_threads: int,
+    broad_multisource: bool,
+):
     mask = make_mask(shape)
     source = np.full(len(shape), 2, dtype=np.int64)
     target = np.asarray(shape, dtype=np.int64) - 3
@@ -124,6 +139,32 @@ def build_cases(shape: tuple[int, ...], include_geodesic: bool, number_of_thread
             ),
         ),
     ]
+    if broad_multisource:
+        sources = source_plane(mask)
+        cases.extend(
+            [
+                (
+                    "dijkstra/broad-multisource-physical-field",
+                    lambda: bic.distance.dijkstra_distance_field(
+                        mask,
+                        sources,
+                        spacing=spacing,
+                        number_of_threads=number_of_threads,
+                    ),
+                ),
+                (
+                    "dijkstra/broad-multisource-node-times-physical-field",
+                    lambda: bic.distance.dijkstra_distance_field(
+                        mask,
+                        sources,
+                        costs=costs,
+                        cost_mode="node_times_physical",
+                        spacing=spacing,
+                        number_of_threads=number_of_threads,
+                    ),
+                ),
+            ]
+        )
     if include_geodesic:
         cases.append(
             (
@@ -148,6 +189,11 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--include-geodesic", action="store_true")
     parser.add_argument(
+        "--broad-multisource",
+        action="store_true",
+        help="include source-plane fields that exercise parallel delta stepping",
+    )
+    parser.add_argument(
         "--threads", type=int, nargs="+", default=[1],
         help="thread counts to benchmark (0 uses hardware concurrency)",
     )
@@ -170,7 +216,10 @@ def main() -> int:
     for shape in shapes:
         for number_of_threads in args.threads:
             mask, cases = build_cases(
-                shape, args.include_geodesic, number_of_threads
+                shape,
+                args.include_geodesic,
+                number_of_threads,
+                args.broad_multisource,
             )
             foreground = int(np.count_nonzero(mask))
             for name, function in cases:

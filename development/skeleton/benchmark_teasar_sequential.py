@@ -21,7 +21,6 @@ import numpy as np
 
 from benchmark_teasar import (
     bic_backend_call,
-    compare_skeletons,
     count_bic,
     draw_ball,
     make_branching_tube,
@@ -33,7 +32,6 @@ BACKENDS = (
     "dense-fp64",
     "compact-on-the-fly-fp64",
     "compact-csr-fp64",
-    "compact-csr-fp32",
 )
 
 
@@ -100,7 +98,6 @@ def main() -> int:
         parser.error("--repeats must be >= 1 and --warmup must be >= 0")
 
     rows = []
-    quality_rows = []
     header = (
         f"{'case':>23} {'backend':>27} {'shape':>14} {'foreground':>11} "
         f"{'vertices':>9} {'median ms':>11}"
@@ -145,32 +142,9 @@ def main() -> int:
                 for got, expected in zip(results[backend], results["dense-fp64"])
             ):
                 raise RuntimeError(f"{case_name}: {backend} lost exact dense parity")
-        quality_rows.append(
-            {
-                "case": case_name,
-                **compare_skeletons(
-                    results["compact-csr-fp64"],
-                    results["compact-csr-fp32"],
-                    spacing,
-                ),
-            }
-        )
-
     if args.json:
         with open(args.json, "w", encoding="utf-8") as file:
-            json.dump(
-                {"repeats": args.repeats, "results": rows, "quality": quality_rows},
-                file,
-                indent=2,
-            )
-    print("\nFP32 quality versus compact CSR FP64")
-    for quality in quality_rows:
-        print(
-            f"{quality['case']:>23}: topology={quality['topology_match']} "
-            f"p95={quality['bidirectional_p95_voxels']:.3f} "
-            f"hausdorff={quality['hausdorff_voxels']:.3f} "
-            f"length_error={quality['relative_length_error']:.3%}"
-        )
+            json.dump({"repeats": args.repeats, "results": rows}, file, indent=2)
     return 0
 
 

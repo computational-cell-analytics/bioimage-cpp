@@ -45,7 +45,6 @@ enum class TeasarBackend {
     DenseFloat64,
     CompactOnTheFlyFloat64,
     CompactCsrFloat64,
-    CompactCsrFloat32,
 };
 
 namespace detail_teasar {
@@ -100,6 +99,28 @@ inline std::size_t farthest_foreground(
         }
     }
     return farthest;
+}
+
+inline void invalidation_bounds(
+    const std::vector<std::ptrdiff_t> &coords,
+    const double radius,
+    const std::array<double, 3> &spacing,
+    const std::vector<std::ptrdiff_t> &shape,
+    std::array<std::ptrdiff_t, 3> &lo,
+    std::array<std::ptrdiff_t, 3> &hi
+) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const double half_width = radius / spacing[axis];
+        const double lo_value = std::max(
+            0.0, static_cast<double>(coords[axis]) - half_width
+        );
+        const double hi_value = std::min(
+            static_cast<double>(shape[axis] - 1),
+            static_cast<double>(coords[axis]) + half_width
+        );
+        lo[axis] = static_cast<std::ptrdiff_t>(std::ceil(lo_value));
+        hi[axis] = static_cast<std::ptrdiff_t>(std::floor(hi_value));
+    }
 }
 
 } // namespace detail_teasar
@@ -197,6 +218,7 @@ inline SkeletonGraph teasar_dense(
             padded_view, {root}, physical_options
         );
     }
+    std::vector<double>().swap(first_field.distances);
 
     double dbf_max = 0.0;
     double daf_max = 0.0;
@@ -306,18 +328,9 @@ inline SkeletonGraph teasar_dense(
                 }
                 std::array<std::ptrdiff_t, 3> lo{};
                 std::array<std::ptrdiff_t, 3> hi{};
-                for (std::size_t axis = 0; axis < 3; ++axis) {
-                    const double half_width = radius / options.spacing[axis];
-                    const double lo_value = std::max(
-                        0.0, static_cast<double>(coords[axis]) - half_width
-                    );
-                    const double hi_value = std::min(
-                        static_cast<double>(shape[axis] - 1),
-                        static_cast<double>(coords[axis]) + half_width
-                    );
-                    lo[axis] = static_cast<std::ptrdiff_t>(std::ceil(lo_value));
-                    hi[axis] = static_cast<std::ptrdiff_t>(std::floor(hi_value));
-                }
+                detail_teasar::invalidation_bounds(
+                    coords, radius, options.spacing, shape, lo, hi
+                );
                 for (std::ptrdiff_t z = lo[0]; z <= hi[0]; ++z) {
                     for (std::ptrdiff_t y = lo[1]; y <= hi[1]; ++y) {
                         for (std::ptrdiff_t x = lo[2]; x <= hi[2]; ++x) {
@@ -459,7 +472,7 @@ inline SkeletonGraph teasar_compact(
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "root_dijkstra")
         detail::compact_physical_distance_field<Adjacency>(
-            domain, 0, dijkstra_workspace, first_field, effective_threads
+            domain, 0, dijkstra_workspace, first_field
         );
         Distance farthest_distance = Distance{-1};
         for (std::uint32_t node = 0; node < domain.size(); ++node) {
@@ -474,7 +487,7 @@ inline SkeletonGraph teasar_compact(
             }
         }
         detail::compact_physical_distance_field<Adjacency>(
-            domain, root, dijkstra_workspace, root_field, effective_threads
+            domain, root, dijkstra_workspace, root_field
         );
     }
     std::vector<Distance>().swap(first_field);
@@ -555,8 +568,7 @@ inline SkeletonGraph teasar_compact(
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "path_dijkstra")
             detail::compact_node_cost_path<Adjacency>(
-                domain, target, skeleton_nodes, pdrf, dijkstra_workspace, path,
-                effective_threads
+                domain, target, skeleton_nodes, pdrf, dijkstra_workspace, path
             );
         }
 
@@ -591,18 +603,9 @@ inline SkeletonGraph teasar_compact(
                 }
                 std::array<std::ptrdiff_t, 3> lo{};
                 std::array<std::ptrdiff_t, 3> hi{};
-                for (std::size_t axis = 0; axis < 3; ++axis) {
-                    const double half_width = radius / options.spacing[axis];
-                    const double lo_value = std::max(
-                        0.0, static_cast<double>(coords[axis]) - half_width
-                    );
-                    const double hi_value = std::min(
-                        static_cast<double>(shape[axis] - 1),
-                        static_cast<double>(coords[axis]) + half_width
-                    );
-                    lo[axis] = static_cast<std::ptrdiff_t>(std::ceil(lo_value));
-                    hi[axis] = static_cast<std::ptrdiff_t>(std::floor(hi_value));
-                }
+                detail_teasar::invalidation_bounds(
+                    coords, radius, options.spacing, shape, lo, hi
+                );
                 for (std::ptrdiff_t z = lo[0]; z <= hi[0]; ++z) {
                     for (std::ptrdiff_t y = lo[1]; y <= hi[1]; ++y) {
                         const auto row = static_cast<std::size_t>(
@@ -651,8 +654,6 @@ inline SkeletonGraph teasar_with_backend(
             return teasar_dense(mask, options);
         case TeasarBackend::CompactCsrFloat64:
             return teasar_compact<detail::CompactAdjacency::Csr, double>(mask, options);
-        case TeasarBackend::CompactCsrFloat32:
-            return teasar_compact<detail::CompactAdjacency::Csr, float>(mask, options);
     }
     throw std::invalid_argument("invalid TEASAR backend");
 }

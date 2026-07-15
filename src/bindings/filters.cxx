@@ -1,4 +1,5 @@
 #include "filters.hxx"
+#include "ndarray.hxx"
 
 #include "bioimage_cpp/filters/gaussian.hxx"
 
@@ -54,11 +55,7 @@ void require_non_negative_window(double window_size, const char *function) {
 }
 
 Image allocate_image(const std::size_t *shape, std::size_t ndim) {
-    std::size_t total = 1;
-    for (std::size_t i = 0; i < ndim; ++i) total *= shape[i];
-    auto *data = new float[total]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<float *>(p); });
-    return Image(data, ndim, shape, owner);
+    return detail::make_array<float>(std::span<const std::size_t>(shape, ndim));
 }
 
 // ---------------------------------------------------------------------------

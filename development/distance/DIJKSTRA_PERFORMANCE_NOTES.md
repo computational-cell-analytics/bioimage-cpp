@@ -543,12 +543,15 @@ gate: matching contracted branch/leaf topology, bidirectional 95th-percentile
 distance at most one normalized voxel, Hausdorff distance at most two voxels,
 and total physical length within 2% of sequential compact FP64.
 
-## Implemented parallel follow-up
+## Initial parallel follow-up (dispatch later narrowed)
 
 Implemented after reviewing the draft above. The implementation scope was
 expanded to the dense public Dijkstra fields as well as the compact TEASAR
 backend. Both use one deterministic FP64 delta-stepping primitive in
 `distance/detail/delta_stepping.hxx`; the optimized heaps remain unchanged.
+
+This section records the initial implementation. The review follow-up below
+supersedes its weighted-field and compact-TEASAR dispatch decisions.
 
 The concrete design closes several gaps in the draft:
 
@@ -586,3 +589,59 @@ through the measured tiers while sharing the requested thread budget with EDT;
 the delta backend remains available for much larger compact domains. The
 development benchmarks now accept thread matrices so these thresholds can be
 revisited with evidence on other machines.
+
+## Review follow-up: retained delta-stepping scope
+
+The review follow-up on 2026-07-15 narrowed delta stepping to the case for which
+the benchmark shows a consistent benefit: broad multi-source **physical**
+fields. Paths, one/few-source fields, both weighted modes, small problems, and
+all compact TEASAR solves use their specialized heaps. The compact adapter and
+its duplicated sampled-cost-median heuristic were removed completely.
+
+`development/distance/benchmark_dijkstra.py --broad-multisource` adds a full
+source plane and can reproduce the dispatch. Three-repeat final medians were:
+
+| shape / mode | 1 thread | 2 threads | 4 threads | 1-to-4 scaling |
+| --- | ---: | ---: | ---: | ---: |
+| `256 x 256`, physical | 13.57 ms | 5.89 ms | 5.85 ms | 2.32x |
+| `256 x 256`, node-times-physical | 9.80 ms | 9.62 ms | 9.49 ms | 1.03x |
+| `32 x 96 x 96`, physical | 120.55 ms | 60.46 ms | 55.22 ms | 2.18x |
+| `32 x 96 x 96`, node-times-physical | 92.31 ms | 89.31 ms | 92.27 ms | 1.00x |
+
+The weighted rows now show heap noise rather than parallel scaling. Before the
+dispatch was narrowed, their 2/4-thread medians were 149.35/148.64 ms in 3D,
+versus the final 89.31/92.27 ms. Retaining delta stepping for that mode would
+have knowingly shipped a roughly 1.6x regression. The physical 3D row retains
+the useful broad-wavefront speedup (the pre-change medians were 122.79, 60.81,
+and 51.06 ms; the four-thread final minimum was 50.79 ms).
+
+The bucket-index quotient now uses `double`, matching the actual distance and
+delta types on every wheel target. Conversion uses an exclusive, exactly
+representable `2^64` upper bound to avoid undefined out-of-range conversion.
+A decimal-spacing case above the parallel threshold (`0.1, 0.5, 1.25`) asserts
+array-exact distances against the heap and deterministic predecessors between
+two and four threads.
+
+Two proposed changes remain intentionally unimplemented:
+
+- Equal-candidate predecessor handling still uses the existing strict-update
+  behavior. Distances are exact, two/four-thread predecessor fields are
+  deterministic, and refusing equal-distance rewrites prevents cycles in
+  zero-weight components. Harmonizing the small-frontier and merged-proposal
+  tie rules would change an observable predecessor/path choice, so it needs a
+  separately chosen public tie contract rather than being bundled into a
+  portability fix.
+- `std::map` buckets were not replaced speculatively. A flat vector gives O(1)
+  lookup for dense bucket ranges but can allocate excessively when FP64 weights
+  create large sparse index gaps; a ring or segmented design adds rebasing and
+  overflow complexity. Profile bucket lookup/allocation separately on the
+  retained broad physical workload before changing the data structure.
+
+The dispatch threshold (`foreground >= 32768` and at least approximately one
+source per 256 foreground voxels) remains benchmark-derived and intentionally
+conservative. The standalone benchmark records both heap and dispatched cases
+so it can be retuned on materially different wheel hardware.
+
+Final validation used a normal editable build and reported `1145 passed`. The
+optional array-view lifetime fix was also suite-tested in a separate build with
+`-fno-elide-constructors`, specifically removing any dependence on NRVO.

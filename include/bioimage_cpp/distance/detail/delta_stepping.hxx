@@ -118,11 +118,10 @@ inline bool bucket_index(
     if (!(std::isfinite(distance) && std::isfinite(delta) && delta > 0.0)) {
         return false;
     }
-    const long double quotient = std::floor(
-        static_cast<long double>(distance) / static_cast<long double>(delta)
-    );
-    if (!(quotient >= 0.0L) ||
-        quotient > static_cast<long double>(std::numeric_limits<std::uint64_t>::max())) {
+    const double quotient = std::floor(distance / delta);
+    // uint64 max rounds upward to 2^64 in double. Treat that exactly
+    // representable value as an exclusive upper bound before conversion.
+    if (!(quotient >= 0.0) || quotient >= 0x1p64) {
         return false;
     }
     index = static_cast<std::uint64_t>(quotient);

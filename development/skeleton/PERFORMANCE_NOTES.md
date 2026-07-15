@@ -302,7 +302,7 @@ remains FP64. Parallel shortest paths remain a separate follow-up.
 
 Final verification after selecting compact on-the-fly FP64: `1129 passed`.
 
-## Implemented parallel follow-up
+## Initial parallel follow-up (compact dispatch later removed)
 
 The shared thread budget for the distance transform and compact Dijkstra solves
 was implemented and measured on 2026-07-15. The reference matrix now passes
@@ -348,6 +348,9 @@ connected components. Each branching tube contains only one component, so the
 pool has one useful tracing task and additional workers mostly add process and
 shared-memory overhead. The only measured kimimaro improvement was about 3%
 at four workers on `256^3`.
+
+This section records the initial implementation. The threshold-focused review
+follow-up below supersedes its compact-Dijkstra dispatch decision.
 
 Worker count did not change either implementation's graph size:
 
@@ -447,3 +450,66 @@ and preallocated outputs.
 
 Final verification: `1141 passed` with third-party pytest plugin autoload
 disabled. The normal editable build was restored after profiling.
+
+## Review follow-up: compact dispatch and deferred optimizations
+
+The post-optimization review was resolved on 2026-07-15. The compact
+delta-stepping adapter was removed rather than retained behind its
+`1 << 20`-foreground threshold. It was unreachable in the established sparse
+tube benchmarks and, when exercised by new threshold-focused cases, it caused
+a large regression. Compact root and rail solves now always use their optimized
+heap; `number_of_threads` still controls the exact distance transform.
+
+Reproduce the dispatch matrix with:
+
+```bash
+python development/skeleton/benchmark_teasar_dispatch.py \
+    --threads 1 2 4 --repeats 5 --warmup 1
+```
+
+The benchmark checks array-exact vertices, edges, and radii across worker
+counts. Five-repeat medians before and after removing the adapter were:
+
+| case | workers | before | after | change |
+| --- | ---: | ---: | ---: | ---: |
+| solid cube, 1,061,208 foreground | 1 | 1037.89 ms | 1059.10 ms | +2.0% |
+| solid cube, 1,061,208 foreground | 2 | 1970.56 ms | 1044.70 ms | -47.0% |
+| solid cube, 1,061,208 foreground | 4 | 1872.36 ms | 1028.86 ms | -45.1% |
+| solid cuboid, 1,048,576 foreground | 1 | 1066.11 ms | 1115.94 ms | +4.7% |
+| solid cuboid, 1,048,576 foreground | 2 | 1985.48 ms | 1130.47 ms | -43.1% |
+| solid cuboid, 1,048,576 foreground | 4 | 1943.07 ms | 1093.50 ms | -43.7% |
+| branching tube, 132,619 foreground | 1 | 305.56 ms | 313.56 ms | +2.6% |
+| branching tube, 132,619 foreground | 2 | 228.84 ms | 239.68 ms | +4.7% |
+| branching tube, 132,619 foreground | 4 | 198.84 ms | 199.86 ms | +0.5% |
+
+The small single-thread differences are within the predeclared 5% noise gate;
+the exact-threshold cases show that the removed dispatch nearly doubled
+runtime. The branching tube still scales through the threaded EDT without
+parallelizing its narrow shortest-path wavefronts.
+
+Other review-driven cleanup retained exact behavior: dense TEASAR releases its
+first root field after selecting the final root; dense and compact TEASAR share
+one invalidation-bounds calculation; invalid compact targets are checked before
+workspace mutation; and the failed experimental FP32 backend is no longer
+compiled or exposed by the development selector. Dense FP64 remains an
+independent correctness oracle rather than being folded into a template-heavy
+common rail driver.
+
+The following proposed optimizations were deliberately deferred:
+
+- A pre-sorted target list would replace an O(P x V) scan, but the measured
+  target-selection phase is only 0.8 ms on the `256^3` fixture. Its O(V log V)
+  setup, extra memory, and invalidation bookkeeping cannot pay back materially
+  at present.
+- Touched-node or generation-based compact state reset could avoid a V-byte
+  clear per rail, but all rail-path Dijkstra work is only 26.6 ms in the same
+  profile. Adding a branch/write to every discovery without first isolating
+  reset time risks moving cost into the hotter relaxation loop. Revisit only
+  after profiling reset as its own phase on a many-rail case.
+- A full dense/compact rail-loop abstraction was rejected for now. The indexing,
+  storage, crop handling, and invalidation strategies are intentionally
+  different, and keeping the dense oracle structurally independent helps it
+  catch compact-specific regressions. Only the identical, policy-free bounds
+  calculation was shared.
+- Candidate-target and state-reset changes are therefore benchmark follow-ups,
+  not pending correctness fixes.

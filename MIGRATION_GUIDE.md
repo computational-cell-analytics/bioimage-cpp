@@ -2382,11 +2382,11 @@ sources point to their own flat C-order index and background/unreachable voxels
 contain `-1`. Paths are `int64` NumPy-axis-order coordinates from the source to
 the selected target. Target ties are deterministic and use flat C-order indices.
 `number_of_threads=1` retains the specialized sequential heaps; `0` uses
-hardware concurrency. Threaded solves use exact FP64 delta stepping: distance
-fields are bitwise-identical to the sequential result, while an equal-cost
-predecessor or path may differ from the sequential heap but remains deterministic.
-Small workloads and underperforming cost modes automatically retain the
-sequential implementation.
+hardware concurrency. Broad multi-source physical fields can use exact FP64
+delta stepping: distance fields are bitwise-identical to the sequential result,
+while an equal-cost predecessor may differ from the sequential heap but remains
+deterministic. Paths, weighted modes, small workloads, and narrow source sets
+retain the faster specialized heaps.
 
 This Dijkstra field is deliberately distinct from
 `geodesic_distance_field` below. Dijkstra is exact for the chosen 4/8- or
@@ -2401,7 +2401,8 @@ are close on well-sampled, uniform domains but are not numerically equivalent;
 TEASAR therefore uses Dijkstra where it must reconstruct and join paths.
 
 See `development/distance/benchmark_dijkstra.py` for a standalone benchmark of
-the Dijkstra field, predecessor field, weighted field, and early-stopping path.
+the Dijkstra field, predecessor field, weighted field, and early-stopping path;
+pass `--broad-multisource` to exercise the delta-stepping dispatch.
 The implementation uses reusable fixed neighbor metadata and specialized heap
 strategies internally, but these do not change dtype, tie-breaking, or public
 results.
@@ -2557,19 +2558,19 @@ Important differences and current scope:
   change branch positions and vertex counts, so output is not expected to be
   vertex-for-vertex identical to kimimaro.
 - The C++ core remains dependency-free. `number_of_threads=1` is the default;
-  `0` uses hardware concurrency. One thread budget is shared by the exact
-  distance transform and the internal FP64 compact-foreground Dijkstra backend.
-  Dependent root sweeps and rails remain ordered, while sufficiently large
-  shortest-path wavefronts use deterministic delta stepping. Compact IDs avoid
-  full-volume shortest-path fields. The public Dijkstra functions remain dense
-  and exact FP64.
+  `0` uses hardware concurrency. The thread budget controls the exact distance
+  transform. Compact-foreground root sweeps and rails remain ordered on the
+  optimized heap: threshold benchmarks showed that staged delta stepping nearly
+  doubled runtime for large solid objects. Compact IDs avoid full-volume
+  shortest-path fields. The public Dijkstra functions remain dense and exact
+  FP64, with delta stepping reserved for broad physical multi-source fields.
 
 Correctness tests are under `tests/skeleton/test_teasar.py`. The independent
 Dijkstra benchmark is `development/distance/benchmark_dijkstra.py`; the
 end-to-end synthetic branching-tube benchmark is
 `development/skeleton/benchmark_teasar.py` and can optionally add kimimaro with
 `--kimimaro` when it is installed. Pass `--sequential-backends` to reproduce
-the dense/compact/precision design matrix; extended density, spacing, and PDRF
+the dense/compact FP64 design matrix; extended density, spacing, and PDRF
 regimes are in `development/skeleton/benchmark_teasar_sequential.py`.
 
 ## I/O and Build Dependencies

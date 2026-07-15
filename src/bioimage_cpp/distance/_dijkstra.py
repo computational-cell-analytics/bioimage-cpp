@@ -113,10 +113,14 @@ def dijkstra_distance_field(
     cost_mode:
         ``"physical"``, ``"node"``, or ``"node_times_physical"``.
     return_predecessors:
-        Also return a flat-index predecessor field when true.
+        Also return a flat-index predecessor field when true. Equal-cost
+        predecessor choices are deterministic for a fixed backend, but a broad
+        threaded physical field may choose a different valid predecessor than
+        the sequential heap.
     number_of_threads:
         ``0`` uses hardware concurrency; a positive value pins the thread
-        count. The default ``1`` uses the optimized sequential heap.
+        count. Broad multi-source physical fields may use parallel delta
+        stepping; paths and weighted or narrow fields retain optimized heaps.
 
     Returns
     -------

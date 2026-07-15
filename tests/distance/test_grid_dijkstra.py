@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 import bioimage_cpp as bic
+from bioimage_cpp import _core
 
 
 def _reference(mask, sources, connectivity, spacing, costs=None, mode="physical"):
@@ -304,6 +305,49 @@ def test_threaded_fields_match_sequential_exactly(mode):
             steps += 1
             assert steps <= np.prod(shape)
         assert np.unravel_index(node, shape)[0] == 0
+
+
+def test_decimal_spacing_parallel_buckets_match_sequential_exactly():
+    shape = (24, 40, 40)  # Above the parallel-backend workload threshold.
+    mask = np.ones(shape, dtype=np.uint8)
+    yy, xx = np.indices(shape[1:])
+    sources = np.stack(
+        [np.zeros(yy.size, dtype=np.int64), yy.ravel(), xx.ravel()], axis=1
+    )
+    kwargs = {
+        "spacing": (0.1, 0.5, 1.25),
+        "return_predecessors": True,
+    }
+
+    sequential, _ = bic.distance.dijkstra_distance_field(
+        mask, sources, number_of_threads=1, **kwargs
+    )
+    threaded_two, predecessors_two = bic.distance.dijkstra_distance_field(
+        mask, sources, number_of_threads=2, **kwargs
+    )
+    threaded_four, predecessors_four = bic.distance.dijkstra_distance_field(
+        mask, sources, number_of_threads=4, **kwargs
+    )
+    np.testing.assert_array_equal(threaded_two, sequential)
+    np.testing.assert_array_equal(threaded_four, sequential)
+    np.testing.assert_array_equal(predecessors_four, predecessors_two)
+
+
+def test_direct_dijkstra_binding_reports_malformed_coordinate_shapes():
+    mask = np.ones((3, 4), dtype=np.uint8)
+    source = np.array([0, 0], dtype=np.int64)
+    targets = np.array([[2, 3]], dtype=np.int64)
+    with pytest.raises(ValueError, match=r"got shape=\(2,\), mask.ndim=2"):
+        _core._dijkstra_path_mask(
+            mask, source, targets, 2, [1.0, 1.0], None, 0, 1
+        )
+
+    sources = np.array([[0, 0]], dtype=np.int64)
+    bad_targets = np.zeros((1, 3), dtype=np.int64)
+    with pytest.raises(ValueError, match=r"got shape=\(1, 3\), mask.ndim=2"):
+        _core._dijkstra_path_mask(
+            mask, sources, bad_targets, 2, [1.0, 1.0], None, 0, 1
+        )
 
 
 def test_threaded_zero_cost_path_is_deterministic_across_thread_counts():

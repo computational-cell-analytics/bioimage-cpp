@@ -1,4 +1,5 @@
 #include "distance.hxx"
+#include "ndarray.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/distance/distance_transform.hxx"
@@ -42,23 +43,28 @@ std::vector<std::ptrdiff_t> ndarray_shape(const Array &array) {
     return shape;
 }
 
+template <class Array>
+std::string ndarray_shape_string(const Array &array) {
+    std::string result = "(";
+    for (std::size_t axis = 0; axis < array.ndim(); ++axis) {
+        if (axis != 0) {
+            result += ", ";
+        }
+        result += std::to_string(array.shape(axis));
+    }
+    if (array.ndim() == 1) {
+        result += ",";
+    }
+    result += ")";
+    return result;
+}
+
 std::vector<std::size_t> size_t_shape(const std::vector<std::ptrdiff_t> &shape) {
     std::vector<std::size_t> out(shape.size());
     for (std::size_t axis = 0; axis < shape.size(); ++axis) {
         out[axis] = static_cast<std::size_t>(shape[axis]);
     }
     return out;
-}
-
-template <class T, class Array>
-Array make_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new T[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
-    return Array(data, shape.size(), shape.data(), owner);
 }
 
 void check_buffer_shape(
@@ -128,7 +134,7 @@ nb::tuple distance_transform_uint8(
             distances_array = *distances_buf;
             distances_user_provided = true;
         } else {
-            distances_array = make_array<float, FloatArray>(distances_shape);
+            distances_array = detail::make_array<float>(distances_shape);
         }
     }
 
@@ -139,7 +145,7 @@ nb::tuple distance_transform_uint8(
             indices_array = *indices_buf;
             indices_user_provided = true;
         } else {
-            indices_array = make_array<std::int32_t, Int32Array>(indices_shape);
+            indices_array = detail::make_array<std::int32_t>(indices_shape);
         }
     }
 
@@ -150,7 +156,7 @@ nb::tuple distance_transform_uint8(
             vectors_array = *vectors_buf;
             vectors_user_provided = true;
         } else {
-            vectors_array = make_array<float, FloatArray>(vectors_shape);
+            vectors_array = detail::make_array<float>(vectors_shape);
         }
     }
 
@@ -260,8 +266,7 @@ nb::ndarray<nb::numpy, PointT, nb::c_contig> non_maximum_distance_suppression_im
 
     const std::size_t n_kept = kept_indices.size();
     std::vector<std::size_t> out_shape{n_kept, coord_ndim};
-    auto output =
-        make_array<PointT, nb::ndarray<nb::numpy, PointT, nb::c_contig>>(out_shape);
+    auto output = detail::make_array<PointT>(out_shape);
     PointT *out_data = output.data();
     for (std::size_t k = 0; k < n_kept; ++k) {
         const std::size_t i = kept_indices[k];
@@ -277,24 +282,17 @@ nb::ndarray<nb::numpy, PointT, nb::c_contig> non_maximum_distance_suppression_im
 // ---------------------------------------------------------------------------
 
 // Build a ConstArrayView<double> over an optional speed ndarray, checking its
-// shape against `expected`. Returns nullptr when no speed was supplied.
-struct OptionalSpeed {
-    ConstArrayView<double> view;
-    const ConstArrayView<double> *ptr = nullptr;
-};
-
-OptionalSpeed make_optional_speed(
+// shape against `expected`.
+std::optional<ConstArrayView<double>> make_optional_speed(
     const std::optional<DoubleInput> &speed,
     const std::vector<std::ptrdiff_t> &shape,
     const char *name = "speed"
 ) {
-    OptionalSpeed result;
-    if (speed.has_value()) {
-        check_buffer_shape(name, ndarray_shape(*speed), size_t_shape(shape));
-        result.view = ConstArrayView<double>{speed->data(), shape, {}};
-        result.ptr = &result.view;
+    if (!speed.has_value()) {
+        return std::nullopt;
     }
-    return result;
+    check_buffer_shape(name, ndarray_shape(*speed), size_t_shape(shape));
+    return ConstArrayView<double>{speed->data(), shape, {}};
 }
 
 distance::DijkstraCostMode dijkstra_cost_mode_from_int(const int value) {
@@ -322,8 +320,9 @@ nb::tuple dijkstra_distance_field_mask(
 ) {
     if (sources.ndim() != 2 || sources.shape(1) != mask.ndim()) {
         throw std::invalid_argument(
-            "sources must have shape (n_sources, mask.ndim), got ndim=" +
-            std::to_string(sources.ndim())
+            "sources must have shape (n_sources, mask.ndim), got shape=" +
+            ndarray_shape_string(sources) + ", mask.ndim=" +
+            std::to_string(mask.ndim())
         );
     }
     const auto shape = ndarray_shape(mask);
@@ -336,7 +335,7 @@ nb::tuple dijkstra_distance_field_mask(
     );
 
     ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
-    const OptionalSpeed costs_opt = make_optional_speed(costs, shape, "costs");
+    const auto costs_opt = make_optional_speed(costs, shape, "costs");
     distance::DijkstraResult result;
     {
         nb::gil_scoped_release release;
@@ -349,21 +348,19 @@ nb::tuple dijkstra_distance_field_mask(
                 dijkstra_cost_mode_from_int(cost_mode),
                 n_threads,
             },
-            costs_opt.ptr,
+            costs_opt.has_value() ? &*costs_opt : nullptr,
             return_predecessors
         );
     }
 
-    auto distances_array = make_array<double, DoubleArray>(size_t_shape(shape));
-    std::copy(result.distances.begin(), result.distances.end(), distances_array.data());
+    auto distances_array = detail::copy_vector_to_array(
+        result.distances, size_t_shape(shape)
+    );
 
     nb::object predecessors_result = nb::none();
     if (return_predecessors) {
-        auto predecessors_array = make_array<std::int64_t, Int64Array>(size_t_shape(shape));
-        std::copy(
-            result.predecessors.begin(),
-            result.predecessors.end(),
-            predecessors_array.data()
+        auto predecessors_array = detail::copy_vector_to_array(
+            result.predecessors, size_t_shape(shape)
         );
         predecessors_result = nb::cast(predecessors_array);
     }
@@ -381,10 +378,18 @@ Int64Array dijkstra_path_mask(
     const std::size_t n_threads
 ) {
     if (source.ndim() != 2 || source.shape(0) != 1 || source.shape(1) != mask.ndim()) {
-        throw std::invalid_argument("source must have shape (1, mask.ndim)");
+        throw std::invalid_argument(
+            "source must have shape (1, mask.ndim), got shape=" +
+            ndarray_shape_string(source) + ", mask.ndim=" +
+            std::to_string(mask.ndim())
+        );
     }
     if (targets.ndim() != 2 || targets.shape(1) != mask.ndim()) {
-        throw std::invalid_argument("targets must have shape (n_targets, mask.ndim)");
+        throw std::invalid_argument(
+            "targets must have shape (n_targets, mask.ndim), got shape=" +
+            ndarray_shape_string(targets) + ", mask.ndim=" +
+            std::to_string(mask.ndim())
+        );
     }
     const auto shape = ndarray_shape(mask);
     const auto strides = bioimage_cpp::detail::c_order_strides(shape);
@@ -398,7 +403,7 @@ Int64Array dijkstra_path_mask(
     );
 
     ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
-    const OptionalSpeed costs_opt = make_optional_speed(costs, shape, "costs");
+    const auto costs_opt = make_optional_speed(costs, shape, "costs");
     std::vector<std::size_t> path;
     {
         nb::gil_scoped_release release;
@@ -412,12 +417,12 @@ Int64Array dijkstra_path_mask(
                 dijkstra_cost_mode_from_int(cost_mode),
                 n_threads,
             },
-            costs_opt.ptr
+            costs_opt.has_value() ? &*costs_opt : nullptr
         );
     }
 
     const auto ndim = shape.size();
-    auto output = make_array<std::int64_t, Int64Array>({path.size(), ndim});
+    auto output = detail::make_array<std::int64_t>({path.size(), ndim});
     std::vector<std::ptrdiff_t> coords(ndim, 0);
     for (std::size_t i = 0; i < path.size(); ++i) {
         bioimage_cpp::detail::coords_from_index(
@@ -463,12 +468,12 @@ nb::tuple geodesic_distance_field_mask(
 
     const auto shape = ndarray_shape(mask);
     const auto ndim = shape.size();
-    auto distances_array = make_array<double, DoubleArray>(size_t_shape(shape));
+    auto distances_array = detail::make_array<double>(size_t_shape(shape));
 
     ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
     ConstArrayView<std::int64_t> sources_view{sources.data(), ndarray_shape(sources), {}};
     ArrayView<double> distances_view{distances_array.data(), shape, {}};
-    const OptionalSpeed speed_opt = make_optional_speed(speed, shape);
+    const auto speed_opt = make_optional_speed(speed, shape);
 
     // Optional per-axis gradient output, shape (*mask.shape, ndim), float32.
     FloatArray gradient_array;
@@ -477,7 +482,7 @@ nb::tuple geodesic_distance_field_mask(
     if (return_gradient) {
         auto gradient_shape = size_t_shape(shape);
         gradient_shape.push_back(ndim);
-        gradient_array = make_array<float, FloatArray>(gradient_shape);
+        gradient_array = detail::make_array<float>(gradient_shape);
         auto gradient_view_shape = shape;
         gradient_view_shape.push_back(static_cast<std::ptrdiff_t>(ndim));
         gradient_view = ArrayView<float>{gradient_array.data(), gradient_view_shape, {}};
@@ -487,8 +492,9 @@ nb::tuple geodesic_distance_field_mask(
     {
         nb::gil_scoped_release release;
         distance::geodesic_distance_field(
-            mask_view, sources_view, sampling, speed_opt.ptr, distances_view, n_threads,
-            gradient_ptr
+            mask_view, sources_view, sampling,
+            speed_opt.has_value() ? &*speed_opt : nullptr,
+            distances_view, n_threads, gradient_ptr
         );
     }
 
@@ -529,7 +535,7 @@ DoubleArray geodesic_distances_mask(
 
     const auto shape = ndarray_shape(mask);
     const auto n_points = static_cast<std::size_t>(points.shape(0));
-    auto distances_array = make_array<double, DoubleArray>({n_points, n_points});
+    auto distances_array = detail::make_array<double>({n_points, n_points});
 
     ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
     ConstArrayView<std::int64_t> points_view{points.data(), ndarray_shape(points), {}};
@@ -538,12 +544,14 @@ DoubleArray geodesic_distances_mask(
         {static_cast<std::ptrdiff_t>(n_points), static_cast<std::ptrdiff_t>(n_points)},
         {},
     };
-    const OptionalSpeed speed_opt = make_optional_speed(speed, shape);
+    const auto speed_opt = make_optional_speed(speed, shape);
 
     {
         nb::gil_scoped_release release;
         distance::geodesic_distances(
-            mask_view, points_view, sampling, speed_opt.ptr, distances_view, n_threads
+            mask_view, points_view, sampling,
+            speed_opt.has_value() ? &*speed_opt : nullptr,
+            distances_view, n_threads
         );
     }
     return distances_array;
@@ -581,7 +589,7 @@ DoubleArray geodesic_distance_field_mesh(
         );
     }
 
-    auto distances_array = make_array<double, DoubleArray>({n_vertices});
+    auto distances_array = detail::make_array<double>({n_vertices});
 
     ConstArrayView<double> vertices_view{vertices.data(), ndarray_shape(vertices), {}};
     ConstArrayView<std::int64_t> faces_view{faces.data(), ndarray_shape(faces), {}};
@@ -589,13 +597,15 @@ DoubleArray geodesic_distance_field_mesh(
     ArrayView<double> distances_view{
         distances_array.data(), {static_cast<std::ptrdiff_t>(n_vertices)}, {}
     };
-    const OptionalSpeed speed_opt =
+    const auto speed_opt =
         make_optional_speed(speed, {static_cast<std::ptrdiff_t>(n_vertices)});
 
     {
         nb::gil_scoped_release release;
         distance::geodesic_distance_field_mesh(
-            vertices_view, faces_view, sources_view, speed_opt.ptr, distances_view, n_threads
+            vertices_view, faces_view, sources_view,
+            speed_opt.has_value() ? &*speed_opt : nullptr,
+            distances_view, n_threads
         );
     }
     return distances_array;
@@ -617,7 +627,7 @@ DoubleArray geodesic_distances_mesh(
     }
 
     const auto n_points = static_cast<std::size_t>(points.shape(0));
-    auto distances_array = make_array<double, DoubleArray>({n_points, n_points});
+    auto distances_array = detail::make_array<double>({n_points, n_points});
 
     ConstArrayView<double> vertices_view{vertices.data(), ndarray_shape(vertices), {}};
     ConstArrayView<std::int64_t> faces_view{faces.data(), ndarray_shape(faces), {}};
@@ -627,13 +637,15 @@ DoubleArray geodesic_distances_mesh(
         {static_cast<std::ptrdiff_t>(n_points), static_cast<std::ptrdiff_t>(n_points)},
         {},
     };
-    const OptionalSpeed speed_opt =
+    const auto speed_opt =
         make_optional_speed(speed, {static_cast<std::ptrdiff_t>(n_vertices)});
 
     {
         nb::gil_scoped_release release;
         distance::geodesic_distances_mesh(
-            vertices_view, faces_view, points_view, speed_opt.ptr, distances_view, n_threads
+            vertices_view, faces_view, points_view,
+            speed_opt.has_value() ? &*speed_opt : nullptr,
+            distances_view, n_threads
         );
     }
     return distances_array;

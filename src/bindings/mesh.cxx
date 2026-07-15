@@ -1,5 +1,7 @@
 #include "mesh.hxx"
 
+#include "ndarray.hxx"
+
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/mesh/marching_cubes.hxx"
@@ -94,8 +96,6 @@ std::pair<OutputArray<V>, OutputArray<V>> smooth_mesh_t(
     const std::size_t n_verts_size = verts.shape(0);
     const std::size_t dim_size = verts.shape(1);
     const std::size_t n_faces_size = faces.shape(0);
-    const std::size_t n_total = n_verts_size * dim_size;
-
     std::vector<std::size_t> verts_ndarray_shape{n_verts_size, dim_size};
     std::vector<std::ptrdiff_t> verts_view_shape{
         static_cast<std::ptrdiff_t>(n_verts_size),
@@ -106,10 +106,10 @@ std::pair<OutputArray<V>, OutputArray<V>> smooth_mesh_t(
         std::ptrdiff_t{3},
     };
 
-    auto *verts_data = new V[n_total]();
-    nb::capsule verts_owner(verts_data, [](void *p) noexcept { delete[] static_cast<V *>(p); });
-    auto *normals_data = new V[n_total]();
-    nb::capsule normals_owner(normals_data, [](void *p) noexcept { delete[] static_cast<V *>(p); });
+    auto out_verts = detail::make_array<V>(verts_ndarray_shape);
+    auto out_normals = detail::make_array<V>(verts_ndarray_shape);
+    auto *verts_data = out_verts.data();
+    auto *normals_data = out_normals.data();
 
     ConstArrayView<V> verts_view{verts.data(), verts_view_shape, {}};
     ConstArrayView<V> normals_view{normals.data(), verts_view_shape, {}};
@@ -130,12 +130,6 @@ std::pair<OutputArray<V>, OutputArray<V>> smooth_mesh_t(
         );
     }
 
-    OutputArray<V> out_verts(
-        verts_data, verts_ndarray_shape.size(), verts_ndarray_shape.data(), verts_owner
-    );
-    OutputArray<V> out_normals(
-        normals_data, verts_ndarray_shape.size(), verts_ndarray_shape.data(), normals_owner
-    );
     return {std::move(out_verts), std::move(out_normals)};
 }
 

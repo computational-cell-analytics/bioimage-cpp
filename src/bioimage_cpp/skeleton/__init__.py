@@ -56,8 +56,10 @@ def teasar(
         Scale and exponent of the boundary-avoidance term in the penalized
         distance-from-root field.
     number_of_threads:
-        Shared thread budget for the distance transform and compact Dijkstra
-        solves. ``0`` uses hardware concurrency; default ``1`` is sequential.
+        Thread budget for the exact distance transform. Compact Dijkstra root
+        and rail solves remain sequential because their wavefronts benchmarked
+        faster on the optimized heap. ``0`` uses hardware concurrency; default
+        ``1`` is sequential.
 
     Returns
     -------

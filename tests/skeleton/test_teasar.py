@@ -249,10 +249,28 @@ def test_public_teasar_uses_exact_compact_fp64_backend():
         np.testing.assert_array_equal(got, expected)
 
 
+def test_failed_fp32_development_backend_is_not_selectable():
+    mask = np.ones((2, 2, 2), dtype=np.uint8)
+    with pytest.raises(ValueError, match="unknown TEASAR development backend"):
+        _teasar_backend(mask, "compact-csr-fp32")
+
+
 @pytest.mark.parametrize("shape", [(4, 5), (2, 3, 4, 5)])
 def test_rejects_non_3d_input(shape):
     with pytest.raises(ValueError, match="ndim 3"):
         bic.skeleton.teasar(np.ones(shape, dtype=np.uint8))
+
+
+def test_direct_binding_validates_ndim_and_spacing_before_dispatch():
+    parameters = (1.5, 1.0, 100000.0, 4.0, 1)
+    with pytest.raises(ValueError, match="mask must have ndim 3, got ndim=2"):
+        _core._teasar_uint8(
+            np.ones((3, 4), dtype=np.uint8), [1.0, 1.0, 1.0], *parameters
+        )
+    with pytest.raises(ValueError, match="exactly three values, got 2"):
+        _core._teasar_uint8(
+            np.ones((3, 4, 5), dtype=np.uint8), [1.0, 1.0], *parameters
+        )
 
 
 @pytest.mark.parametrize(

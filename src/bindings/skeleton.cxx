@@ -1,4 +1,5 @@
 #include "skeleton.hxx"
+#include "ndarray.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/skeleton/teasar.hxx"
@@ -25,17 +26,6 @@ using DoubleArray = nb::ndarray<nb::numpy, double, nb::c_contig>;
 using UInt64Array = nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig>;
 using FloatArray = nb::ndarray<nb::numpy, float, nb::c_contig>;
 
-template <class T, class Array>
-Array make_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto extent : shape) {
-        size *= extent;
-    }
-    auto *data = new T[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
-    return Array(data, shape.size(), shape.data(), owner);
-}
-
 nb::tuple teasar_uint8_impl(
     UInt8Input mask,
     const std::vector<double> &spacing,
@@ -46,8 +36,16 @@ nb::tuple teasar_uint8_impl(
     const skeleton::TeasarBackend backend,
     const std::size_t n_threads
 ) {
+    if (mask.ndim() != 3) {
+        throw std::invalid_argument(
+            "mask must have ndim 3, got ndim=" + std::to_string(mask.ndim())
+        );
+    }
     if (spacing.size() != 3) {
-        throw std::invalid_argument("spacing must contain exactly three values");
+        throw std::invalid_argument(
+            "spacing must contain exactly three values, got " +
+            std::to_string(spacing.size())
+        );
     }
     std::vector<std::ptrdiff_t> shape(mask.ndim());
     for (std::size_t axis = 0; axis < mask.ndim(); ++axis) {
@@ -69,21 +67,20 @@ nb::tuple teasar_uint8_impl(
         );
     }
 
-    auto vertices = make_array<double, DoubleArray>({result.vertices.size(), 3});
+    auto vertices = detail::make_array<double>({result.vertices.size(), 3});
     for (std::size_t vertex = 0; vertex < result.vertices.size(); ++vertex) {
         for (std::size_t axis = 0; axis < 3; ++axis) {
             vertices.data()[vertex * 3 + axis] = result.vertices[vertex][axis];
         }
     }
 
-    auto edges = make_array<std::uint64_t, UInt64Array>({result.edges.size(), 2});
+    auto edges = detail::make_array<std::uint64_t>({result.edges.size(), 2});
     for (std::size_t edge = 0; edge < result.edges.size(); ++edge) {
         edges.data()[edge * 2] = result.edges[edge][0];
         edges.data()[edge * 2 + 1] = result.edges[edge][1];
     }
 
-    auto radii = make_array<float, FloatArray>({result.radii.size()});
-    std::copy(result.radii.begin(), result.radii.end(), radii.data());
+    auto radii = detail::copy_vector_to_array(result.radii);
     return nb::make_tuple(vertices, edges, radii);
 }
 
@@ -119,8 +116,6 @@ nb::tuple teasar_uint8_backend(
         selected = skeleton::TeasarBackend::CompactOnTheFlyFloat64;
     } else if (backend == "compact-csr-fp64") {
         selected = skeleton::TeasarBackend::CompactCsrFloat64;
-    } else if (backend == "compact-csr-fp32") {
-        selected = skeleton::TeasarBackend::CompactCsrFloat32;
     } else {
         throw std::invalid_argument("unknown TEASAR development backend: " + backend);
     }
