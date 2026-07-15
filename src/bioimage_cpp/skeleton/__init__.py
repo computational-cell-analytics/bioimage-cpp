@@ -9,6 +9,7 @@ import numpy as np
 from .. import _core
 from .._validation import strict_index
 from ..distance._distance import _as_binary_input, _normalize_sampling, _normalize_threads
+from ._graph import skeleton_to_graph
 
 
 _TEASAR_LABELS_BY_DTYPE = {
@@ -108,6 +109,9 @@ def teasar(
         shape ``(V,)`` and contains physical distance-to-boundary values.
         With several components the tuple represents their skeleton forest in
         first-voxel C-order. An empty mask returns correctly typed empty arrays.
+        Use :func:`skeleton_to_graph` to convert the vertex and edge arrays to
+        an undirected graph; graph node ids continue to index ``vertices`` and
+        ``radii``.
 
     Raises
     ------
@@ -198,4 +202,4 @@ def teasar_labels(
     return run(labels_c, labels_array.dtype.type(background_value), *options)
 
 
-__all__ = ["teasar", "teasar_labels"]
+__all__ = ["skeleton_to_graph", "teasar", "teasar_labels"]

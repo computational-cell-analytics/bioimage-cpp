@@ -2551,6 +2551,27 @@ skeletons = bic.skeleton.teasar_labels(
 # {original_label: (vertices, edges, radii), ...}
 ```
 
+Convert the topology of either result to the native undirected graph while
+keeping coordinates and radii in their NumPy arrays:
+
+```python
+import numpy as np
+
+graph = bic.skeleton.skeleton_to_graph(vertices, edges)
+
+# Node ids index vertices and radii directly.
+degrees = np.fromiter(
+    (len(graph.node_adjacency(node)) for node in range(graph.number_of_nodes)),
+    dtype=np.uint64,
+    count=graph.number_of_nodes,
+)
+endpoint_vertices = vertices[degrees <= 1]
+branch_vertices = vertices[degrees > 2]
+```
+
+The conversion also preserves disconnected forests and isolated vertices. The
+graph stores topology only; it does not copy or own ``vertices`` or ``radii``.
+
 Important differences and current scope:
 
 - `teasar(mask)` treats every nonzero value as one foreground class. It
