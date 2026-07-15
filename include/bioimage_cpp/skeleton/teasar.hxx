@@ -7,17 +7,23 @@
 #include "bioimage_cpp/distance/distance_transform.hxx"
 #include "bioimage_cpp/distance/grid_dijkstra.hxx"
 #include "bioimage_cpp/skeleton/detail/compact_grid_dijkstra.hxx"
+#include "bioimage_cpp/skeleton/detail/components.hxx"
 #include "bioimage_cpp/skeleton/detail/row_interval_union.hxx"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <iterator>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -127,56 +133,80 @@ inline void invalidation_bounds(
 
 // Skeletonize a binary 3D mask with the core TEASAR procedure. A non-empty
 // input must contain exactly one 26-connected foreground component.
-inline SkeletonGraph teasar_dense(
+inline SkeletonGraph teasar_dense_impl(
     const ConstArrayView<std::uint8_t> &mask,
-    const TeasarOptions &options = {}
+    detail::PreparedTeasarComponent *prepared,
+    const TeasarOptions &options,
+    const bool report_profile
 ) {
-    detail_teasar::validate_options(mask, options);
+    if (prepared == nullptr) {
+        detail_teasar::validate_options(mask, options);
+    }
     BIOIMAGE_PROFILE_INIT(profile)
 
     SkeletonGraph graph;
-    const auto input_n = bioimage_cpp::detail::number_of_elements(mask.shape);
     std::size_t foreground_count = 0;
-    for (std::size_t index = 0; index < input_n; ++index) {
-        foreground_count += mask.data[index] != 0 ? 1 : 0;
-    }
-    if (foreground_count == 0) {
-        return graph;
-    }
-    const auto effective_threads = bioimage_cpp::detail::normalize_thread_count(
-        options.number_of_threads, foreground_count
-    );
-
-    // A zero halo makes the exterior an explicit background feature for EDT,
-    // including when the input object touches a volume boundary.
-    const std::vector<std::ptrdiff_t> shape{
-        mask.shape[0] + 2,
-        mask.shape[1] + 2,
-        mask.shape[2] + 2,
-    };
-    const auto n = bioimage_cpp::detail::number_of_elements(shape);
-    const auto strides = bioimage_cpp::detail::c_order_strides(shape);
-    std::vector<std::uint8_t> padded_mask(n, 0);
+    std::array<std::ptrdiff_t, 3> input_origin{0, 0, 0};
+    std::vector<std::ptrdiff_t> shape;
+    std::vector<std::uint8_t> padded_mask;
     std::size_t first_foreground = std::numeric_limits<std::size_t>::max();
-    for (std::ptrdiff_t z = 0; z < mask.shape[0]; ++z) {
-        for (std::ptrdiff_t y = 0; y < mask.shape[1]; ++y) {
-            for (std::ptrdiff_t x = 0; x < mask.shape[2]; ++x) {
-                const auto input_index = static_cast<std::size_t>(
-                    (z * mask.shape[1] + y) * mask.shape[2] + x
-                );
-                if (mask.data[input_index] == 0) {
-                    continue;
-                }
-                const auto padded_index = static_cast<std::size_t>(
-                    (z + 1) * strides[0] + (y + 1) * strides[1] + (x + 1)
-                );
-                padded_mask[padded_index] = 1;
-                if (first_foreground == std::numeric_limits<std::size_t>::max()) {
-                    first_foreground = padded_index;
+    if (prepared != nullptr) {
+        foreground_count = prepared->foreground_count;
+        input_origin = prepared->input_origin;
+        shape = std::move(prepared->padded_shape);
+        padded_mask = std::move(prepared->padded_mask);
+        for (std::size_t index = 0; index < padded_mask.size(); ++index) {
+            if (padded_mask[index] != 0) {
+                first_foreground = index;
+                break;
+            }
+        }
+    } else {
+        const auto input_n = bioimage_cpp::detail::number_of_elements(mask.shape);
+        for (std::size_t index = 0; index < input_n; ++index) {
+            foreground_count += mask.data[index] != 0 ? 1 : 0;
+        }
+        shape = {
+            mask.shape[0] + 2,
+            mask.shape[1] + 2,
+            mask.shape[2] + 2,
+        };
+        const auto local_strides = bioimage_cpp::detail::c_order_strides(shape);
+        padded_mask.assign(
+            bioimage_cpp::detail::number_of_elements(shape), 0
+        );
+        for (std::ptrdiff_t z = 0; z < mask.shape[0]; ++z) {
+            for (std::ptrdiff_t y = 0; y < mask.shape[1]; ++y) {
+                for (std::ptrdiff_t x = 0; x < mask.shape[2]; ++x) {
+                    const auto input_index = static_cast<std::size_t>(
+                        (z * mask.shape[1] + y) * mask.shape[2] + x
+                    );
+                    if (mask.data[input_index] == 0) {
+                        continue;
+                    }
+                    const auto padded_index = static_cast<std::size_t>(
+                        (z + 1) * local_strides[0] +
+                        (y + 1) * local_strides[1] + (x + 1)
+                    );
+                    padded_mask[padded_index] = 1;
+                    if (first_foreground == std::numeric_limits<std::size_t>::max()) {
+                        first_foreground = padded_index;
+                    }
                 }
             }
         }
     }
+    if (foreground_count == 0) {
+        return graph;
+    }
+    if (first_foreground == std::numeric_limits<std::size_t>::max()) {
+        throw std::runtime_error("prepared TEASAR foreground count is inconsistent");
+    }
+    const auto effective_threads = bioimage_cpp::detail::normalize_thread_count(
+        options.number_of_threads, foreground_count
+    );
+    const auto n = padded_mask.size();
+    const auto strides = bioimage_cpp::detail::c_order_strides(shape);
 
     std::vector<float> dbf(n, 0.0f);
     {
@@ -260,9 +290,9 @@ inline SkeletonGraph teasar_dense(
         );
         const auto vertex_id = static_cast<std::uint64_t>(graph.vertices.size());
         graph.vertices.push_back({
-            static_cast<double>(coords[0] - 1) * options.spacing[0],
-            static_cast<double>(coords[1] - 1) * options.spacing[1],
-            static_cast<double>(coords[2] - 1) * options.spacing[2],
+            static_cast<double>(coords[0] - 1 + input_origin[0]) * options.spacing[0],
+            static_cast<double>(coords[1] - 1 + input_origin[1]) * options.spacing[1],
+            static_cast<double>(coords[2] - 1 + input_origin[2]) * options.spacing[2],
         });
         graph.radii.push_back(dbf[voxel]);
         vertex_of_voxel[voxel] = static_cast<std::int64_t>(vertex_id);
@@ -348,30 +378,60 @@ inline SkeletonGraph teasar_dense(
         }
     }
 
-    BIOIMAGE_PROFILE_REPORT(profile)
+    if (report_profile) {
+        BIOIMAGE_PROFILE_REPORT(profile)
+    }
     return graph;
 }
 
-template <detail::CompactAdjacency Adjacency, class Distance>
-inline SkeletonGraph teasar_compact(
+inline SkeletonGraph teasar_dense(
     const ConstArrayView<std::uint8_t> &mask,
+    const TeasarOptions &options = {}
+) {
+    return teasar_dense_impl(mask, nullptr, options, true);
+}
+
+inline SkeletonGraph teasar_dense_prepared(
+    detail::PreparedTeasarComponent prepared,
     const TeasarOptions &options
 ) {
-    detail_teasar::validate_options(mask, options);
+    const ConstArrayView<std::uint8_t> unused{};
+    return teasar_dense_impl(unused, &prepared, options, false);
+}
+
+template <detail::CompactAdjacency Adjacency, class Distance>
+inline SkeletonGraph teasar_compact_impl(
+    const ConstArrayView<std::uint8_t> &mask,
+    detail::PreparedTeasarComponent *prepared,
+    const TeasarOptions &options,
+    const bool report_profile
+) {
+    if (prepared == nullptr) {
+        detail_teasar::validate_options(mask, options);
+    }
     BIOIMAGE_PROFILE_INIT(profile)
 
     SkeletonGraph graph;
-    std::array<std::ptrdiff_t, 3> crop_begin{
-        mask.shape[0], mask.shape[1], mask.shape[2]
-    };
+    std::array<std::ptrdiff_t, 3> crop_begin{0, 0, 0};
     std::array<std::ptrdiff_t, 3> crop_end{0, 0, 0};
     std::size_t foreground_count = 0;
     std::vector<std::ptrdiff_t> shape;
     std::vector<std::ptrdiff_t> strides;
     std::size_t n = 0;
     std::vector<std::uint8_t> padded_mask;
-    {
+    if (prepared != nullptr) {
+        crop_begin = prepared->input_origin;
+        foreground_count = prepared->foreground_count;
+        shape = std::move(prepared->padded_shape);
+        padded_mask = std::move(prepared->padded_mask);
+        n = padded_mask.size();
+        strides = bioimage_cpp::detail::c_order_strides(shape);
+        if (foreground_count == 0) {
+            return graph;
+        }
+    } else {
         BIOIMAGE_PROFILE_SCOPE(profile, "input_crop")
+        crop_begin = {mask.shape[0], mask.shape[1], mask.shape[2]};
         for (std::ptrdiff_t z = 0; z < mask.shape[0]; ++z) {
             for (std::ptrdiff_t y = 0; y < mask.shape[1]; ++y) {
                 for (std::ptrdiff_t x = 0; x < mask.shape[2]; ++x) {
@@ -445,7 +505,13 @@ inline SkeletonGraph teasar_compact(
         ConstArrayView<std::uint8_t> padded_view{padded_mask.data(), shape, {}};
         if (!detail::build_compact_grid_domain(
                 padded_view, options.spacing, Adjacency, domain)) {
-            return teasar_dense(mask, options);
+            if (prepared == nullptr) {
+                return teasar_dense(mask, options);
+            }
+            return teasar_dense_prepared(
+                {shape, std::move(padded_mask), crop_begin, foreground_count},
+                options
+            );
         }
     }
     if (domain.size() != foreground_count) {
@@ -635,9 +701,303 @@ inline SkeletonGraph teasar_compact(
         }
     }
 
-    BIOIMAGE_PROFILE_REPORT(profile)
+    if (report_profile) {
+        BIOIMAGE_PROFILE_REPORT(profile)
+    }
     return graph;
 }
+
+template <detail::CompactAdjacency Adjacency, class Distance>
+inline SkeletonGraph teasar_compact(
+    const ConstArrayView<std::uint8_t> &mask,
+    const TeasarOptions &options
+) {
+    return teasar_compact_impl<Adjacency, Distance>(
+        mask, nullptr, options, true
+    );
+}
+
+template <detail::CompactAdjacency Adjacency, class Distance>
+inline SkeletonGraph teasar_compact_prepared(
+    detail::PreparedTeasarComponent prepared,
+    const TeasarOptions &options
+) {
+    const ConstArrayView<std::uint8_t> unused{};
+    return teasar_compact_impl<Adjacency, Distance>(
+        unused, &prepared, options, false
+    );
+}
+
+namespace detail_teasar {
+
+inline void append_skeleton_graph(
+    SkeletonGraph &destination,
+    SkeletonGraph &&source
+) {
+    if (destination.vertices.size() > std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("skeleton vertex offset exceeds uint64 range");
+    }
+    const auto vertex_offset = static_cast<std::uint64_t>(
+        destination.vertices.size()
+    );
+    destination.vertices.insert(
+        destination.vertices.end(),
+        std::make_move_iterator(source.vertices.begin()),
+        std::make_move_iterator(source.vertices.end())
+    );
+    destination.radii.insert(
+        destination.radii.end(), source.radii.begin(), source.radii.end()
+    );
+    for (const auto &edge : source.edges) {
+        if (
+            edge[0] > std::numeric_limits<std::uint64_t>::max() - vertex_offset ||
+            edge[1] > std::numeric_limits<std::uint64_t>::max() - vertex_offset
+        ) {
+            throw std::overflow_error("skeleton edge offset exceeds uint64 range");
+        }
+        destination.edges.push_back({
+            edge[0] + vertex_offset, edge[1] + vertex_offset
+        });
+    }
+}
+
+inline SkeletonGraph assemble_skeleton_graphs(
+    std::vector<SkeletonGraph> &graphs,
+    const std::vector<std::size_t> &component_ids
+) {
+    std::size_t vertices = 0;
+    std::size_t edges = 0;
+    for (const auto component_id : component_ids) {
+        vertices = detail::checked_add_size(
+            vertices, graphs[component_id].vertices.size(),
+            "assembled skeleton vertex count overflows size_t"
+        );
+        edges = detail::checked_add_size(
+            edges, graphs[component_id].edges.size(),
+            "assembled skeleton edge count overflows size_t"
+        );
+    }
+    SkeletonGraph result;
+    result.vertices.reserve(vertices);
+    result.radii.reserve(vertices);
+    result.edges.reserve(edges);
+    for (const auto component_id : component_ids) {
+        append_skeleton_graph(result, std::move(graphs[component_id]));
+    }
+    return result;
+}
+
+template <class LabelT>
+std::string component_context(
+    const detail::ComponentDescriptor<LabelT> &component,
+    const bool include_label
+) {
+    std::string context = "TEASAR component";
+    if (include_label) {
+        if constexpr (std::is_signed_v<LabelT>) {
+            context += " label=" + std::to_string(
+                static_cast<long long>(component.label)
+            );
+        } else {
+            context += " label=" + std::to_string(
+                static_cast<unsigned long long>(component.label)
+            );
+        }
+    }
+    context += " first_coordinate=(" +
+        std::to_string(component.first_coordinate[0]) + "," +
+        std::to_string(component.first_coordinate[1]) + "," +
+        std::to_string(component.first_coordinate[2]) + ")";
+    return context;
+}
+
+template <class LabelT>
+std::vector<std::size_t> component_thread_budgets(
+    const detail::ComponentSet<LabelT> &components,
+    const std::size_t total_budget
+) {
+    const auto count = components.components.size();
+    std::vector<std::size_t> budgets(count, 1);
+    if (count == 0 || total_budget <= count) {
+        return budgets;
+    }
+    std::vector<std::size_t> capacities(count, 0);
+    std::vector<std::size_t> weights(count, 0);
+    for (std::size_t component = 0; component < count; ++component) {
+        const auto voxels = static_cast<std::size_t>(
+            components.components[component].voxel_count
+        );
+        capacities[component] = voxels - 1;
+        weights[component] = detail::padded_component_volume(
+            components.components[component]
+        );
+    }
+
+    std::size_t remaining = total_budget - count;
+    while (remaining > 0) {
+        long double total_weight = 0.0L;
+        for (std::size_t component = 0; component < count; ++component) {
+            if (capacities[component] > 0) {
+                total_weight += static_cast<long double>(weights[component]);
+            }
+        }
+        if (total_weight == 0.0L) {
+            throw std::runtime_error("TEASAR thread-budget capacity is inconsistent");
+        }
+
+        struct Remainder {
+            long double fraction;
+            std::size_t component;
+        };
+        std::vector<Remainder> remainders;
+        remainders.reserve(count);
+        std::size_t allocated = 0;
+        const auto round_budget = remaining;
+        for (std::size_t component = 0; component < count; ++component) {
+            if (capacities[component] == 0) {
+                continue;
+            }
+            const auto exact = static_cast<long double>(round_budget) *
+                static_cast<long double>(weights[component]) / total_weight;
+            const auto floor_share = static_cast<std::size_t>(exact);
+            const auto share = std::min(floor_share, capacities[component]);
+            budgets[component] += share;
+            capacities[component] -= share;
+            allocated += share;
+            remainders.push_back({
+                exact - static_cast<long double>(floor_share), component
+            });
+        }
+        if (allocated > remaining) {
+            throw std::runtime_error("TEASAR thread-budget allocation overflowed");
+        }
+        remaining -= allocated;
+        if (remaining == 0) {
+            break;
+        }
+        std::sort(
+            remainders.begin(), remainders.end(),
+            [](const Remainder &first, const Remainder &second) {
+                if (first.fraction != second.fraction) {
+                    return first.fraction > second.fraction;
+                }
+                return first.component < second.component;
+            }
+        );
+        bool gave_remainder = false;
+        for (const auto &entry : remainders) {
+            if (remaining == 0) {
+                break;
+            }
+            if (capacities[entry.component] == 0) {
+                continue;
+            }
+            ++budgets[entry.component];
+            --capacities[entry.component];
+            --remaining;
+            gave_remainder = true;
+        }
+        if (!gave_remainder && allocated == 0) {
+            throw std::runtime_error("TEASAR thread-budget allocation stalled");
+        }
+    }
+    if (
+        std::accumulate(budgets.begin(), budgets.end(), std::size_t{0}) !=
+        total_budget
+    ) {
+        throw std::runtime_error("TEASAR thread budgets do not sum to call budget");
+    }
+    return budgets;
+}
+
+template <class LabelT>
+std::vector<SkeletonGraph> skeletonize_components(
+    const detail::ComponentSet<LabelT> &components,
+    const TeasarOptions &options,
+    const bool include_label_in_errors
+) {
+    const auto count = components.components.size();
+    std::vector<SkeletonGraph> results(count);
+    if (count == 0) {
+        return results;
+    }
+    const auto total_budget = bioimage_cpp::detail::normalize_thread_count(
+        options.number_of_threads, components.foreground_count
+    );
+    std::vector<std::size_t> task_order(count);
+    std::iota(task_order.begin(), task_order.end(), std::size_t{0});
+    std::sort(
+        task_order.begin(), task_order.end(),
+        [&](const std::size_t first, const std::size_t second) {
+            const auto first_work = detail::padded_component_volume(
+                components.components[first]
+            );
+            const auto second_work = detail::padded_component_volume(
+                components.components[second]
+            );
+            if (first_work != second_work) {
+                return first_work > second_work;
+            }
+            return components.components[first].first_flat_index <
+                components.components[second].first_flat_index;
+        }
+    );
+
+    const auto run_component = [&] (
+        const std::size_t component_id,
+        const std::size_t local_budget
+    ) {
+        try {
+            auto prepared = detail::prepare_component(components, component_id);
+            auto local_options = options;
+            local_options.number_of_threads = local_budget;
+            results[component_id] = teasar_compact_prepared<
+                detail::CompactAdjacency::OnTheFly, double
+            >(std::move(prepared), local_options);
+        } catch (const std::exception &error) {
+            throw std::runtime_error(
+                component_context(
+                    components.components[component_id], include_label_in_errors
+                ) + ": " + error.what()
+            );
+        }
+    };
+
+    if (count == 1) {
+        run_component(0, total_budget);
+        return results;
+    }
+    if (count >= total_budget) {
+        std::atomic<std::size_t> cursor{0};
+        bioimage_cpp::detail::parallel_for_chunks(
+            total_budget, total_budget,
+            [&](const std::size_t, const std::size_t, const std::size_t) {
+                while (true) {
+                    const auto task = cursor.fetch_add(1, std::memory_order_relaxed);
+                    if (task >= count) {
+                        break;
+                    }
+                    run_component(task_order[task], 1);
+                }
+            }
+        );
+        return results;
+    }
+
+    const auto budgets = component_thread_budgets(components, total_budget);
+    bioimage_cpp::detail::parallel_for_chunks(
+        count, count,
+        [&](const std::size_t, const std::size_t begin, const std::size_t end) {
+            for (auto task = begin; task < end; ++task) {
+                const auto component_id = task_order[task];
+                run_component(component_id, budgets[component_id]);
+            }
+        }
+    );
+    return results;
+}
+
+} // namespace detail_teasar
 
 inline SkeletonGraph teasar_with_backend(
     const ConstArrayView<std::uint8_t> &mask,
@@ -662,7 +1022,25 @@ inline SkeletonGraph teasar(
     const ConstArrayView<std::uint8_t> &mask,
     const TeasarOptions &options = {}
 ) {
-    return teasar_with_backend(mask, options, TeasarBackend::Auto);
+    detail_teasar::validate_options(mask, options);
+    BIOIMAGE_PROFILE_INIT(profile)
+    auto components = detail::extract_binary_components(mask, profile);
+    std::vector<SkeletonGraph> results;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "component_teasar")
+        results = detail_teasar::skeletonize_components(
+            components, options, false
+        );
+    }
+    std::vector<std::size_t> component_ids(results.size());
+    std::iota(component_ids.begin(), component_ids.end(), std::size_t{0});
+    SkeletonGraph output;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "forest_assembly")
+        output = detail_teasar::assemble_skeleton_graphs(results, component_ids);
+    }
+    BIOIMAGE_PROFILE_REPORT(profile)
+    return output;
 }
 
 } // namespace bioimage_cpp::skeleton

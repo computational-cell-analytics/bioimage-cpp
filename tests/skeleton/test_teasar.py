@@ -152,12 +152,23 @@ def test_26_connected_diagonal_is_accepted():
     assert len(vertices) == 2
 
 
-def test_multiple_components_are_rejected():
+def test_multiple_components_return_a_deterministic_forest():
     mask = np.zeros((5, 5, 5), dtype=bool)
     mask[1, 1, 1] = True
     mask[3, 3, 3] = True
-    with pytest.raises(ValueError, match="exactly one 26-connected component"):
-        bic.skeleton.teasar(mask)
+    vertices, edges, radii = bic.skeleton.teasar(mask, number_of_threads=2)
+    np.testing.assert_array_equal(vertices, [[1.0, 1.0, 1.0], [3.0, 3.0, 3.0]])
+    np.testing.assert_array_equal(edges, np.empty((0, 2), dtype=np.uint64))
+    np.testing.assert_array_equal(radii, [1.0, 1.0])
+
+
+def test_adjacent_distinct_nonzero_values_are_one_binary_component():
+    mask = np.zeros((5, 5, 8), dtype=np.uint8)
+    mask[2, 2, 1:4] = 1
+    mask[2, 2, 4:7] = 2
+    vertices, edges, radii = bic.skeleton.teasar(mask)
+    _assert_valid_tree(mask, vertices, edges, radii)
+    assert len(vertices) == 6
 
 
 def test_noncontiguous_and_numeric_binary_input_are_accepted():

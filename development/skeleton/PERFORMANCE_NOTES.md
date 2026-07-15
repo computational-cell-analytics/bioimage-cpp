@@ -513,3 +513,95 @@ The following proposed optimizations were deliberately deferred:
   calculation was shared.
 - Candidate-target and state-reset changes are therefore benchmark follow-ups,
   not pending correctness fixes.
+
+## Multi-component and multi-label dispatch
+
+The run-based dispatcher and `teasar_labels` implementation were measured on
+2026-07-15 on the same 4-core / 8-hardware-thread Intel Core i7-1185G7 host.
+The normal optimized build used Python 3.13.13, NumPy 2.4.6, kimimaro 5.8.1,
+and EDT 3.1.1. Every row used one warmup, five measured calls, deterministic
+backend-order shuffling, spacing `(1.5, 1.0, 1.0)`, and the established TEASAR
+parameters. Kimimaro's soma, border, hole-filling, dust, and progress features
+were disabled as in the earlier comparisons.
+
+Reproduce the complete matrix and fresh-process memory probes with:
+
+```bash
+python development/skeleton/benchmark_teasar.py \
+    --large --suite all --kimimaro --threads 1 2 4 8 \
+    --repeats 5 --warmup 1 --memory --memory-threads 1 4 \
+    --json /tmp/teasar_multilabel_full.json
+```
+
+The table reports five-repeat medians. `loop` is the deliberately naive
+`np.unique` plus one full-volume `labels == L` and binary TEASAR call per label.
+
+| scenario | case | components / labels | bio t1 | bio t4 | loop t1 | kimi t1 | kimi t4 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| binary | branching tube `128³` | 1 / 1 | 35.45 ms | 23.52 ms | -- | 132.00 ms | 154.82 ms |
+| binary | branching tube `192³` | 1 / 1 | 109.90 ms | 71.65 ms | -- | 350.35 ms | 370.80 ms |
+| binary | branching tube `256³` | 1 / 1 | 272.59 ms | 179.95 ms | -- | 903.28 ms | 846.81 ms |
+| binary | packed tubes | 27 / 1 | 52.84 ms | 17.70 ms | -- | 203.60 ms | 177.64 ms |
+| labels | packed distinct | 27 / 27 | 53.20 ms | 18.47 ms | 264.04 ms | 206.36 ms | 199.80 ms |
+| labels | packed fragmented | 27 / 1 | 53.34 ms | 17.86 ms | 108.68 ms | 202.99 ms | 201.72 ms |
+| labels | imbalanced | 65 / 65 | 39.65 ms | 40.29 ms | 749.70 ms | 309.99 ms | 347.58 ms |
+| labels | dense balls | 8 / 8 | 49.01 ms | 14.17 ms | 69.15 ms | 166.97 ms | 130.41 ms |
+
+The packed binary and 27-label inputs contain exactly the same 33,426
+foreground voxels and produced array-exact forests after canonical grouping.
+Their t1 medians differ by less than 1%, so preserving semantic labels adds no
+material cost beyond equality-aware run scanning. The balanced label case
+scales 2.88x from one to four workers and the dense case scales 3.46x. The
+imbalanced case does not scale because one large component dominates the 64
+three-voxel tasks; the dynamic cursor avoids a regression through four workers,
+but eight workers add scheduling overhead.
+
+Native dispatch is 4.96x faster than the repeated-volume loop on the packed
+27-label case and 18.9x faster on the 65-label imbalanced case at one worker.
+The connected binary medians are also below the pre-dispatch measurements
+recorded above, clearing the no-regression gate. Bioimage-cpp is 3.4--7.8x
+faster than kimimaro at one worker across the headline multi-label cases and
+8.6--11.3x faster at four workers.
+
+### Worst-case runs and memory
+
+The explicit run-count stress case is a `48³` alternating volume: 110,592
+voxels, 110,592 x-runs, two semantic labels, and two 26-connected components.
+Three-repeat medians were 750.25 ms (t1) and 381.23 ms (t4) for bioimage-cpp,
+versus 1.673 s and 937.81 ms for kimimaro. It completed without a dense
+component-label fallback.
+
+Linux memory probes start each backend in a fresh worker and sample aggregate
+`/proc` RSS for the worker and all descendants; the worker's own `ru_maxrss`
+delta covers native calls shorter than the sampling interval. Incremental
+process-tree peaks were:
+
+| case | bio t1 / t4 | kimimaro t1 / t4 |
+| --- | ---: | ---: |
+| binary tube `256³` | 64.2 / 61.8 MiB | 182.0 / 751.7 MiB |
+| packed distinct labels | 0.0 / 2.7 MiB | 37.9 / 655.8 MiB |
+| packed fragmented label | 0.2 / 2.8 MiB | 37.2 / 654.7 MiB |
+| imbalanced labels | 5.6 / 5.6 MiB | 61.0 / 765.9 MiB |
+| alternating labels | 3.7 / 7.6 MiB | 28.4 / 429.5 MiB |
+
+A zero incremental value means the short native call stayed below the
+post-import/input high-water mark; it does not mean zero allocations. The
+important structural check is also enforced in code: component discovery owns
+only run metadata, row offsets, union-find state, and concurrently active tight
+crops, with no full-volume `uint32`/`uint64` component image.
+
+### Dispatcher profile
+
+A profile build on the 27-label packed case at one worker reported:
+
+| phase | time | share |
+| --- | ---: | ---: |
+| component scan | 4.6 ms | 8.7% |
+| run union | 0.2 ms | 0.4% |
+| descriptors | 0.2 ms | 0.4% |
+| component TEASAR | 48.0 ms | 90.4% |
+| forest assembly | <0.1 ms | <0.1% |
+
+The normal optimized build was restored after profiling. Skeleton outputs were
+exact across worker counts `1, 2, 4, 8`, and the benchmark validates `E = V-C`,
+semantic keys, paired binary/label parity, and raw samples before writing JSON.

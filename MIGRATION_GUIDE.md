@@ -2502,8 +2502,9 @@ Important differences:
 ## kimimaro / TEASAR skeletonization
 
 Kimimaro skeletonizes densely labelled volumes and splits labels into connected
-components internally. The first `bioimage-cpp` TEASAR entry point is narrower:
-it accepts one binary 3D object and returns its graph directly.
+components internally. `bioimage-cpp` exposes the same two useful input
+semantics explicitly: `teasar` treats all nonzero values as one binary class,
+while `teasar_labels` preserves integer semantic-label identities.
 
 Kimimaro:
 
@@ -2536,17 +2537,33 @@ vertices, edges, radii = bic.skeleton.teasar(
     pdrf_exponent=4,
     number_of_threads=4,
 )
+
+skeletons = bic.skeleton.teasar_labels(
+    labels,
+    background=0,
+    spacing=(2.0, 1.0, 1.0),
+    scale=1.5,
+    constant=0,
+    pdrf_scale=100000,
+    pdrf_exponent=4,
+    number_of_threads=4,
+)
+# {original_label: (vertices, edges, radii), ...}
 ```
 
 Important differences and current scope:
 
-- `mask` is binary (nonzero means foreground), must be three-dimensional, and
-  a nonempty mask must contain exactly one 26-connected component. Component
-  splitting and multi-label dispatch are intentionally deferred.
+- `teasar(mask)` treats every nonzero value as one foreground class. It
+  skeletonizes every 26-connected component independently and returns their
+  deterministic concatenation as one forest tuple.
+- `teasar_labels(labels)` accepts native-endian `uint8`, `uint16`, `uint32`,
+  `uint64`, `int32`, or `int64` arrays. It returns one dictionary entry per
+  original non-background label. Disconnected occurrences of one label form
+  one forest, while touching distinct labels remain separate.
 - Coordinates follow NumPy axis order. `vertices` is `float64` physical
   `(z, y, x)` coordinates, `edges` is `(E, 2)` `uint64`, and `radii` is
-  per-vertex physical distance-to-boundary in `float32`. The graph is a
-  deterministic tree; an empty mask returns typed empty arrays.
+  per-vertex physical distance-to-boundary in `float32`. Empty binary masks
+  return typed empty arrays; all-background labeled inputs return `{}`.
 - The implementation follows the core TEASAR loop: a padded exact Euclidean
   distance-to-boundary field, a deterministic two-sweep root, a physical
   Dijkstra distance-from-root field, penalized repeated Dijkstra paths, and
@@ -2557,21 +2574,23 @@ Important differences and current scope:
   cross-section metadata, or postprocessing heuristics. These differences can
   change branch positions and vertex counts, so output is not expected to be
   vertex-for-vertex identical to kimimaro.
-- The C++ core remains dependency-free. `number_of_threads=1` is the default;
-  `0` uses hardware concurrency. The thread budget controls the exact distance
-  transform. Compact-foreground root sweeps and rails remain ordered on the
-  optimized heap: threshold benchmarks showed that staged delta stepping nearly
-  doubled runtime for large solid objects. Compact IDs avoid full-volume
-  shortest-path fields. The public Dijkstra functions remain dense and exact
-  FP64, with delta stepping reserved for broad physical multi-source fields.
+- The C++ core remains dependency-free. Component discovery uses x-runs and a
+  union-find rather than dense component-label images. `number_of_threads=1`
+  is the default and `0` uses hardware concurrency; one shared budget covers
+  component fan-out and each component's exact distance transform without
+  nested oversubscription.
+- Compact-foreground root sweeps and rails remain ordered on the optimized
+  heap. Compact IDs avoid full-volume shortest-path fields; the public Dijkstra
+  functions remain dense and exact FP64.
 
-Correctness tests are under `tests/skeleton/test_teasar.py`. The independent
+Correctness tests are under `tests/skeleton/test_teasar.py` and
+`tests/skeleton/test_teasar_labels.py`. The independent
 Dijkstra benchmark is `development/distance/benchmark_dijkstra.py`; the
-end-to-end synthetic branching-tube benchmark is
-`development/skeleton/benchmark_teasar.py` and can optionally add kimimaro with
-`--kimimaro` when it is installed. Pass `--sequential-backends` to reproduce
-the dense/compact FP64 design matrix; extended density, spacing, and PDRF
-regimes are in `development/skeleton/benchmark_teasar_sequential.py`.
+end-to-end benchmark is `development/skeleton/benchmark_teasar.py`. Use
+`--suite all --kimimaro` to compare paired binary and multi-label scenarios,
+`--memory` for fresh-process peak-RSS probes, or `--sequential-backends` for
+the dense/compact FP64 binary design matrix. Extended density, spacing, and
+PDRF regimes are in `development/skeleton/benchmark_teasar_sequential.py`.
 
 ## I/O and Build Dependencies
 
