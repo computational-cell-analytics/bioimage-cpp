@@ -138,6 +138,43 @@ def test_non_contiguous_input_is_handled():
     np.testing.assert_allclose(got, ref, atol=1e-6)
 
 
+@pytest.mark.parametrize("sampling", [(1.0, 1.0, 1.0), (2.5, 1.25, 0.75)])
+def test_threaded_outputs_are_exact(sampling):
+    zz, yy, xx = np.indices((17, 19, 23))
+    data = ((3 * zz + 5 * yy + 7 * xx) % 13 != 0).astype(np.uint8)
+    sequential = bic.distance.distance_transform(
+        data,
+        sampling=sampling,
+        return_indices=True,
+        return_vectors=True,
+        number_of_threads=1,
+    )
+    threaded = bic.distance.distance_transform(
+        data,
+        sampling=sampling,
+        return_indices=True,
+        return_vectors=True,
+        number_of_threads=4,
+    )
+    for got, expected in zip(threaded, sequential):
+        np.testing.assert_array_equal(got, expected)
+
+    preallocated = [np.empty_like(expected) for expected in sequential]
+    result = bic.distance.distance_transform(
+        data,
+        sampling=sampling,
+        return_indices=True,
+        return_vectors=True,
+        distances=preallocated[0],
+        indices=preallocated[1],
+        vectors=preallocated[2],
+        number_of_threads=4,
+    )
+    assert result is None
+    for got, expected in zip(preallocated, sequential):
+        np.testing.assert_array_equal(got, expected)
+
+
 def test_vector_difference_transform_unique_target():
     data = np.ones((5, 6), dtype=np.uint8)
     data[2, 3] = 0

@@ -7,6 +7,7 @@ or to provide more performant versions of functionality from these libraries.
 The functionality implemented here bundles and improves algorithms etc. from:
 - [affogato](https://github.com/constantinpape/affogato)
 - [fastfilters](https://github.com/sciai-lab/fastfilters)
+- [kimimaro](https://github.com/seung-lab/kimimaro)
 - [nifty](https://github.com/DerThorsten/nifty)
 - [vigra](https://github.com/ukoethe/vigra)
 
@@ -100,6 +101,7 @@ from . import graph
 from . import label_multiset
 from . import mesh
 from . import segmentation
+from . import skeleton
 from . import transformation
 from . import utils
 
@@ -113,6 +115,7 @@ __all__ = [
     "label_multiset",
     "mesh",
     "segmentation",
+    "skeleton",
     "transformation",
     "utils",
 ]

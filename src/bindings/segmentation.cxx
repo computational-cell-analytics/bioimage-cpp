@@ -1,5 +1,7 @@
 #include "segmentation.hxx"
 
+#include "ndarray.hxx"
+
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/segmentation/connected_components.hxx"
 #include "bioimage_cpp/segmentation/mutex_watershed.hxx"
@@ -16,8 +18,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
-#include <numeric>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -59,14 +59,7 @@ LabelArray mutex_watershed_grid_t(
         label_view_shape.push_back(static_cast<std::ptrdiff_t>(affinities.shape(axis)));
     }
 
-    const auto number_of_nodes = std::accumulate(
-        label_view_shape.begin(),
-        label_view_shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    );
-    auto *data = new std::uint64_t[static_cast<std::size_t>(number_of_nodes)]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<std::uint64_t *>(p); });
+    auto output = detail::make_array<std::uint64_t>(label_shape);
 
     ConstArrayView<T> affinities_view{
         affinities.data(),
@@ -79,7 +72,7 @@ LabelArray mutex_watershed_grid_t(
         {},
     };
     ArrayView<std::uint64_t> out_view{
-        data,
+        output.data(),
         label_view_shape,
         {},
     };
@@ -95,7 +88,7 @@ LabelArray mutex_watershed_grid_t(
         );
     }
 
-    return LabelArray(data, label_shape.size(), label_shape.data(), owner);
+    return output;
 }
 
 template <class T>
@@ -124,22 +117,8 @@ std::pair<LabelArray, SemanticLabelArray> semantic_mutex_watershed_grid_t(
         label_view_shape.push_back(static_cast<std::ptrdiff_t>(affinities.shape(axis)));
     }
 
-    const auto number_of_nodes = std::accumulate(
-        label_view_shape.begin(),
-        label_view_shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    );
-    auto *node_data = new std::uint64_t[static_cast<std::size_t>(number_of_nodes)]();
-    nb::capsule node_owner(
-        node_data,
-        [](void *p) noexcept { delete[] static_cast<std::uint64_t *>(p); }
-    );
-    auto *semantic_data = new std::int64_t[static_cast<std::size_t>(number_of_nodes)]();
-    nb::capsule semantic_owner(
-        semantic_data,
-        [](void *p) noexcept { delete[] static_cast<std::int64_t *>(p); }
-    );
+    auto node_output = detail::make_array<std::uint64_t>(label_shape);
+    auto semantic_output = detail::make_array<std::int64_t>(label_shape);
 
     ConstArrayView<T> affinities_view{
         affinities.data(),
@@ -152,12 +131,12 @@ std::pair<LabelArray, SemanticLabelArray> semantic_mutex_watershed_grid_t(
         {},
     };
     ArrayView<std::uint64_t> node_out_view{
-        node_data,
+        node_output.data(),
         label_view_shape,
         {},
     };
     ArrayView<std::int64_t> semantic_out_view{
-        semantic_data,
+        semantic_output.data(),
         label_view_shape,
         {},
     };
@@ -175,10 +154,7 @@ std::pair<LabelArray, SemanticLabelArray> semantic_mutex_watershed_grid_t(
         );
     }
 
-    return std::make_pair(
-        LabelArray(node_data, label_shape.size(), label_shape.data(), node_owner),
-        SemanticLabelArray(semantic_data, label_shape.size(), label_shape.data(), semantic_owner)
-    );
+    return std::make_pair(std::move(node_output), std::move(semantic_output));
 }
 
 template <class HeightT, class LabelT>
@@ -216,31 +192,19 @@ nb::ndarray<nb::numpy, LabelT, nb::c_contig> watershed_t(
         mask_data = mask->data();
     }
 
-    const auto number_of_nodes = std::accumulate(
-        image_shape.begin(),
-        image_shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    );
-    auto *data = new LabelT[static_cast<std::size_t>(number_of_nodes)]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<LabelT *>(p); });
+    auto output = detail::make_array<LabelT>(out_shape);
 
     ConstArrayView<HeightT> image_view{image.data(), image_shape, {}};
     ConstArrayView<LabelT> markers_view{markers.data(), image_shape, {}};
     ConstArrayView<std::uint8_t> mask_view{mask_data, mask_shape, {}};
-    ArrayView<LabelT> out_view{data, image_shape, {}};
+    ArrayView<LabelT> out_view{output.data(), image_shape, {}};
 
     {
         nb::gil_scoped_release release;
         watershed<HeightT, LabelT>(image_view, markers_view, mask_view, out_view);
     }
 
-    return nb::ndarray<nb::numpy, LabelT, nb::c_contig>(
-        data,
-        out_shape.size(),
-        out_shape.data(),
-        owner
-    );
+    return output;
 }
 
 template <class AffT, class LabelT>
@@ -295,19 +259,12 @@ nb::ndarray<nb::numpy, LabelT, nb::c_contig> watershed_from_affinities_t(
         mask_data = mask->data();
     }
 
-    const auto number_of_nodes = std::accumulate(
-        spatial_shape.begin(),
-        spatial_shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    );
-    auto *data = new LabelT[static_cast<std::size_t>(number_of_nodes)]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<LabelT *>(p); });
+    auto output = detail::make_array<LabelT>(out_shape);
 
     ConstArrayView<AffT> affinities_view{affinities.data(), affinity_shape, {}};
     ConstArrayView<LabelT> markers_view{markers.data(), spatial_shape, {}};
     ConstArrayView<std::uint8_t> mask_view{mask_data, mask_shape, {}};
-    ArrayView<LabelT> out_view{data, spatial_shape, {}};
+    ArrayView<LabelT> out_view{output.data(), spatial_shape, {}};
 
     {
         nb::gil_scoped_release release;
@@ -316,12 +273,7 @@ nb::ndarray<nb::numpy, LabelT, nb::c_contig> watershed_from_affinities_t(
         );
     }
 
-    return nb::ndarray<nb::numpy, LabelT, nb::c_contig>(
-        data,
-        out_shape.size(),
-        out_shape.data(),
-        owner
-    );
+    return output;
 }
 
 template <class T>
@@ -336,20 +288,10 @@ nb::tuple relabel_sequential_t(
         view_shape[axis] = static_cast<std::ptrdiff_t>(input.shape(axis));
     }
 
-    const auto n = std::accumulate(
-        view_shape.begin(),
-        view_shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    );
-
-    auto *relabeled_data = new T[static_cast<std::size_t>(n)]();
-    nb::capsule relabeled_owner(relabeled_data, [](void *p) noexcept {
-        delete[] static_cast<T *>(p);
-    });
+    auto relabeled_array = detail::make_array<T>(ndarray_shape);
 
     ConstArrayView<T> input_view{input.data(), view_shape, {}};
-    ArrayView<T> out_view{relabeled_data, view_shape, {}};
+    ArrayView<T> out_view{relabeled_array.data(), view_shape, {}};
 
     segmentation::RelabelSequentialMaps<T> maps;
     {
@@ -357,40 +299,8 @@ nb::tuple relabel_sequential_t(
         maps = segmentation::relabel_sequential<T>(input_view, offset, out_view);
     }
 
-    const std::size_t forward_size = maps.forward_map.size();
-    auto *forward_data = new T[forward_size];
-    std::copy(maps.forward_map.begin(), maps.forward_map.end(), forward_data);
-    nb::capsule forward_owner(forward_data, [](void *p) noexcept {
-        delete[] static_cast<T *>(p);
-    });
-
-    const std::size_t inverse_size = maps.inverse_map.size();
-    auto *inverse_data = new T[inverse_size];
-    std::copy(maps.inverse_map.begin(), maps.inverse_map.end(), inverse_data);
-    nb::capsule inverse_owner(inverse_data, [](void *p) noexcept {
-        delete[] static_cast<T *>(p);
-    });
-
-    auto relabeled_array = nb::ndarray<nb::numpy, T, nb::c_contig>(
-        relabeled_data,
-        ndarray_shape.size(),
-        ndarray_shape.data(),
-        relabeled_owner
-    );
-    std::size_t forward_shape[1] = {forward_size};
-    auto forward_array = nb::ndarray<nb::numpy, T, nb::c_contig>(
-        forward_data,
-        1,
-        forward_shape,
-        forward_owner
-    );
-    std::size_t inverse_shape[1] = {inverse_size};
-    auto inverse_array = nb::ndarray<nb::numpy, T, nb::c_contig>(
-        inverse_data,
-        1,
-        inverse_shape,
-        inverse_owner
-    );
+    auto forward_array = detail::copy_vector_to_array(maps.forward_map);
+    auto inverse_array = detail::copy_vector_to_array(maps.inverse_map);
 
     return nb::make_tuple(relabeled_array, forward_array, inverse_array);
 }
@@ -415,19 +325,10 @@ nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig> label_t(
         out_shape[axis] = image.shape(axis);
     }
 
-    const auto number_of_nodes = std::accumulate(
-        image_shape.begin(),
-        image_shape.end(),
-        std::ptrdiff_t{1},
-        [](const std::ptrdiff_t a, const std::ptrdiff_t b) { return a * b; }
-    );
-    auto *data = new std::uint64_t[static_cast<std::size_t>(number_of_nodes)]();
-    nb::capsule owner(data, [](void *p) noexcept {
-        delete[] static_cast<std::uint64_t *>(p);
-    });
+    auto output = detail::make_array<std::uint64_t>(out_shape);
 
     ConstArrayView<InT> image_view{image.data(), image_shape, {}};
-    ArrayView<std::uint64_t> out_view{data, image_shape, {}};
+    ArrayView<std::uint64_t> out_view{output.data(), image_shape, {}};
 
     {
         nb::gil_scoped_release release;
@@ -436,12 +337,7 @@ nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig> label_t(
         );
     }
 
-    return nb::ndarray<nb::numpy, std::uint64_t, nb::c_contig>(
-        data,
-        out_shape.size(),
-        out_shape.data(),
-        owner
-    );
+    return output;
 }
 
 } // namespace

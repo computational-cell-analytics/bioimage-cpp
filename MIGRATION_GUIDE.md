@@ -2339,6 +2339,74 @@ Important differences:
   and `number_of_threads` parallelizes the pairwise evaluation. Still threshold
   the distance map first to keep the candidate count modest.
 
+### Discrete Grid Dijkstra
+
+`bioimage-cpp` exposes its exact masked-grid shortest-path primitive directly.
+This is useful when a predecessor chain is required, when edge costs are
+naturally attached to voxels, and for independently benchmarking the
+shortest-path phase of algorithms such as TEASAR.
+
+```python
+import bioimage_cpp as bic
+
+# Multi-source field on an 8-connected 2D or 26-connected 3D voxel graph.
+field = bic.distance.dijkstra_distance_field(
+    mask,
+    sources,                         # (N, mask.ndim) integer coordinates
+    connectivity=None,              # full connectivity by default
+    spacing=(2.0, 1.0, 1.0),
+    number_of_threads=4,
+)
+
+# Flat C-order predecessor indices can be requested with the same solve.
+field, predecessors = bic.distance.dijkstra_distance_field(
+    mask, sources, return_predecessors=True
+)
+
+# Stop as soon as the cheapest of several targets is settled.
+path = bic.distance.dijkstra_path(mask, source, targets)
+```
+
+Three edge-cost conventions are available:
+
+- `cost_mode="physical"` assigns every edge the Euclidean length of its
+  neighbour offset under `spacing`; `costs` must be omitted.
+- `cost_mode="node"` assigns directed edge `u -> v` the value `costs[v]`;
+  `spacing` must be `None`.
+- `cost_mode="node_times_physical"` assigns `costs[v]` times the physical
+  neighbour-step length.
+
+All costs must be finite and non-negative. Distances are `float64`; background
+and unreachable voxels are `+inf`. Predecessors are `int64` with the mask shape:
+sources point to their own flat C-order index and background/unreachable voxels
+contain `-1`. Paths are `int64` NumPy-axis-order coordinates from the source to
+the selected target. Target ties are deterministic and use flat C-order indices.
+`number_of_threads=1` retains the specialized sequential heaps; `0` uses
+hardware concurrency. Broad multi-source physical fields can use exact FP64
+delta stepping: distance fields are bitwise-identical to the sequential result,
+while an equal-cost predecessor may differ from the sequential heap but remains
+deterministic. Paths, weighted modes, small workloads, and narrow source sets
+retain the faster specialized heaps.
+
+This Dijkstra field is deliberately distinct from
+`geodesic_distance_field` below. Dijkstra is exact for the chosen 4/8- or
+6/18/26-neighbour voxel graph, supports zero node costs, and provides an exact
+predecessor chain. Its physical metric is still a discrete chamfer metric: a
+continuous direction must be approximated by the available neighbour steps.
+The geodesic implementation instead solves the continuous Eikonal equation on
+the sampled grid with a first-order Godunov fast-marching scheme. It is smoother
+and less tied to the finite neighbour directions, and its `speed` argument has
+travel-time semantics, but it does not retain discrete predecessors. The two
+are close on well-sampled, uniform domains but are not numerically equivalent;
+TEASAR therefore uses Dijkstra where it must reconstruct and join paths.
+
+See `development/distance/benchmark_dijkstra.py` for a standalone benchmark of
+the Dijkstra field, predecessor field, weighted field, and early-stopping path;
+pass `--broad-multisource` to exercise the delta-stepping dispatch.
+The implementation uses reusable fixed neighbor metadata and specialized heap
+strategies internally, but these do not change dtype, tie-breaking, or public
+results.
+
 ## scikit-fmm
 
 `scikit-fmm` computes geodesic distances on regular grids with the fast
@@ -2430,6 +2498,120 @@ Important differences:
   triangles, since obtuse-angle unfolding is not done yet). Like the mask
   solver it slightly overestimates. See `development/distance/` for the
   reference oracles and `benchmark_geodesic.py` for timings.
+
+## kimimaro / TEASAR skeletonization
+
+Kimimaro skeletonizes densely labelled volumes and splits labels into connected
+components internally. `bioimage-cpp` exposes the same two useful input
+semantics explicitly: `teasar` treats all nonzero values as one binary class,
+while `teasar_labels` preserves integer semantic-label identities.
+
+Kimimaro:
+
+```python
+import kimimaro
+
+skeletons = kimimaro.skeletonize(
+    labels,
+    teasar_params={
+        "scale": 1.5,
+        "const": 0,
+        "pdrf_scale": 100000,
+        "pdrf_exponent": 4,
+    },
+    anisotropy=(2.0, 1.0, 1.0),
+)
+```
+
+bioimage-cpp:
+
+```python
+import bioimage_cpp as bic
+
+vertices, edges, radii = bic.skeleton.teasar(
+    mask,
+    spacing=(2.0, 1.0, 1.0),
+    scale=1.5,
+    constant=0,
+    pdrf_scale=100000,
+    pdrf_exponent=4,
+    number_of_threads=4,
+)
+
+skeletons = bic.skeleton.teasar_labels(
+    labels,
+    background=0,
+    spacing=(2.0, 1.0, 1.0),
+    scale=1.5,
+    constant=0,
+    pdrf_scale=100000,
+    pdrf_exponent=4,
+    number_of_threads=4,
+)
+# {original_label: (vertices, edges, radii), ...}
+```
+
+Convert the topology of either result to the native undirected graph while
+keeping coordinates and radii in their NumPy arrays:
+
+```python
+import numpy as np
+
+graph = bic.skeleton.skeleton_to_graph(vertices, edges)
+
+# Node ids index vertices and radii directly.
+degrees = np.fromiter(
+    (len(graph.node_adjacency(node)) for node in range(graph.number_of_nodes)),
+    dtype=np.uint64,
+    count=graph.number_of_nodes,
+)
+endpoint_vertices = vertices[degrees <= 1]
+branch_vertices = vertices[degrees > 2]
+```
+
+The conversion also preserves disconnected forests and isolated vertices. The
+graph stores topology only; it does not copy or own ``vertices`` or ``radii``.
+
+Important differences and current scope:
+
+- `teasar(mask)` treats every nonzero value as one foreground class. It
+  skeletonizes every 26-connected component independently and returns their
+  deterministic concatenation as one forest tuple.
+- `teasar_labels(labels)` accepts native-endian `uint8`, `uint16`, `uint32`,
+  `uint64`, `int32`, or `int64` arrays. It returns one dictionary entry per
+  original non-background label. Disconnected occurrences of one label form
+  one forest, while touching distinct labels remain separate.
+- Coordinates follow NumPy axis order. `vertices` is `float64` physical
+  `(z, y, x)` coordinates, `edges` is `(E, 2)` `uint64`, and `radii` is
+  per-vertex physical distance-to-boundary in `float32`. Empty binary masks
+  return typed empty arrays; all-background labeled inputs return `{}`.
+- The implementation follows the core TEASAR loop: a padded exact Euclidean
+  distance-to-boundary field, a deterministic two-sweep root, a physical
+  Dijkstra distance-from-root field, penalized repeated Dijkstra paths, and
+  rolling invalidation with radius `scale * radius + constant`.
+- This first correctness-oriented version uses a physical axis-aligned
+  invalidation cube. It does not implement kimimaro's soma handling, hole
+  filling, border stitching, manual targets, component dust filtering,
+  cross-section metadata, or postprocessing heuristics. These differences can
+  change branch positions and vertex counts, so output is not expected to be
+  vertex-for-vertex identical to kimimaro.
+- The C++ core remains dependency-free. Component discovery uses x-runs and a
+  union-find rather than dense component-label images. `number_of_threads=1`
+  is the default and `0` uses hardware concurrency; one shared budget covers
+  component fan-out and each component's exact distance transform without
+  nested oversubscription.
+- Compact-foreground root sweeps and rails remain ordered on the optimized
+  heap. Compact IDs avoid full-volume shortest-path fields; the public Dijkstra
+  functions remain dense and exact FP64.
+
+Correctness tests are under `tests/skeleton/test_teasar.py` and
+`tests/skeleton/test_teasar_labels.py`. The independent
+Dijkstra benchmark is `development/distance/benchmark_dijkstra.py`; the
+end-to-end benchmark is `development/skeleton/benchmark_teasar.py`. Use
+`--suite all --kimimaro` to compare paired binary and multi-label scenarios,
+`--memory` for fresh-process peak-RSS probes, or `--sequential-backends` for
+the dense/compact FP64 binary design matrix. Extended density, spacing, and
+PDRF regimes are in `development/skeleton/benchmark_teasar_sequential.py`.
 
 ## I/O and Build Dependencies
 

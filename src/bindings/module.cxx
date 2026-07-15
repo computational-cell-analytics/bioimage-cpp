@@ -8,6 +8,7 @@
 #include "label_multiset.hxx"
 #include "mesh.hxx"
 #include "segmentation.hxx"
+#include "skeleton.hxx"
 #include "transformation.hxx"
 #include "util.hxx"
 #include "utils.hxx"
@@ -28,6 +29,7 @@ NB_MODULE(_core, m) {
     bioimage_cpp::bindings::bind_label_multiset(m);
     bioimage_cpp::bindings::bind_mesh(m);
     bioimage_cpp::bindings::bind_segmentation(m);
+    bioimage_cpp::bindings::bind_skeleton(m);
     bioimage_cpp::bindings::bind_transformation(m);
     bioimage_cpp::bindings::bind_util(m);
     bioimage_cpp::bindings::bind_utils(m);

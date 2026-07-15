@@ -22,6 +22,7 @@ nanobind_add_module(_core
     src/bindings/label_multiset.cxx
     src/bindings/mesh.cxx
     src/bindings/segmentation.cxx
+    src/bindings/skeleton.cxx
     src/bindings/transformation.cxx
     src/bindings/util.cxx
     src/bindings/utils.cxx

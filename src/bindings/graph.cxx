@@ -1,4 +1,5 @@
 #include "graph.hxx"
+#include "ndarray.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/graph/breadth_first_search.hxx"
@@ -84,43 +85,19 @@ void require_uv_array(const ConstUInt64Array &uvs, const char *argument_name) {
 }
 
 UInt64Array make_uint64_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new std::uint64_t[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<std::uint64_t *>(p); });
-    return UInt64Array(data, shape.size(), shape.data(), owner);
+    return detail::make_array<std::uint64_t>(shape);
 }
 
 UInt8Array make_uint8_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new std::uint8_t[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<std::uint8_t *>(p); });
-    return UInt8Array(data, shape.size(), shape.data(), owner);
+    return detail::make_array<std::uint8_t>(shape);
 }
 
 Int64Array make_int64_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new std::int64_t[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<std::int64_t *>(p); });
-    return Int64Array(data, shape.size(), shape.data(), owner);
+    return detail::make_array<std::int64_t>(shape);
 }
 
 DoubleArray make_double_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new double[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<double *>(p); });
-    return DoubleArray(data, shape.size(), shape.data(), owner);
+    return detail::make_array<double>(shape);
 }
 
 template <class T>
@@ -128,31 +105,17 @@ using TypedArray = nb::ndarray<nb::numpy, T, nb::c_contig>;
 
 template <class T>
 TypedArray<T> make_typed_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new T[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
-    return TypedArray<T>(data, shape.size(), shape.data(), owner);
+    return detail::make_array<T>(shape);
 }
 
 template <class T>
 FloatingArray<T> make_floating_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new T[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
-    return FloatingArray<T>(data, shape.size(), shape.data(), owner);
+    return detail::make_array<T>(shape);
 }
 
 template <class T>
 FloatingArray<T> vector_to_floating_array(const std::vector<T> &values) {
-    auto result = make_floating_array<T>({values.size()});
-    std::copy(values.begin(), values.end(), result.data());
-    return result;
+    return detail::copy_vector_to_array(values);
 }
 
 template <class T>
@@ -173,21 +136,15 @@ std::vector<std::ptrdiff_t> const_double_shape(ConstDoubleArray array) {
 }
 
 UInt64Array vector_to_uint64_array(const std::vector<std::uint64_t> &values) {
-    auto result = make_uint64_array({values.size()});
-    std::copy(values.begin(), values.end(), result.data());
-    return result;
+    return detail::copy_vector_to_array(values);
 }
 
 UInt8Array vector_to_uint8_array(const std::vector<std::uint8_t> &values) {
-    auto result = make_uint8_array({values.size()});
-    std::copy(values.begin(), values.end(), result.data());
-    return result;
+    return detail::copy_vector_to_array(values);
 }
 
 DoubleArray vector_to_double_array(const std::vector<double> &values) {
-    auto result = make_double_array({values.size()});
-    std::copy(values.begin(), values.end(), result.data());
-    return result;
+    return detail::copy_vector_to_array(values);
 }
 
 UInt64Array edges_to_uv_array(const std::vector<bioimage_cpp::detail::Edge> &edges) {
@@ -204,9 +161,7 @@ UInt64Array edges_to_uv_array(const std::vector<bioimage_cpp::detail::Edge> &edg
 // NumPy `(n_edges, 5)` array. Used by the distributed block-extraction bindings.
 DoubleArray block_stats_to_array(const std::vector<double> &stats) {
     const auto rows = stats.size() / 5;
-    auto result = make_double_array({rows, std::size_t{5}});
-    std::copy(stats.begin(), stats.end(), result.data());
-    return result;
+    return detail::copy_vector_to_array(stats, {rows, std::size_t{5}});
 }
 
 template <std::size_t D>
@@ -689,11 +644,10 @@ std::pair<UInt64Array, UInt64Array> graph_extract_subgraph_from_nodes(
 ) {
     const auto node_vector = nodes_to_vector(nodes);
     const auto extracted = graph.extract_subgraph_from_nodes(node_vector);
-    auto inner = make_uint64_array({extracted.first.size()});
-    auto outer = make_uint64_array({extracted.second.size()});
-    std::copy(extracted.first.begin(), extracted.first.end(), inner.data());
-    std::copy(extracted.second.begin(), extracted.second.end(), outer.data());
-    return {inner, outer};
+    return {
+        detail::copy_vector_to_array(extracted.first),
+        detail::copy_vector_to_array(extracted.second),
+    };
 }
 
 UInt64Array graph_edges_from_node_list(const Graph &graph, ConstUInt64Array nodes) {
@@ -748,12 +702,7 @@ std::vector<T> array_1d_to_vector(
 
 template <class T>
 nb::ndarray<nb::numpy, T, nb::c_contig> vector_to_array_1d(const std::vector<T> &values) {
-    const std::size_t size = values.size();
-    auto *data = new T[size];
-    std::copy(values.begin(), values.end(), data);
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<T *>(p); });
-    const std::array<std::size_t, 1> shape{size};
-    return nb::ndarray<nb::numpy, T, nb::c_contig>(data, 1, shape.data(), owner);
+    return detail::copy_vector_to_array(values);
 }
 
 template <class WeightT, class SeedT>
@@ -1388,9 +1337,7 @@ UInt64Array rag_coordinates_edge_coordinates(
     const auto flat = coords.edge_coordinates(edge, edge_direction);
     const auto ndim = coords.ndim();
     const std::size_t n_points = ndim == 0 ? 0 : flat.size() / ndim;
-    auto result = make_uint64_array({n_points, ndim});
-    std::copy(flat.begin(), flat.end(), result.data());
-    return result;
+    return detail::copy_vector_to_array(flat, {n_points, ndim});
 }
 
 template <class V>

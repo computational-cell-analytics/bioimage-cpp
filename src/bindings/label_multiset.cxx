@@ -1,4 +1,5 @@
 #include "label_multiset.hxx"
+#include "ndarray.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/blocking.hxx"
@@ -57,23 +58,12 @@ ConstArrayView<T> view_1d(const nb::ndarray<nb::numpy, const T, nb::c_contig> &a
 
 template <class T>
 nb::ndarray<nb::numpy, T, nb::c_contig> alloc_1d(std::size_t n) {
-    auto *data = new T[n]();
-    nb::capsule owner(data, [](void *p) noexcept {
-        delete[] static_cast<T *>(p);
-    });
-    std::size_t shape[1] = {n};
-    return nb::ndarray<nb::numpy, T, nb::c_contig>(data, 1, shape, owner);
+    return detail::make_array<T>({n});
 }
 
 template <class T>
 nb::ndarray<nb::numpy, T, nb::c_contig> vector_to_array(std::vector<T> &&v) {
-    auto *data = new T[v.size()];
-    std::copy(v.begin(), v.end(), data);
-    nb::capsule owner(data, [](void *p) noexcept {
-        delete[] static_cast<T *>(p);
-    });
-    std::size_t shape[1] = {v.size()};
-    return nb::ndarray<nb::numpy, T, nb::c_contig>(data, 1, shape, owner);
+    return detail::copy_vector_to_array(v);
 }
 
 // ----- read_subset -----
@@ -288,13 +278,7 @@ public:
 private:
     template <class T>
     static nb::ndarray<nb::numpy, T, nb::c_contig> copy_to_array(const std::vector<T> &v) {
-        auto *data = new T[v.size()];
-        std::copy(v.begin(), v.end(), data);
-        nb::capsule owner(data, [](void *p) noexcept {
-            delete[] static_cast<T *>(p);
-        });
-        std::size_t shape[1] = {v.size()};
-        return nb::ndarray<nb::numpy, T, nb::c_contig>(data, 1, shape, owner);
+        return detail::copy_vector_to_array(v);
     }
 
     label_multiset::MultisetMerger<OffsetT, IdT, CountT> merger_;

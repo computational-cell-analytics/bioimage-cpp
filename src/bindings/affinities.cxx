@@ -1,4 +1,5 @@
 #include "affinities.hxx"
+#include "ndarray.hxx"
 
 #include "bioimage_cpp/affinities/compute_affinities.hxx"
 #include "bioimage_cpp/affinities/compute_embedding_distances.hxx"
@@ -36,26 +37,6 @@ std::vector<std::ptrdiff_t> ndarray_shape(const T &array) {
         shape[axis] = static_cast<std::ptrdiff_t>(array.shape(axis));
     }
     return shape;
-}
-
-FloatArray make_float_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new float[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<float *>(p); });
-    return FloatArray(data, shape.size(), shape.data(), owner);
-}
-
-UInt8Array make_uint8_array(const std::vector<std::size_t> &shape) {
-    std::size_t size = 1;
-    for (const auto axis_size : shape) {
-        size *= axis_size;
-    }
-    auto *data = new std::uint8_t[size]();
-    nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<std::uint8_t *>(p); });
-    return UInt8Array(data, shape.size(), shape.data(), owner);
 }
 
 template <std::size_t D>
@@ -115,9 +96,9 @@ std::pair<FloatArray, UInt8Array> compute_affinities_nd_t(
         out_view_shape[axis] = static_cast<std::ptrdiff_t>(out_shape[axis]);
     }
 
-    auto affs = make_float_array(out_shape);
+    auto affs = detail::make_array<float>(out_shape);
     UInt8Array mask = return_mask
-        ? make_uint8_array(out_shape)
+        ? detail::make_array<std::uint8_t>(out_shape)
         : UInt8Array(nullptr, 0, nullptr);
 
     ConstArrayView<LabelT> labels_view{
@@ -204,7 +185,7 @@ FloatArray compute_embedding_distances_nd_t(
         out_view_shape[axis] = static_cast<std::ptrdiff_t>(out_shape[axis]);
     }
 
-    auto distances = make_float_array(out_shape);
+    auto distances = detail::make_array<float>(out_shape);
 
     ConstArrayView<float> values_view{
         values.data(),

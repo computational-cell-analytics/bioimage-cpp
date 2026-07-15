@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -276,7 +277,9 @@ inline void distance_transform(
     // Squared sampled distance buffer. ndim per-axis feature-coord buffers
     // (int32) replace the previous flat int64 feature index — this lets the
     // output pass materialize indices/vectors without re-unraveling per pixel.
-    std::vector<double> squared_distance(static_cast<std::size_t>(n));
+    auto squared_distance = std::make_unique_for_overwrite<double[]>(
+        static_cast<std::size_t>(n)
+    );
     std::vector<std::vector<std::int32_t>> feature_coord;
     if (track_feature) {
         feature_coord.resize(static_cast<std::size_t>(ndim));
@@ -284,14 +287,6 @@ inline void distance_transform(
             arr.assign(static_cast<std::size_t>(n), 0);
         }
     }
-    {
-        BIOIMAGE_PROFILE_SCOPE(profiler, "init_buffers")
-        for (std::ptrdiff_t i = 0; i < n; ++i) {
-            squared_distance[static_cast<std::size_t>(i)] =
-                (input.data[i] == 0) ? 0.0 : detail::kInfinity;
-        }
-    }
-
     for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
         BIOIMAGE_PROFILE_SCOPE(profiler, "sweep_axis")
         const std::ptrdiff_t line_length = input.shape[static_cast<std::size_t>(ax)];
@@ -317,10 +312,20 @@ inline void distance_transform(
             const std::ptrdiff_t base = outer_idx * axis_block + inner_idx;
             ws.ensure(line_length, feature_axes_in);
 
-            // Gather f along the line.
-            for (std::ptrdiff_t i = 0; i < line_length; ++i) {
-                ws.f[static_cast<std::size_t>(i)] =
-                    squared_distance[static_cast<std::size_t>(base + i * stride)];
+            // The first-axis gather initializes the uninitialized squared-
+            // distance buffer directly from the input. Later axes gather the
+            // preceding sweep, avoiding a redundant full-volume init pass.
+            if (ax == 0) {
+                for (std::ptrdiff_t i = 0; i < line_length; ++i) {
+                    const auto index = static_cast<std::size_t>(base + i * stride);
+                    ws.f[static_cast<std::size_t>(i)] =
+                        input.data[index] == 0 ? 0.0 : detail::kInfinity;
+                }
+            } else {
+                for (std::ptrdiff_t i = 0; i < line_length; ++i) {
+                    const auto index = static_cast<std::size_t>(base + i * stride);
+                    ws.f[static_cast<std::size_t>(i)] = squared_distance[index];
+                }
             }
             // Gather already-tracked feature coords (axes < ax).
             for (std::ptrdiff_t a = 0; a < feature_axes_in; ++a) {
@@ -395,9 +400,25 @@ inline void distance_transform(
     // per-axis feature buffers, vectors use an incremental coord counter.
     if (want_distances) {
         BIOIMAGE_PROFILE_SCOPE(profiler, "output_distances")
-        for (std::ptrdiff_t i = 0; i < n; ++i) {
-            outputs.distances.data[i] =
-                static_cast<float>(std::sqrt(squared_distance[static_cast<std::size_t>(i)]));
+        const auto output_threads = bioimage_cpp::detail::normalize_thread_count(
+            n_threads, static_cast<std::size_t>(n)
+        );
+        const auto write_distances = [&](const std::size_t begin, const std::size_t end) {
+            for (std::size_t i = begin; i < end; ++i) {
+                outputs.distances.data[i] =
+                    static_cast<float>(std::sqrt(squared_distance[i]));
+            }
+        };
+        if (output_threads <= 1) {
+            write_distances(0, static_cast<std::size_t>(n));
+        } else {
+            bioimage_cpp::detail::parallel_for_chunks(
+                output_threads,
+                static_cast<std::size_t>(n),
+                [&](const std::size_t, const std::size_t begin, const std::size_t end) {
+                    write_distances(begin, end);
+                }
+            );
         }
     }
 
