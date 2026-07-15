@@ -260,6 +260,42 @@ def test_public_teasar_uses_exact_compact_fp64_backend():
         np.testing.assert_array_equal(got, expected)
 
 
+def test_many_rail_target_ordering_preserves_dense_parity():
+    zz, yy, xx = np.ogrid[:17, :129, :129]
+    mask = (
+        ((zz - 8) ** 2 + (yy - 64) ** 2 <= 5**2)
+        & (xx >= 5)
+        & (xx <= 123)
+    )
+    for x in range(8, 121, 8):
+        mask |= (
+            ((zz - 8) ** 2 + (xx - x) ** 2 <= 5**2)
+            & (yy >= 5)
+            & (yy <= 123)
+        )
+    mask = np.ascontiguousarray(mask, dtype=np.uint8)
+
+    results = []
+    for backend in ("dense-fp64", "compact-on-the-fly-fp64"):
+        results.append(
+            _core._teasar_uint8_backend(
+                mask,
+                [1.0, 1.0, 1.0],
+                1.5,
+                1.0,
+                100000.0,
+                4.0,
+                backend,
+                1,
+            )
+        )
+    dense, compact = results
+    for got, expected in zip(compact, dense):
+        np.testing.assert_array_equal(got, expected)
+    degree = np.bincount(compact[1].ravel(), minlength=len(compact[0]))
+    assert np.count_nonzero(degree == 1) > 16
+
+
 def test_failed_fp32_development_backend_is_not_selectable():
     mask = np.ones((2, 2, 2), dtype=np.uint8)
     with pytest.raises(ValueError, match="unknown TEASAR development backend"):

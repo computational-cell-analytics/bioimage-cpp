@@ -498,9 +498,10 @@ common rail driver.
 The following proposed optimizations were deliberately deferred:
 
 - A pre-sorted target list would replace an O(P x V) scan, but the measured
-  target-selection phase is only 0.8 ms on the `256^3` fixture. Its O(V log V)
-  setup, extra memory, and invalidation bookkeeping cannot pay back materially
-  at present.
+  target-selection phase was only 0.8 ms on the `256^3` fixture. It was
+  therefore deferred at this point. The later real-filament MRC follow-up
+  below showed that this conclusion was workload-specific and implemented an
+  adaptive ordered selector for large, many-rail components.
 - Touched-node or generation-based compact state reset could avoid a V-byte
   clear per rail, but all rail-path Dijkstra work is only 26.6 ms in the same
   profile. Adding a branch/write to every discovery without first isolating
@@ -511,8 +512,8 @@ The following proposed optimizations were deliberately deferred:
   different, and keeping the dense oracle structurally independent helps it
   catch compact-specific regressions. Only the identical, policy-free bounds
   calculation was shared.
-- Candidate-target and state-reset changes are therefore benchmark follow-ups,
-  not pending correctness fixes.
+- State-reset changes remain benchmark follow-ups rather than pending
+  correctness fixes. Candidate-target selection is revisited below.
 
 ## Multi-component and multi-label dispatch
 
@@ -605,3 +606,133 @@ A profile build on the 27-label packed case at one worker reported:
 The normal optimized build was restored after profiling. Skeleton outputs were
 exact across worker counts `1, 2, 4, 8`, and the benchmark validates `E = V-C`,
 semantic keys, paired binary/label parity, and raw samples before writing JSON.
+
+## Real filament MRC target-selection follow-up
+
+The synthetic branching tubes used above require only a small number of rails,
+so their repeated full-domain target scan was negligible. A real binary mask
+with many long, closely packed filaments exposed a different scaling regime.
+The input `examples/skeleton/00004_gt_mask.mrc` has shape
+`324 x 1251 x 1251`, 10,971,478 foreground voxels, and produces 1,293
+26-connected skeleton components. With `scale=3.0` and eight workers, the
+original full-volume call took 194.737 s.
+
+The real-data size sweep is reproducible with:
+
+```bash
+python development/skeleton/benchmark_teasar_mrc.py
+python development/skeleton/benchmark_teasar_mrc.py --include-full
+python development/skeleton/benchmark_teasar_mrc.py \
+    --fractions 0.125 0.25 --threads 1 2 4 8 \
+    --repeats 3 --warmup 1 --json /tmp/teasar_mrc.json
+```
+
+The harness memory-maps the MRC, takes centered nested crops, copies each crop
+to `uint8` outside the timed region, and reports shape, foreground count,
+component count (`V - E`), graph size, raw samples, median, and minimum. It
+compares vertices, edges, and radii array-exactly when several worker counts
+are requested. The default is one no-warmup measurement at eight workers for
+12.5%, 25%, and 50% crops; the full volume is opt-in because it was initially
+more than a three-minute call.
+
+### Profile diagnosis
+
+The centered 25% crop has 81 components and 972,194 foreground voxels, but one
+component contains 757,982 voxels. On the centered 50% crop, one of 286
+components contains 3,346,043 of the 4,356,501 foreground voxels. This
+imbalance explains why component-level fan-out alone does not scale well:
+when the component count exceeds the thread budget, each component receives a
+one-thread local budget and the dominant component determines wall time.
+
+A profile build isolated the dominant 50% component and called the compact
+on-the-fly FP64 backend with one worker. The before and after columns use the
+same mask, TEASAR parameters, backend, compiler configuration, and worker
+count:
+
+| phase | repeated scan | adaptive ordering | change |
+| --- | ---: | ---: | ---: |
+| input crop / padding | 204.1 ms | 198.9 ms | -2.5% |
+| distance transform | 1.652 s | 1.631 s | -1.3% |
+| compact domain | 147.4 ms | 149.6 ms | +1.5% |
+| DBF compaction | 35.6 ms | 40.5 ms | +13.8% |
+| root Dijkstra | 2.808 s | 2.789 s | -0.7% |
+| PDRF | 80.2 ms | 80.8 ms | +0.7% |
+| target selection | 12.887 s | 628.1 ms | **-95.1%** |
+| rail-path Dijkstra | 3.530 s | 3.612 s | +2.3% |
+| invalidation | 465.3 ms | 457.3 ms | -1.7% |
+| total | 21.810 s | 9.587 s | **-56.0%** |
+
+The unchanged neighboring phases isolate the improvement to target selection.
+With eight workers after the change, the same component took 8.651 s: EDT was
+427.5 ms, target selection 650.8 ms, root Dijkstra 2.857 s, and rail Dijkstra
+3.765 s. Shortest-path work is therefore the new dominant cost, accounting for
+76.5% of the profiled total.
+
+### Adaptive target ordering
+
+Every rail previously found its target by scanning all compact nodes and
+choosing the farthest active root-field value, an O(P x V) operation for `P`
+rails and `V` foreground nodes. The optimized compact backend retains that
+linear scan for small and short skeletonizations. Components with at least
+65,536 compact nodes switch only after
+`max(16, bit_width(number_of_nodes))` rail selections. At that point the
+remaining active nodes are sorted once by descending root distance and
+ascending compact node ID. Later selections advance through the array and
+skip nodes removed by invalidation.
+
+The secondary compact-ID order exactly preserves the original ascending-scan
+tie break. The dense FP64 backend remains unchanged as a correctness oracle. A
+connected thick-comb fixture forces more than 16 rails above the size crossover
+and verifies array-exact dense/compact vertices, edges, and radii.
+
+Single-run eight-worker measurements on the MRC sweep were:
+
+| crop | shape | foreground | components | before | after | change |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 12.5% | `40 x 156 x 156` | 152,662 | 23 | 100 ms | 104 ms | +4.0% |
+| 25% | `81 x 312 x 312` | 972,194 | 81 | 1.655 s | 1.463 s | -11.6% |
+| 50% | `162 x 625 x 625` | 4,356,501 | 286 | 22.271 s | 10.061 s | **-54.8%** |
+| full | `324 x 1251 x 1251` | 10,971,478 | 1,293 | 194.737 s | 43.150 s | **-77.8%** |
+
+The full-volume result is a 4.51x speedup. The smallest crop is below the
+ordered-selector crossover for every component, so its small difference is
+run-to-run noise on an unchanged target-selection path. The full-volume
+baseline is the original example measurement; the optimized value and crop
+rows were collected through the new harness.
+
+### Parallel Dijkstra decision on this data
+
+The removed compact delta-stepping adapter was rebuilt from the last commit
+that contained it and tested on the isolated 3,346,043-voxel component. The
+complete sequential-heap call took 21.9 s. With eight workers, delta stepping
+finished its EDT in 356 ms but the call was stopped after more than 90 s without
+completing. It therefore regressed this workload by more than 4x. These
+one-source root fields and early-stopping weighted rail paths have narrow
+wavefronts and do not amortize proposal generation, sorting, merging, and
+synchronization. Compact root and rail solves remain on the optimized
+sequential heap; the thread budget continues to apply to EDT and independent
+components.
+
+### Synthetic retention benchmark
+
+The established large binary suite was rerun before and after with one worker,
+one warmup, three measured calls, and the deterministic backend-order shuffle:
+
+```bash
+python development/skeleton/benchmark_teasar.py \
+    --large --suite binary --threads 1 --repeats 3 --warmup 1
+```
+
+| case | before median | after median | change |
+| --- | ---: | ---: | ---: |
+| branching tube `128^3` | 34.57 ms | 33.93 ms | -1.8% |
+| branching tube `192^3` | 111.27 ms | 107.24 ms | -3.6% |
+| branching tube `256^3` | 292.69 ms | 291.82 ms | -0.3% |
+| packed binary, 27 components | 53.03 ms | 51.34 ms | -3.2% |
+
+No synthetic case regressed. The `128^3` and `192^3` components stay below
+the size crossover, while the `256^3` tube does not generate enough rails to
+leave the initial linear mode. Skeleton output remained array-exact across
+backends and worker counts. Final verification after the optimization and
+benchmark addition: `1182 passed` with third-party pytest plugin autoload
+disabled.

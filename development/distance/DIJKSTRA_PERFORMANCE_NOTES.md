@@ -645,3 +645,29 @@ so it can be retuned on materially different wheel hardware.
 Final validation used a normal editable build and reported `1145 passed`. The
 optional array-view lifetime fix was also suite-tested in a separate build with
 `-fno-elide-constructors`, specifically removing any dependence on NRVO.
+
+## Real-filament compact TEASAR confirmation
+
+A later TEASAR investigation tested the removed compact delta-stepping adapter
+on a real connected filament component with 3,346,043 foreground nodes. This
+is well above the former `1 << 20` compact dispatch threshold. The complete
+sequential-heap TEASAR call took 21.9 s. An eight-worker delta-stepping call
+finished its threaded distance transform in 356 ms but was stopped after more
+than 90 s without completing, a greater than 4x end-to-end regression lower
+bound.
+
+The real workload therefore reinforces the retained dispatch policy: compact
+TEASAR root fields and weighted early-stop rail searches remain on their
+specialized sequential heaps. Their one-source wavefronts are too narrow to
+amortize staged proposal generation, sorting, merging, and synchronization.
+The existing delta-stepping implementation remains appropriate only for broad
+multi-source physical fields.
+
+After optimizing TEASAR's separate repeated target-selection scan, root and
+rail Dijkstra account for 76.5% of the dominant component's profiled time.
+That makes sequential shortest-path work the next performance target, but it
+does not change the failed parallel result. Any future compact parallel solver
+must use a materially different design and clear the existing exact-output,
+small-case regression, and end-to-end speedup gates. The full MRC profile,
+size sweep, adaptive-target implementation, and synthetic retention results
+are recorded in `development/skeleton/PERFORMANCE_NOTES.md`.

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -614,16 +615,63 @@ inline SkeletonGraph teasar_compact_impl(
     detail::RowIntervalUnion invalidated_rows(
         n / static_cast<std::size_t>(shape[2]), shape[2]
     );
+    std::vector<std::uint32_t> ordered_targets;
+    std::size_t ordered_target_cursor = 0;
+    std::size_t linear_target_selections = 0;
+    const auto linear_target_limit = std::max<std::size_t>(
+        16, std::bit_width(domain.size())
+    );
+    constexpr std::size_t ordered_target_minimum_nodes = 1U << 16;
+    const bool allow_ordered_targets =
+        domain.size() >= ordered_target_minimum_nodes;
+    bool targets_ordered = false;
     while (active_count > 0) {
         auto target = detail::kNoCompactNode;
-        Distance target_distance = Distance{-1};
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "target_selection")
-            for (std::uint32_t node = 0; node < domain.size(); ++node) {
-                const auto full = domain.compact_to_full[node];
-                if (active[full] != 0 && root_field[node] > target_distance) {
-                    target = node;
-                    target_distance = root_field[node];
+            if (
+                !targets_ordered &&
+                (!allow_ordered_targets ||
+                 linear_target_selections < linear_target_limit)
+            ) {
+                Distance target_distance = Distance{-1};
+                for (std::uint32_t node = 0; node < domain.size(); ++node) {
+                    const auto full = domain.compact_to_full[node];
+                    if (active[full] != 0 && root_field[node] > target_distance) {
+                        target = node;
+                        target_distance = root_field[node];
+                    }
+                }
+                ++linear_target_selections;
+            } else {
+                if (!targets_ordered) {
+                    ordered_targets.reserve(active_count);
+                    for (std::uint32_t node = 0; node < domain.size(); ++node) {
+                        if (active[domain.compact_to_full[node]] != 0) {
+                            ordered_targets.push_back(node);
+                        }
+                    }
+                    std::sort(
+                        ordered_targets.begin(), ordered_targets.end(),
+                        [&](const std::uint32_t first, const std::uint32_t second) {
+                            if (root_field[first] != root_field[second]) {
+                                return root_field[first] > root_field[second];
+                            }
+                            return first < second;
+                        }
+                    );
+                    targets_ordered = true;
+                }
+                while (
+                    ordered_target_cursor < ordered_targets.size() &&
+                    active[
+                        domain.compact_to_full[ordered_targets[ordered_target_cursor]]
+                    ] == 0
+                ) {
+                    ++ordered_target_cursor;
+                }
+                if (ordered_target_cursor < ordered_targets.size()) {
+                    target = ordered_targets[ordered_target_cursor++];
                 }
             }
         }
