@@ -202,4 +202,7 @@ def teasar_labels(
     return run(labels_c, labels_array.dtype.type(background_value), *options)
 
 
-__all__ = ["skeleton_to_graph", "teasar", "teasar_labels"]
+from . import distributed
+
+
+__all__ = ["distributed", "skeleton_to_graph", "teasar", "teasar_labels"]

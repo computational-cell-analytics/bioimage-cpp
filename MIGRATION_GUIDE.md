@@ -2589,12 +2589,14 @@ Important differences and current scope:
   distance-to-boundary field, a deterministic two-sweep root, a physical
   Dijkstra distance-from-root field, penalized repeated Dijkstra paths, and
   rolling invalidation with radius `scale * radius + constant`.
-- This first correctness-oriented version uses a physical axis-aligned
-  invalidation cube. It does not implement kimimaro's soma handling, hole
-  filling, border stitching, manual targets, component dust filtering,
-  cross-section metadata, or postprocessing heuristics. These differences can
-  change branch positions and vertex counts, so output is not expected to be
-  vertex-for-vertex identical to kimimaro.
+- This correctness-oriented implementation uses a physical axis-aligned
+  invalidation cube. The ordinary in-core entry points do not automatically
+  perform block stitching or accept manual targets; the dedicated block APIs
+  below provide mandatory interface targets and exact consolidation. Soma
+  handling, hole filling, component dust filtering, cross-section metadata,
+  and kimimaro's other postprocessing heuristics are not implemented. These
+  differences can change branch positions and vertex counts, so output is not
+  expected to be vertex-for-vertex identical to kimimaro.
 - The C++ core remains dependency-free. Component discovery uses x-runs and a
   union-find rather than dense component-label images. `number_of_threads=1`
   is the default and `0` uses hardware concurrency; one shared budget covers
@@ -2604,14 +2606,76 @@ Important differences and current scope:
   heap. Compact IDs avoid full-volume shortest-path fields; the public Dijkstra
   functions remain dense and exact FP64.
 
-Correctness tests are under `tests/skeleton/test_teasar.py` and
-`tests/skeleton/test_teasar_labels.py`. The independent
+### Blockwise skeletonization and exact stitching
+
+`bioimage_cpp.skeleton.distributed` provides the dependency-light primitives
+needed by an external block scheduler. It does not perform I/O, enumerate
+blocks, launch tasks, or serialize artifacts. The implemented layout uses one
+shared voxel plane: a core block with interval `[a, b)` is processed through
+`b + 1` when it has a high-side neighbor, while the neighbor begins at `b`.
+
+```python
+dist = bic.skeleton.distributed
+
+# `left` includes its high-side overlap plane and starts at `left_origin`.
+targets = dist.block_border_targets(
+    left,
+    faces=[(2, "high")],
+    origin=left_origin,
+    spacing=spacing,
+)
+left_fragment = dist.block_teasar(
+    left,
+    open_faces=[(2, "high")],
+    origin=left_origin,
+    required_targets=targets,
+    spacing=spacing,
+)
+
+# Repeat independently for every processing block. Neighboring calls select
+# identical global targets on their shared plane.
+merged = dist.merge_block_skeletons(block_fragments)
+forest = dist.minimum_spanning_forest(merged, spacing=spacing)  # optional
+vertices, edges, radii = dist.lattice_to_physical(forest, spacing=spacing)
+```
+
+Block fragments use global `int64` lattice vertices, `uint64` edges, and
+`float32` physical radii. Integer coordinates are the exact merge identity;
+physical proximity is never used to invent a connection. Duplicate radii are
+reduced with `maximum`, and canonical sort-and-unique output makes
+`merge_block_skeletons` associative, commutative, idempotent, and suitable for
+hierarchical reduction. `merge_block_skeleton_maps` applies the same operation
+per exact semantic label, including negative and large `uint64` labels.
+
+`open_faces` is mandatory even when empty. It identifies artificial cuts where
+the distance transform may look through the processing-block boundary; paths
+remain restricted to real input foreground. This prevents interface radii from
+collapsing to one voxel. When present, the lexicographically greatest required
+target on an open face becomes the deterministic component root.
+
+The labeled counterparts are `block_border_targets_labels` and
+`block_teasar_labels`. Border targets are selected per 8-connected same-label
+face patch by maximum anisotropic 2D distance transform with deterministic,
+orientation-stable plateau resolution. Several valid targets can create cycles
+after graph union, so exact consolidation keeps cycles and
+`minimum_spanning_forest` removes them only when explicitly called. Blocked
+skeletons are connected through their anchors but are not expected to be
+vertex-for-vertex identical to whole-volume TEASAR because each block still has
+less path-selection context.
+
+Correctness tests are under `tests/skeleton/test_teasar.py`,
+`tests/skeleton/test_teasar_labels.py`, and
+`tests/skeleton/test_distributed.py`. The independent
 Dijkstra benchmark is `development/distance/benchmark_dijkstra.py`; the
 end-to-end benchmark is `development/skeleton/benchmark_teasar.py`. Use
 `--suite all --kimimaro` to compare paired binary and multi-label scenarios,
 `--memory` for fresh-process peak-RSS probes, or `--sequential-backends` for
 the dense/compact FP64 binary design matrix. Extended density, spacing, and
 PDRF regimes are in `development/skeleton/benchmark_teasar_sequential.py`.
+The development-only serial block harness is
+`development/skeleton/blockwise_stitching.py`; the rigorous one-thread layered
+comparison against whole and blocked Kimimaro is
+`development/skeleton/compare_blockwise_kimimaro.py`.
 
 ## I/O and Build Dependencies
 
