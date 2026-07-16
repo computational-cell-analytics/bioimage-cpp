@@ -3,11 +3,6 @@ import pytest
 
 import bioimage_cpp as bic
 
-from development.skeleton.blockwise_stitching import (
-    run_blockwise_binary,
-    run_blockwise_labels,
-)
-
 
 dist = bic.skeleton.distributed
 
@@ -304,20 +299,73 @@ def test_minimum_spanning_forest_is_deterministic_and_preserves_vertices():
     assert _number_of_components(len(forest[0]), forest[1]) == 2
 
 
-def test_serial_binary_harness_stitches_multiple_blocks():
+def test_two_block_binary_pipeline_stitches_shared_target():
     mask = np.zeros((11, 11, 19), dtype=np.uint8)
     mask[5, 5, 1:18] = 1
-    graph = run_blockwise_binary(mask, (6, 6, 6), remove_cycles=True)
+    left = np.ascontiguousarray(mask[:, :, :11])
+    right = np.ascontiguousarray(mask[:, :, 10:])
+    left_targets = dist.block_border_targets(
+        left, [(2, "high")], origin=(0, 0, 0)
+    )
+    right_targets = dist.block_border_targets(
+        right, [(2, "low")], origin=(0, 0, 10)
+    )
+    np.testing.assert_array_equal(left_targets, right_targets)
+    fragments = [
+        dist.block_teasar(
+            left,
+            open_faces=[(2, "high")],
+            origin=(0, 0, 0),
+            required_targets=left_targets,
+        ),
+        dist.block_teasar(
+            right,
+            open_faces=[(2, "low")],
+            origin=(0, 0, 10),
+            required_targets=right_targets,
+        ),
+    ]
+    graph = dist.minimum_spanning_forest(
+        dist.merge_block_skeletons(fragments)
+    )
     assert graph[0].shape[0] > 0
     assert _number_of_components(len(graph[0]), graph[1]) == 1
     assert len(graph[1]) == len(graph[0]) - 1
 
 
-def test_serial_labeled_harness_keeps_touching_labels_separate():
+def test_two_block_labeled_pipeline_keeps_touching_labels_separate():
     labels = np.zeros((9, 9, 17), dtype=np.int64)
     labels[3, 4, 1:16] = -3
     labels[4, 4, 1:16] = 8
-    graphs = run_blockwise_labels(labels, (5, 5, 6), remove_cycles=True)
+    left = np.ascontiguousarray(labels[:, :, :10])
+    right = np.ascontiguousarray(labels[:, :, 9:])
+    left_targets = dist.block_border_targets_labels(
+        left, [(2, "high")], origin=(0, 0, 0)
+    )
+    right_targets = dist.block_border_targets_labels(
+        right, [(2, "low")], origin=(0, 0, 9)
+    )
+    assert left_targets.keys() == right_targets.keys()
+    for label in left_targets:
+        np.testing.assert_array_equal(left_targets[label], right_targets[label])
+    fragments = [
+        dist.block_teasar_labels(
+            left,
+            open_faces=[(2, "high")],
+            origin=(0, 0, 0),
+            required_targets=left_targets,
+        ),
+        dist.block_teasar_labels(
+            right,
+            open_faces=[(2, "low")],
+            origin=(0, 0, 9),
+            required_targets=right_targets,
+        ),
+    ]
+    graphs = {
+        label: dist.minimum_spanning_forest(graph)
+        for label, graph in dist.merge_block_skeleton_maps(fragments).items()
+    }
     assert list(graphs) == [-3, 8]
     for graph in graphs.values():
         assert _number_of_components(len(graph[0]), graph[1]) == 1
