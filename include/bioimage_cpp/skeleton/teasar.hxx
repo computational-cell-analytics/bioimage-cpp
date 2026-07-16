@@ -625,26 +625,12 @@ inline LatticeSkeletonGraph teasar_compact_impl(
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "root_dijkstra")
         if (required_root != std::numeric_limits<std::size_t>::max()) {
-            if (required_root > std::numeric_limits<std::uint32_t>::max()) {
-                throw std::runtime_error(
-                    "prepared required root exceeds compact index range"
-                );
-            }
-            const auto it = std::lower_bound(
-                domain.compact_to_full.begin(), domain.compact_to_full.end(),
-                static_cast<std::uint32_t>(required_root)
-            );
-            if (
-                it == domain.compact_to_full.end() ||
-                *it != static_cast<std::uint32_t>(required_root)
-            ) {
+            root = domain.compact_node_from_full(required_root);
+            if (root == detail::kNoCompactNode) {
                 throw std::runtime_error(
                     "prepared required root is not foreground"
                 );
             }
-            root = static_cast<std::uint32_t>(
-                std::distance(domain.compact_to_full.begin(), it)
-            );
         } else {
             std::vector<Distance> first_field;
             detail::compact_physical_distance_field<Adjacency>(
@@ -808,19 +794,11 @@ inline LatticeSkeletonGraph teasar_compact_impl(
         if (full_target >= n) {
             throw std::runtime_error("prepared required target is out of bounds");
         }
-        const auto it = std::lower_bound(
-            domain.compact_to_full.begin(), domain.compact_to_full.end(),
-            static_cast<std::uint32_t>(full_target)
-        );
-        if (
-            it == domain.compact_to_full.end() ||
-            *it != static_cast<std::uint32_t>(full_target)
-        ) {
+        const auto target = domain.compact_node_from_full(full_target);
+        if (target == detail::kNoCompactNode) {
             throw std::runtime_error("prepared required target is not foreground");
         }
-        compact_required_targets.push_back(static_cast<std::uint32_t>(
-            std::distance(domain.compact_to_full.begin(), it)
-        ));
+        compact_required_targets.push_back(target);
     }
     std::sort(
         compact_required_targets.begin(), compact_required_targets.end(),

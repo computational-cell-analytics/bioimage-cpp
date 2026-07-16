@@ -60,6 +60,25 @@ def test_border_targets_binary_and_label_semantics_and_corner_deduplication():
     assert sum(len(values) for values in labeled.values()) == 2
 
 
+def test_border_target_edge_tiebreak_uses_physical_low_edge_distance():
+    face = np.array(
+        [
+            [0, 0, 1, 0, 0, 0, 1, 0, 1, 0],
+            [0, 1, 0, 0, 0, 1, 1, 1, 1, 0],
+            [1, 0, 0, 1, 1, 1, 0, 0, 1, 0],
+        ],
+        dtype=np.uint8,
+    )
+    block = np.zeros((3, 10, 2), dtype=np.uint8)
+    block[:, :, -1] = face
+
+    targets = dist.block_border_targets(
+        block, [(2, "high")], spacing=(2.0, 1.0, 1.0)
+    )
+
+    np.testing.assert_array_equal(targets, [[1, 1, 1], [2, 4, 1]])
+
+
 def test_block_teasar_required_target_and_existing_teasar_equivalence():
     mask = np.zeros((9, 9, 13), dtype=np.uint8)
     mask[2:7, 2:7, 1:12] = 1

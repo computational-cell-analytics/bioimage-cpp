@@ -277,12 +277,12 @@ std::vector<LabeledVoxelTarget<LabelT>> border_targets_impl(
                     }();
                     const auto edge_distance = std::min({
                         static_cast<long double>(spacing[face_axes[0]]) *
-                            (static_cast<long double>(run.y) - 0.5L),
+                            (static_cast<long double>(run.y) + 0.5L),
                         static_cast<long double>(spacing[face_axes[0]]) *
                             (static_cast<long double>(height) - 0.5L -
                              static_cast<long double>(run.y)),
                         static_cast<long double>(spacing[face_axes[1]]) *
-                            (static_cast<long double>(x) - 0.5L),
+                            (static_cast<long double>(x) + 0.5L),
                         static_cast<long double>(spacing[face_axes[1]]) *
                             (static_cast<long double>(width) - 0.5L -
                              static_cast<long double>(x)),

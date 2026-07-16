@@ -11,7 +11,7 @@ from bioimage_cpp.skeleton import skeleton_to_graph, teasar
 def main():
     path = Path(__file__).with_name("00004_gt_mask.mrc")
 
-    full_crop = False
+    full_crop = True
     if full_crop:
         bb = np.s_[:]
     else:
