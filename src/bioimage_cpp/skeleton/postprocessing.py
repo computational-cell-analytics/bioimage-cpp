@@ -3,7 +3,7 @@
 Resolve junction nodes so each filament becomes its own connected component.
 Degree-3 and degree-4 nodes are split or pruned based on the angles between their
 incident edges: the straightest pair is kept as the through-going filament and
-the remaining arm(s) are either separated, or for short dead-ends (spurs), removed.
+the remaining arm(s) are either separated, or for short dead-ends (spurs), pruned.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from collections import defaultdict
 import numpy as np
 
 from ..graph import connected_components
+from ..utils import UnionFind
 from ._graph import skeleton_to_graph
 
 
@@ -31,6 +32,17 @@ def _tangent(v, first_neighbor, graph, vertices, span):
 
 def _pair_angle(di, dj):
     return np.degrees(np.arccos(np.clip(di @ dj, -1.0, 1.0)))
+
+
+def _compact(vertices, edges, radii):
+    used = np.zeros(len(vertices), dtype=bool)
+    if len(edges):
+        used[edges.reshape(-1)] = True
+    remap = np.full(len(vertices), -1, dtype=np.int64)
+    remap[used] = np.arange(int(used.sum()))
+    if radii is not None:
+        radii = radii[used]
+    return vertices[used], remap[edges], radii
 
 
 def split_degree3(v, graph, vertices, direction_span=1, min_branch_angle=30.0):
@@ -78,7 +90,7 @@ def clean_graph(
     min_through_angle: float = 160.0,
     min_branch_angle: float = 30.0,
     tick_length: float = 0.0,
-    join_radius: float = 0.0,
+    join_dist: float = 0.0,
     min_join_angle: float = 175.0,
     save_intermediates: list | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
@@ -92,8 +104,8 @@ def clean_graph(
        from the through pair by at least ``min_branch_angle``.
     3. Split each degree-4 crossing, separating its two through pairs when they
        are collinear to within ``min_through_angle``.
-    4. If ``join_radius > 0``, reconnect collinear endpoints across gaps less
-       than this distance via :func:`join_close_components`.
+    4. If ``join_dist > 0``, join collinear endpoints across gaps up to
+       this distance via :func:`join_close_components`.
 
     Parameters
     ----------
@@ -112,8 +124,8 @@ def clean_graph(
         through pair for the odd arm to be separated.
     tick_length:
         If > 0, prune dead-end branches shorter than this (physical) distance.
-    join_radius:
-        If > 0, reconnect collinear endpoints across gaps up to this (physical)
+    join_dist:
+        If > 0, join collinear endpoints across gaps up to this (physical)
         distance.
     min_join_angle:
         Minimum straightness (degrees) required for a join; 180 is collinear.
@@ -175,20 +187,12 @@ def clean_graph(
         keep[list(prune_edges)] = False
         edges = edges[keep]
 
-    used = np.zeros(len(vertices), dtype=bool)
-    if len(edges):
-        used[edges.reshape(-1)] = True
-    remap = np.full(len(vertices), -1, dtype=np.int64)
-    remap[used] = np.arange(int(used.sum()))
-    vertices = vertices[used]
-    if radii is not None:
-        radii = radii[used]
-    edges = remap[edges]
+    vertices, edges, radii = _compact(vertices, edges, radii)
     _snapshot("split")
 
-    if join_radius > 0:
+    if join_dist > 0:
         vertices, edges, radii = join_close_components(
-            vertices, edges, join_radius,
+            vertices, edges, join_dist,
             min_join_angle=min_join_angle, direction_span=direction_span, radii=radii,
         )
     _snapshot("join")
@@ -208,15 +212,15 @@ def _adjacency(num_nodes, edges):
 
 
 def remove_ticks(vertices, edges, tick_length, radii=None):
-    """Remove short dead-end branches ("ticks") from a skeleton graph.
+    """Prune short dead-end branches ("ticks") from a skeleton graph.
 
     Ports kimimaro's `remove_ticks`. A distance graph is built over the critical
     points (terminals, degree 1; branch points, degree >= 3), whose superedges
     are the paths between them weighted by physical length. The shortest terminal
-    branch below ``tick_length`` is removed repeatedly; when a branch point drops
+    branch below ``tick_length`` is pruned repeatedly; when a branch point drops
     to degree 2 its two superedges are fused into one, so a real filament end is
     re-measured rather than clipped. Standalone paths (both ends terminal) are
-    never removed.
+    never pruned.
 
     Parameters
     ----------
@@ -225,7 +229,7 @@ def remove_ticks(vertices, edges, tick_length, radii=None):
     edges:
         Integer array with shape ``(E, 2)`` indexing ``vertices``.
     tick_length:
-        Maximum branch length (physical) that may be culled.
+        Maximum branch length (physical) that may be pruned.
     radii:
         Optional per-vertex radii, carried through the same remapping.
 
@@ -305,15 +309,7 @@ def remove_ticks(vertices, edges, tick_length, radii=None):
     else:
         edges = edges.copy()
 
-    used = np.zeros(num_nodes, dtype=bool)
-    if len(edges):
-        used[edges.reshape(-1)] = True
-    remap = np.full(num_nodes, -1, dtype=np.int64)
-    remap[used] = np.arange(int(used.sum()))
-    vertices = vertices[used]
-    if radii is not None:
-        radii = radii[used]
-    edges = remap[edges]
+    vertices, edges, radii = _compact(vertices, edges, radii)
     return vertices, edges, radii
 
 
@@ -333,23 +329,23 @@ def _endpoint_tangent(endpoint, indptr, dst, degrees, vertices, span):
     return direction / norm if norm > 0 else None
 
 
-def join_close_components(vertices, edges, radius, *, min_join_angle=175.0,
+def join_close_components(vertices, edges, dist, *, min_join_angle=175.0,
                           direction_span=5, radii=None):
     """Reconnect fragmented filaments by joining collinear endpoints across gaps.
 
     Endpoints (degree = 1) of different connected components are joined with a
-    new edge when they are within ``radius`` and the two fragments are nearly
+    new edge when they are within ``dist`` and the two fragments are nearly
     collinear through the gap: the outward tangent at each endpoint must point
     along the gap to within ``180 - min_join_angle`` degrees, so a straight
     continuation reads ~180 (``min_join_angle``). Joins are made shortest-first
-    with a union-find so each pair of components is linked at most once and each
+    with a union-find so each pair of components is joined at most once and each
     endpoint is used once.
 
     Parameters
     ----------
     vertices, edges:
         Skeleton graph; ``edges`` indexes ``vertices``.
-    radius:
+    dist:
         Maximum gap (physical) across which endpoints may be joined.
     min_join_angle:
         Minimum straightness (degrees) of the joined path; 180 is perfectly
@@ -381,7 +377,7 @@ def join_close_components(vertices, edges, radius, *, min_join_angle=175.0,
     tol = np.deg2rad(180.0 - min_join_angle)
     tree = cKDTree(vertices[endpoints])
     candidates = []
-    for ia, ib in tree.query_pairs(radius):
+    for ia, ib in tree.query_pairs(dist):
         a, b = int(endpoints[ia]), int(endpoints[ib])
         if labels[a] == labels[b]:
             continue
@@ -400,25 +396,15 @@ def join_close_components(vertices, edges, radius, *, min_join_angle=175.0,
             candidates.append((dist, a, b))
 
     candidates.sort()
-    parent = {}
-
-    def find(x):
-        parent.setdefault(x, x)
-        root = x
-        while parent[root] != root:
-            root = parent[root]
-        while parent[x] != root:
-            parent[x], x = root, parent[x]
-        return root
+    uf = UnionFind(int(labels.max()) + 1)
 
     used, new_edges = set(), []
     for _, a, b in candidates:
         if a in used or b in used:
             continue
-        ra, rb = find(int(labels[a])), find(int(labels[b]))
-        if ra == rb:
+        if uf.find(int(labels[a])) == uf.find(int(labels[b])):
             continue
-        parent[ra] = rb
+        uf.merge(int(labels[a]), int(labels[b]))
         new_edges.append([a, b])
         used.add(a)
         used.add(b)
@@ -428,13 +414,6 @@ def join_close_components(vertices, edges, radius, *, min_join_angle=175.0,
     else:
         edges = edges.copy()
     return vertices, edges, radii
-
-
-def _line_voxels(start, stop):
-    delta = stop - start
-    steps = int(np.abs(delta).max()) + 1
-    t = np.linspace(0.0, 1.0, steps)
-    return np.rint(start[None, :] + t[:, None] * delta[None, :]).astype(np.int64)
 
 
 def draw_instances(vertices, edges, labels, shape, radius=1):
@@ -480,7 +459,10 @@ def draw_instances(vertices, edges, labels, shape, radius=1):
     vi = np.rint(vertices).astype(np.int64)
     centers, center_labels = [], []
     for a, b in edges:
-        pts = _line_voxels(vi[a], vi[b])
+        delta = vi[b] - vi[a]
+        steps = int(np.abs(delta).max()) + 1
+        t = np.linspace(0.0, 1.0, steps)
+        pts = np.rint(vi[a][None, :] + t[:, None] * delta[None, :]).astype(np.int64)
         centers.append(pts)
         center_labels.append(np.full(len(pts), int(labels[a]) + 1))
     centers = np.concatenate(centers)
