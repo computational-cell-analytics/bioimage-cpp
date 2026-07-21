@@ -13,8 +13,14 @@ The functionality implemented here bundles and improves algorithms etc. from:
 
 The goal is to provide the functionality within a single library and via pip as well as conda.
 
-**Warning:** This library was written mainly by coding agents (claude code and openai codex).
-It is not very thoroughly tested and may contain bugs.
+**Disclaimer:** The functionality of this library was implemented mainly by coding agents (Claude Code, OpenAI Codex).
+We make our best efforts to test the implementations thoroughly
+and are already using it heavily in our day-to-day research
+and have integrated it with other software tools.
+Nevertheless, it may contain bugs or unintended behavior (as most software does).
+If you find such a problem,
+please [open an issue on github](https://github.com/computational-cell-analytics/bioimage-cpp/issues).
+We are committed to improving and mainting this software.
 
 ## Installation
 
@@ -28,7 +34,8 @@ Or via conda-forge:
 conda install -c conda-forge bioimage-cpp
 ```
 
-Additional dependencies for tests / data downloads can be installed via `pip install bioimage-cpp[test]` /  `pip install bioimage-cpp[data]` respectively.
+Additional dependencies for tests / data downloads
+can be installed via `pip install bioimage-cpp[test]` /  `pip install bioimage-cpp[data]` respectively.
 
 You can also install this library from source. The build requires C++20 (GCC >= 10 or Clang >= 13).
 
@@ -39,7 +46,8 @@ cd bioimage-cpp
 pip install -e .
 ```
 
-On systems with an older compiler (e.g. many HPC clusters ship GCC 8), install a modern one from conda-forge alongside the build dependencies, and point `CC`/`CXX` at it:
+On systems with an older compiler (e.g. many HPC clusters ship GCC 8),
+install a modern one from conda-forge alongside the build dependencies, and point `CC`/`CXX` at it:
 ```bash
 conda install gcc_linux-64 gxx_linux-64 scikit-build-core nanobind -c conda-forge -y
 export CC=x86_64-conda-linux-gnu-gcc

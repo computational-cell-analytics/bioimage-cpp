@@ -78,6 +78,7 @@ struct ComponentDescriptor {
 
 template <class LabelT>
 struct ComponentSet {
+    std::array<std::ptrdiff_t, 3> input_shape{};
     std::vector<ComponentRun<LabelT>> runs;
     std::vector<std::size_t> row_offsets;
     std::vector<ComponentDescriptor<LabelT>> components;
@@ -88,8 +89,29 @@ struct ComponentSet {
 struct PreparedTeasarComponent {
     std::vector<std::ptrdiff_t> padded_shape;
     std::vector<std::uint8_t> padded_mask;
+    // Optional EDT-only mask. The path domain remains padded_mask; this mask
+    // extends foreground across artificial processing-block cuts so those
+    // cuts do not become false object boundaries.
+    std::vector<std::uint8_t> distance_mask;
     std::array<std::ptrdiff_t, 3> input_origin{};
     std::size_t foreground_count = 0;
+    std::vector<std::size_t> required_target_voxels;
+    std::size_t required_root_voxel = std::numeric_limits<std::size_t>::max();
+};
+
+struct OpenBlockFaces {
+    // low/high pairs for axes 0, 1, and 2.
+    std::array<bool, 6> values{};
+
+    bool operator()(const std::size_t axis, const bool high) const {
+        return values[2 * axis + static_cast<std::size_t>(high)];
+    }
+
+    bool any() const {
+        return std::any_of(values.begin(), values.end(), [](const bool value) {
+            return value;
+        });
+    }
 };
 
 inline bool intervals_within_one(
@@ -135,6 +157,11 @@ ComponentSet<LabelT> extract_components(
     );
 
     ComponentSet<LabelT> result;
+    result.input_shape = {
+        static_cast<std::ptrdiff_t>(z_size),
+        static_cast<std::ptrdiff_t>(y_size),
+        static_cast<std::ptrdiff_t>(x_size),
+    };
     result.row_offsets.resize(
         checked_add_size(row_count, 1, "component row offsets overflow size_t"),
         0
@@ -392,7 +419,9 @@ std::size_t padded_component_volume(
 template <class LabelT>
 PreparedTeasarComponent prepare_component(
     const ComponentSet<LabelT> &components,
-    const std::size_t component_id
+    const std::size_t component_id,
+    const std::vector<std::array<std::ptrdiff_t, 3>> &required_targets = {},
+    const OpenBlockFaces *open_faces = nullptr
 ) {
     const auto &component = components.components.at(component_id);
     PreparedTeasarComponent prepared;
@@ -441,7 +470,182 @@ PreparedTeasarComponent prepare_component(
             std::uint8_t{1}
         );
     }
+
+    // The zero halo in padded_mask is part of the TEASAR path-domain
+    // contract. For block calls, construct a separate distance-only mask by
+    // copying foreground through declared artificial cuts. The EDT does not
+    // treat array exteriors as background, so one copied layer is sufficient.
+    // Corners and edges are extended only if every participating face is open.
+    const auto input_size = checked_multiply_size(
+        checked_multiply_size(
+            static_cast<std::size_t>(components.input_shape[0]),
+            static_cast<std::size_t>(components.input_shape[1]),
+            "component input size overflows size_t"
+        ),
+        static_cast<std::size_t>(components.input_shape[2]),
+        "component input size overflows size_t"
+    );
+    const bool all_foreground = components.components.size() == 1 &&
+        static_cast<std::size_t>(component.voxel_count) == input_size;
+    if (open_faces != nullptr && open_faces->any() && !all_foreground) {
+        std::array<bool, 6> extend{};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            extend[2 * axis] = (*open_faces)(axis, false) &&
+                component.begin[axis] == 0;
+            extend[2 * axis + 1] = (*open_faces)(axis, true) &&
+                component.end[axis] == components.input_shape[axis];
+        }
+        if (std::any_of(extend.begin(), extend.end(), [](const bool value) {
+                return value;
+            })) {
+            prepared.distance_mask = prepared.padded_mask;
+            const auto z_size = prepared.padded_shape[0];
+            const auto y_size = prepared.padded_shape[1];
+            const auto x_size = prepared.padded_shape[2];
+            for (std::ptrdiff_t z = 0; z < z_size; ++z) {
+                for (std::ptrdiff_t y = 0; y < y_size; ++y) {
+                    for (std::ptrdiff_t x = 0; x < x_size; ++x) {
+                        const std::array<std::ptrdiff_t, 3> coordinate{z, y, x};
+                        std::array<std::ptrdiff_t, 3> source = coordinate;
+                        bool is_halo = false;
+                        bool permitted = true;
+                        for (std::size_t axis = 0; axis < 3; ++axis) {
+                            if (coordinate[axis] == 0) {
+                                is_halo = true;
+                                permitted = permitted && extend[2 * axis];
+                                source[axis] = 1;
+                            } else if (
+                                coordinate[axis] == prepared.padded_shape[axis] - 1
+                            ) {
+                                is_halo = true;
+                                permitted = permitted && extend[2 * axis + 1];
+                                source[axis] = prepared.padded_shape[axis] - 2;
+                            }
+                        }
+                        if (!is_halo || !permitted) {
+                            continue;
+                        }
+                        const auto destination = static_cast<std::size_t>(
+                            z * static_cast<std::ptrdiff_t>(sz) +
+                            y * static_cast<std::ptrdiff_t>(sy) + x
+                        );
+                        const auto source_index = static_cast<std::size_t>(
+                            source[0] * static_cast<std::ptrdiff_t>(sz) +
+                            source[1] * static_cast<std::ptrdiff_t>(sy) + source[2]
+                        );
+                        prepared.distance_mask[destination] =
+                            prepared.padded_mask[source_index];
+                    }
+                }
+            }
+        }
+    }
+
+    prepared.required_target_voxels.reserve(required_targets.size());
+    std::array<std::ptrdiff_t, 3> required_root_coordinate{};
+    bool have_required_root = false;
+    for (const auto &target : required_targets) {
+        const auto z = static_cast<std::size_t>(
+            target[0] - component.begin[0] + 1
+        );
+        const auto y = static_cast<std::size_t>(
+            target[1] - component.begin[1] + 1
+        );
+        const auto x = static_cast<std::size_t>(
+            target[2] - component.begin[2] + 1
+        );
+        const auto target_voxel = z * sz + y * sy + x;
+        prepared.required_target_voxels.push_back(target_voxel);
+        bool on_open_face = false;
+        if (open_faces != nullptr) {
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                on_open_face = on_open_face ||
+                    (target[axis] == 0 && (*open_faces)(axis, false)) ||
+                    (target[axis] == components.input_shape[axis] - 1 &&
+                     (*open_faces)(axis, true));
+            }
+        }
+        if (
+            on_open_face &&
+            (!have_required_root || target > required_root_coordinate)
+        ) {
+            have_required_root = true;
+            required_root_coordinate = target;
+            prepared.required_root_voxel = target_voxel;
+        }
+    }
     return prepared;
+}
+
+template <class LabelT>
+struct ComponentTarget {
+    LabelT label{};
+    std::array<std::ptrdiff_t, 3> coordinate{};
+};
+
+// Assign already validated foreground coordinates to the equality-connected
+// run components discovered by extract_components. The O(number_of_runs)
+// reverse lookup is allocated only for calls that actually carry targets, so
+// ordinary TEASAR dispatch keeps its current memory profile.
+template <class LabelT>
+std::vector<std::vector<std::array<std::ptrdiff_t, 3>>>
+assign_targets_to_components(
+    const ComponentSet<LabelT> &components,
+    const std::vector<ComponentTarget<LabelT>> &targets
+) {
+    std::vector<std::vector<std::array<std::ptrdiff_t, 3>>> assigned(
+        components.components.size()
+    );
+    if (targets.empty()) {
+        return assigned;
+    }
+
+    std::vector<std::size_t> component_of_run(
+        components.runs.size(), std::numeric_limits<std::size_t>::max()
+    );
+    for (std::size_t component = 0;
+         component < components.components.size(); ++component) {
+        const auto &descriptor = components.components[component];
+        for (std::size_t offset = 0; offset < descriptor.number_of_runs; ++offset) {
+            const auto run_id = components.component_run_ids[
+                descriptor.run_offset + offset
+            ];
+            component_of_run[run_id] = component;
+        }
+    }
+
+    const auto y_size = static_cast<std::size_t>(components.input_shape[1]);
+    for (const auto &target : targets) {
+        const auto row = static_cast<std::size_t>(target.coordinate[0]) * y_size +
+            static_cast<std::size_t>(target.coordinate[1]);
+        const auto begin = components.row_offsets[row];
+        const auto end = components.row_offsets[row + 1];
+        auto run = std::lower_bound(
+            components.runs.begin() + static_cast<std::ptrdiff_t>(begin),
+            components.runs.begin() + static_cast<std::ptrdiff_t>(end),
+            target.coordinate[2],
+            [](const ComponentRun<LabelT> &candidate, const std::ptrdiff_t x) {
+                return candidate.x_end < x;
+            }
+        );
+        if (
+            run == components.runs.begin() + static_cast<std::ptrdiff_t>(end) ||
+            run->x_begin > target.coordinate[2] || run->label != target.label
+        ) {
+            throw std::runtime_error(
+                "validated required target was not found in a component run"
+            );
+        }
+        const auto run_id = static_cast<std::size_t>(
+            std::distance(components.runs.begin(), run)
+        );
+        const auto component = component_of_run[run_id];
+        if (component == std::numeric_limits<std::size_t>::max()) {
+            throw std::runtime_error("required target component lookup is inconsistent");
+        }
+        assigned[component].push_back(target.coordinate);
+    }
+    return assigned;
 }
 
 } // namespace bioimage_cpp::skeleton::detail

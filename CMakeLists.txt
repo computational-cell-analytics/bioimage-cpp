@@ -23,6 +23,7 @@ nanobind_add_module(_core
     src/bindings/mesh.cxx
     src/bindings/segmentation.cxx
     src/bindings/skeleton.cxx
+    src/bindings/skeleton_distributed.cxx
     src/bindings/transformation.cxx
     src/bindings/util.cxx
     src/bindings/utils.cxx

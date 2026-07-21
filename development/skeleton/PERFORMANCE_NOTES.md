@@ -736,3 +736,58 @@ leave the initial linear mode. Skeleton output remained array-exact across
 backends and worker counts. Final verification after the optimization and
 benchmark addition: `1182 passed` with third-party pytest plugin autoload
 disabled.
+
+## Blockwise open-boundary correctness and Kimimaro comparison (2026-07-16)
+
+The first block prototype reused the ordinary per-component zero crop halo for
+its DBF. On an artificial cut this made every interface radius exactly one
+voxel. Thick branching tubes remained connected, but accumulated 2.1--3.1x the
+whole-volume Kimimaro cable length. A controlled Kimimaro run reproduced the
+failure when `black_border=True`, isolating the problem from target selection,
+exact consolidation, and cycle removal.
+
+The corrected block path keeps its real foreground path mask unchanged and
+uses a separate EDT-only mask with one ghost layer across explicitly declared
+`open_faces`. One deterministic face target roots each affected component.
+Ghost voxels can never become graph vertices. The complete reference workflow
+is:
+
+```bash
+python development/skeleton/compare_blockwise_kimimaro.py \
+    --warmup 1 --repeats 7 --check \
+    --json /tmp/blockwise-kimimaro.json
+```
+
+The run used bioimage-cpp 0.7.0, Kimimaro 5.8.1, EDT 3.1.1, NumPy 2.4.6,
+SciPy 1.17.1, isotropic spacing, and one thread for every backend. Kimimaro's
+blocked fragments used `fix_borders=True`; both block backends then used the
+same exact lattice merge and minimum-spanning forest.
+
+| case | bio block | Kimimaro whole | Kimimaro block | bio / Kimimaro-block cable | direct p95 / Hausdorff |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| thin line, 16 blocks | 3.52 ms | 1.66 ms | 6.95 ms | 1.000 | 0.00 / 0.00 |
+| oblique tube `64^3`, anisotropic, 8 blocks | 4.41 ms | 11.44 ms | 17.78 ms | 1.000 | 0.00 / 0.00 |
+| tube `64^3`, 8 blocks | 6.73 ms | 18.34 ms | 46.97 ms | 0.988 | 0.20 / 1.41 |
+| tube `96^3`, 8 blocks | 13.04 ms | 48.95 ms | 72.01 ms | 0.916 | 1.41 / 3.74 |
+| tube `128^3`, seam-aligned, 8 blocks | 21.70 ms | 102.29 ms | 123.76 ms | 0.988 | 0.00 / 4.24 |
+| tube `128^3`, 27 blocks | 24.85 ms | 102.02 ms | 118.78 ms | 0.903 | 1.27 / 5.00 |
+
+The thin line remains graph-exact. The anisotropic oblique case has identical
+blocked vertex geometry and cable length. All 112 expected local interface
+anchors were present in both controlled implementations, and their radii
+matched Kimimaro exactly. Across all thick cases, final graphs were connected
+and acyclic, cable length stayed within 10% of Kimimaro's blocked result, and
+every quality gate passed. On the nontrivial timing cases, bioimage-cpp was
+2.6--4.7x faster than whole-volume one-thread Kimimaro and 4.0--7.0x faster than
+its serial block workflow.
+
+On the final `128^3` calls, the last measured phase breakdowns were:
+
+| layout | targets | local TEASAR | merge | forest |
+| --- | ---: | ---: | ---: | ---: |
+| 8 blocks | 2.39 ms | 17.91 ms | 0.25 ms | 0.09 ms |
+| 27 blocks | 4.68 ms | 15.89 ms | 0.35 ms | 0.10 ms |
+
+Merge and cycle removal remain negligible. More blocks mainly increase face
+analysis and Python orchestration. The comparison intentionally does not apply
+Kimimaro's heuristic nearest-component joining, dust removal, or tick pruning.

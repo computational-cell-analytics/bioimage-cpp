@@ -30,6 +30,7 @@ NB_MODULE(_core, m) {
     bioimage_cpp::bindings::bind_mesh(m);
     bioimage_cpp::bindings::bind_segmentation(m);
     bioimage_cpp::bindings::bind_skeleton(m);
+    bioimage_cpp::bindings::bind_skeleton_distributed(m);
     bioimage_cpp::bindings::bind_transformation(m);
     bioimage_cpp::bindings::bind_util(m);
     bioimage_cpp::bindings::bind_utils(m);

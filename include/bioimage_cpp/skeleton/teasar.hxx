@@ -39,10 +39,24 @@ struct TeasarOptions {
     std::size_t number_of_threads = 1;
 };
 
+using VoxelCoordinate = std::array<std::int64_t, 3>;
+
 struct SkeletonGraph {
     std::vector<std::array<double, 3>> vertices;
     std::vector<std::array<std::uint64_t, 2>> edges;
     std::vector<float> radii;
+};
+
+struct LatticeSkeletonGraph {
+    std::vector<VoxelCoordinate> vertices;
+    std::vector<std::array<std::uint64_t, 2>> edges;
+    std::vector<float> radii;
+};
+
+template <class LabelT>
+struct LabeledVoxelTarget {
+    LabelT label{};
+    VoxelCoordinate coordinate{};
 };
 
 // Kept public at the C++ level so development benchmarks can compare the
@@ -134,7 +148,7 @@ inline void invalidation_bounds(
 
 // Skeletonize a binary 3D mask with the core TEASAR procedure. A non-empty
 // input must contain exactly one 26-connected foreground component.
-inline SkeletonGraph teasar_dense_impl(
+inline LatticeSkeletonGraph teasar_dense_impl(
     const ConstArrayView<std::uint8_t> &mask,
     detail::PreparedTeasarComponent *prepared,
     const TeasarOptions &options,
@@ -145,17 +159,23 @@ inline SkeletonGraph teasar_dense_impl(
     }
     BIOIMAGE_PROFILE_INIT(profile)
 
-    SkeletonGraph graph;
+    LatticeSkeletonGraph graph;
     std::size_t foreground_count = 0;
     std::array<std::ptrdiff_t, 3> input_origin{0, 0, 0};
     std::vector<std::ptrdiff_t> shape;
     std::vector<std::uint8_t> padded_mask;
+    std::vector<std::uint8_t> distance_mask;
+    std::vector<std::size_t> required_targets;
+    std::size_t required_root = std::numeric_limits<std::size_t>::max();
     std::size_t first_foreground = std::numeric_limits<std::size_t>::max();
     if (prepared != nullptr) {
         foreground_count = prepared->foreground_count;
         input_origin = prepared->input_origin;
         shape = std::move(prepared->padded_shape);
         padded_mask = std::move(prepared->padded_mask);
+        distance_mask = std::move(prepared->distance_mask);
+        required_targets = std::move(prepared->required_target_voxels);
+        required_root = prepared->required_root_voxel;
         for (std::size_t index = 0; index < padded_mask.size(); ++index) {
             if (padded_mask[index] != 0) {
                 first_foreground = index;
@@ -212,7 +232,11 @@ inline SkeletonGraph teasar_dense_impl(
     std::vector<float> dbf(n, 0.0f);
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "distance_transform")
-        ConstArrayView<std::uint8_t> padded_view{padded_mask.data(), shape, {}};
+        const auto &distance_input = distance_mask.empty()
+            ? padded_mask : distance_mask;
+        ConstArrayView<std::uint8_t> padded_view{
+            distance_input.data(), shape, {}
+        };
         ArrayView<float> distances_view{dbf.data(), shape, {}};
         distance::distance_transform(
             padded_view,
@@ -228,28 +252,50 @@ inline SkeletonGraph teasar_dense_impl(
         distance::DijkstraCostMode::Physical,
         effective_threads,
     };
-    distance::DijkstraResult first_field;
     distance::DijkstraResult root_field;
     std::size_t root = first_foreground;
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "root_dijkstra")
         ConstArrayView<std::uint8_t> padded_view{padded_mask.data(), shape, {}};
-        first_field = distance::dijkstra_distance_field(
-            padded_view, {first_foreground}, physical_options
+        if (required_root != std::numeric_limits<std::size_t>::max()) {
+            if (required_root >= n || padded_mask[required_root] == 0) {
+                throw std::runtime_error(
+                    "prepared required root is not foreground"
+                );
+            }
+            root = required_root;
+        } else {
+            auto first_field = distance::dijkstra_distance_field(
+                padded_view, {first_foreground}, physical_options
+            );
+            for (std::size_t index = 0; index < n; ++index) {
+                if (
+                    padded_mask[index] != 0 &&
+                    !std::isfinite(first_field.distances[index])
+                ) {
+                    throw std::invalid_argument(
+                        "mask foreground must contain exactly one 26-connected component"
+                    );
+                }
+            }
+            root = detail_teasar::farthest_foreground(
+                padded_mask, first_field.distances
+            );
+        }
+        root_field = distance::dijkstra_distance_field(
+            padded_view, {root}, physical_options
         );
         for (std::size_t index = 0; index < n; ++index) {
-            if (padded_mask[index] != 0 && !std::isfinite(first_field.distances[index])) {
+            if (
+                padded_mask[index] != 0 &&
+                !std::isfinite(root_field.distances[index])
+            ) {
                 throw std::invalid_argument(
                     "mask foreground must contain exactly one 26-connected component"
                 );
             }
         }
-        root = detail_teasar::farthest_foreground(padded_mask, first_field.distances);
-        root_field = distance::dijkstra_distance_field(
-            padded_view, {root}, physical_options
-        );
     }
-    std::vector<double>().swap(first_field.distances);
 
     double dbf_max = 0.0;
     double daf_max = 0.0;
@@ -291,9 +337,9 @@ inline SkeletonGraph teasar_dense_impl(
         );
         const auto vertex_id = static_cast<std::uint64_t>(graph.vertices.size());
         graph.vertices.push_back({
-            static_cast<double>(coords[0] - 1 + input_origin[0]) * options.spacing[0],
-            static_cast<double>(coords[1] - 1 + input_origin[1]) * options.spacing[1],
-            static_cast<double>(coords[2] - 1 + input_origin[2]) * options.spacing[2],
+            static_cast<std::int64_t>(coords[0] - 1 + input_origin[0]),
+            static_cast<std::int64_t>(coords[1] - 1 + input_origin[1]),
+            static_cast<std::int64_t>(coords[2] - 1 + input_origin[2]),
         });
         graph.radii.push_back(dbf[voxel]);
         vertex_of_voxel[voxel] = static_cast<std::int64_t>(vertex_id);
@@ -308,21 +354,8 @@ inline SkeletonGraph teasar_dense_impl(
     const distance::DijkstraOptions node_options{
         3, {}, distance::DijkstraCostMode::Node, effective_threads
     };
-
-    while (active_count > 0) {
-        std::size_t target = std::numeric_limits<std::size_t>::max();
-        double target_distance = -1.0;
-        for (std::size_t index = 0; index < n; ++index) {
-            if (active[index] != 0 && root_field.distances[index] > target_distance) {
-                target = index;
-                target_distance = root_field.distances[index];
-            }
-        }
-        if (target == std::numeric_limits<std::size_t>::max()) {
-            throw std::runtime_error("TEASAR active-voxel accounting became inconsistent");
-        }
-
-        std::vector<std::size_t> path;
+    std::vector<std::size_t> path;
+    const auto trace_target = [&](const std::size_t target) {
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "path_dijkstra")
             path = distance::dijkstra_path(
@@ -377,6 +410,41 @@ inline SkeletonGraph teasar_dense_impl(
                 }
             }
         }
+    };
+
+    for (const auto target : required_targets) {
+        if (target >= n || padded_mask[target] == 0) {
+            throw std::runtime_error("prepared required target is not foreground");
+        }
+    }
+    std::sort(
+        required_targets.begin(), required_targets.end(),
+        [&](const std::size_t first, const std::size_t second) {
+            if (root_field.distances[first] != root_field.distances[second]) {
+                return root_field.distances[first] > root_field.distances[second];
+            }
+            return first < second;
+        }
+    );
+    for (const auto target : required_targets) {
+        if (vertex_of_voxel[target] < 0) {
+            trace_target(target);
+        }
+    }
+
+    while (active_count > 0) {
+        std::size_t target = std::numeric_limits<std::size_t>::max();
+        double target_distance = -1.0;
+        for (std::size_t index = 0; index < n; ++index) {
+            if (active[index] != 0 && root_field.distances[index] > target_distance) {
+                target = index;
+                target_distance = root_field.distances[index];
+            }
+        }
+        if (target == std::numeric_limits<std::size_t>::max()) {
+            throw std::runtime_error("TEASAR active-voxel accounting became inconsistent");
+        }
+        trace_target(target);
     }
 
     if (report_profile) {
@@ -385,23 +453,25 @@ inline SkeletonGraph teasar_dense_impl(
     return graph;
 }
 
-inline SkeletonGraph teasar_dense(
+inline LatticeSkeletonGraph teasar_dense(
     const ConstArrayView<std::uint8_t> &mask,
     const TeasarOptions &options = {}
 ) {
     return teasar_dense_impl(mask, nullptr, options, true);
 }
 
-inline SkeletonGraph teasar_dense_prepared(
+inline LatticeSkeletonGraph teasar_dense_prepared(
     detail::PreparedTeasarComponent prepared,
     const TeasarOptions &options
 ) {
     const ConstArrayView<std::uint8_t> unused{};
-    return teasar_dense_impl(unused, &prepared, options, false);
+    return teasar_dense_impl(
+        unused, &prepared, options, false
+    );
 }
 
 template <detail::CompactAdjacency Adjacency, class Distance>
-inline SkeletonGraph teasar_compact_impl(
+inline LatticeSkeletonGraph teasar_compact_impl(
     const ConstArrayView<std::uint8_t> &mask,
     detail::PreparedTeasarComponent *prepared,
     const TeasarOptions &options,
@@ -412,7 +482,7 @@ inline SkeletonGraph teasar_compact_impl(
     }
     BIOIMAGE_PROFILE_INIT(profile)
 
-    SkeletonGraph graph;
+    LatticeSkeletonGraph graph;
     std::array<std::ptrdiff_t, 3> crop_begin{0, 0, 0};
     std::array<std::ptrdiff_t, 3> crop_end{0, 0, 0};
     std::size_t foreground_count = 0;
@@ -420,11 +490,17 @@ inline SkeletonGraph teasar_compact_impl(
     std::vector<std::ptrdiff_t> strides;
     std::size_t n = 0;
     std::vector<std::uint8_t> padded_mask;
+    std::vector<std::uint8_t> distance_mask;
+    std::vector<std::size_t> required_targets;
+    std::size_t required_root = std::numeric_limits<std::size_t>::max();
     if (prepared != nullptr) {
         crop_begin = prepared->input_origin;
         foreground_count = prepared->foreground_count;
         shape = std::move(prepared->padded_shape);
         padded_mask = std::move(prepared->padded_mask);
+        distance_mask = std::move(prepared->distance_mask);
+        required_targets = std::move(prepared->required_target_voxels);
+        required_root = prepared->required_root_voxel;
         n = padded_mask.size();
         strides = bioimage_cpp::detail::c_order_strides(shape);
         if (foreground_count == 0) {
@@ -490,7 +566,11 @@ inline SkeletonGraph teasar_compact_impl(
     auto dbf = std::make_unique_for_overwrite<float[]>(n);
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "distance_transform")
-        ConstArrayView<std::uint8_t> padded_view{padded_mask.data(), shape, {}};
+        const auto &distance_input = distance_mask.empty()
+            ? padded_mask : distance_mask;
+        ConstArrayView<std::uint8_t> padded_view{
+            distance_input.data(), shape, {}
+        };
         ArrayView<float> distances_view{dbf.get(), shape, {}};
         distance::distance_transform(
             padded_view,
@@ -509,9 +589,16 @@ inline SkeletonGraph teasar_compact_impl(
             if (prepared == nullptr) {
                 return teasar_dense(mask, options);
             }
+            detail::PreparedTeasarComponent dense_prepared;
+            dense_prepared.padded_shape = std::move(shape);
+            dense_prepared.padded_mask = std::move(padded_mask);
+            dense_prepared.distance_mask = std::move(distance_mask);
+            dense_prepared.input_origin = crop_begin;
+            dense_prepared.foreground_count = foreground_count;
+            dense_prepared.required_target_voxels = std::move(required_targets);
+            dense_prepared.required_root_voxel = required_root;
             return teasar_dense_prepared(
-                {shape, std::move(padded_mask), crop_begin, foreground_count},
-                options
+                std::move(dense_prepared), options
             );
         }
     }
@@ -533,31 +620,46 @@ inline SkeletonGraph teasar_compact_impl(
     }
 
     detail::CompactDijkstraWorkspace<Distance> dijkstra_workspace;
-    std::vector<Distance> first_field;
     std::vector<Distance> root_field;
     std::uint32_t root = 0;
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "root_dijkstra")
-        detail::compact_physical_distance_field<Adjacency>(
-            domain, 0, dijkstra_workspace, first_field
-        );
-        Distance farthest_distance = Distance{-1};
-        for (std::uint32_t node = 0; node < domain.size(); ++node) {
-            if (!std::isfinite(first_field[node])) {
-                throw std::invalid_argument(
-                    "mask foreground must contain exactly one 26-connected component"
+        if (required_root != std::numeric_limits<std::size_t>::max()) {
+            root = domain.compact_node_from_full(required_root);
+            if (root == detail::kNoCompactNode) {
+                throw std::runtime_error(
+                    "prepared required root is not foreground"
                 );
             }
-            if (first_field[node] > farthest_distance) {
-                root = node;
-                farthest_distance = first_field[node];
+        } else {
+            std::vector<Distance> first_field;
+            detail::compact_physical_distance_field<Adjacency>(
+                domain, 0, dijkstra_workspace, first_field
+            );
+            Distance farthest_distance = Distance{-1};
+            for (std::uint32_t node = 0; node < domain.size(); ++node) {
+                if (!std::isfinite(first_field[node])) {
+                    throw std::invalid_argument(
+                        "mask foreground must contain exactly one 26-connected component"
+                    );
+                }
+                if (first_field[node] > farthest_distance) {
+                    root = node;
+                    farthest_distance = first_field[node];
+                }
             }
         }
         detail::compact_physical_distance_field<Adjacency>(
             domain, root, dijkstra_workspace, root_field
         );
+        for (const auto distance : root_field) {
+            if (!std::isfinite(distance)) {
+                throw std::invalid_argument(
+                    "mask foreground must contain exactly one 26-connected component"
+                );
+            }
+        }
     }
-    std::vector<Distance>().swap(first_field);
 
     Distance daf_max = Distance{0};
     for (std::uint32_t node = 0; node < domain.size(); ++node) {
@@ -599,9 +701,9 @@ inline SkeletonGraph teasar_compact_impl(
         );
         const auto vertex_id = static_cast<std::uint64_t>(graph.vertices.size());
         graph.vertices.push_back({
-            static_cast<double>(coords[0] - 1 + crop_begin[0]) * options.spacing[0],
-            static_cast<double>(coords[1] - 1 + crop_begin[1]) * options.spacing[1],
-            static_cast<double>(coords[2] - 1 + crop_begin[2]) * options.spacing[2],
+            static_cast<std::int64_t>(coords[0] - 1 + crop_begin[0]),
+            static_cast<std::int64_t>(coords[1] - 1 + crop_begin[1]),
+            static_cast<std::int64_t>(coords[2] - 1 + crop_begin[2]),
         });
         graph.radii.push_back(compact_dbf[node]);
         vertex_of_node[node] = static_cast<std::int64_t>(vertex_id);
@@ -615,70 +717,7 @@ inline SkeletonGraph teasar_compact_impl(
     detail::RowIntervalUnion invalidated_rows(
         n / static_cast<std::size_t>(shape[2]), shape[2]
     );
-    std::vector<std::uint32_t> ordered_targets;
-    std::size_t ordered_target_cursor = 0;
-    std::size_t linear_target_selections = 0;
-    const auto linear_target_limit = std::max<std::size_t>(
-        16, std::bit_width(domain.size())
-    );
-    constexpr std::size_t ordered_target_minimum_nodes = 1U << 16;
-    const bool allow_ordered_targets =
-        domain.size() >= ordered_target_minimum_nodes;
-    bool targets_ordered = false;
-    while (active_count > 0) {
-        auto target = detail::kNoCompactNode;
-        {
-            BIOIMAGE_PROFILE_SCOPE(profile, "target_selection")
-            if (
-                !targets_ordered &&
-                (!allow_ordered_targets ||
-                 linear_target_selections < linear_target_limit)
-            ) {
-                Distance target_distance = Distance{-1};
-                for (std::uint32_t node = 0; node < domain.size(); ++node) {
-                    const auto full = domain.compact_to_full[node];
-                    if (active[full] != 0 && root_field[node] > target_distance) {
-                        target = node;
-                        target_distance = root_field[node];
-                    }
-                }
-                ++linear_target_selections;
-            } else {
-                if (!targets_ordered) {
-                    ordered_targets.reserve(active_count);
-                    for (std::uint32_t node = 0; node < domain.size(); ++node) {
-                        if (active[domain.compact_to_full[node]] != 0) {
-                            ordered_targets.push_back(node);
-                        }
-                    }
-                    std::sort(
-                        ordered_targets.begin(), ordered_targets.end(),
-                        [&](const std::uint32_t first, const std::uint32_t second) {
-                            if (root_field[first] != root_field[second]) {
-                                return root_field[first] > root_field[second];
-                            }
-                            return first < second;
-                        }
-                    );
-                    targets_ordered = true;
-                }
-                while (
-                    ordered_target_cursor < ordered_targets.size() &&
-                    active[
-                        domain.compact_to_full[ordered_targets[ordered_target_cursor]]
-                    ] == 0
-                ) {
-                    ++ordered_target_cursor;
-                }
-                if (ordered_target_cursor < ordered_targets.size()) {
-                    target = ordered_targets[ordered_target_cursor++];
-                }
-            }
-        }
-        if (target == detail::kNoCompactNode) {
-            throw std::runtime_error("TEASAR active-voxel accounting became inconsistent");
-        }
-
+    const auto trace_target = [&](const std::uint32_t target) {
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "path_dijkstra")
             detail::compact_node_cost_path<Adjacency>(
@@ -747,6 +786,99 @@ inline SkeletonGraph teasar_compact_impl(
                 }
             }
         }
+    };
+
+    std::vector<std::uint32_t> compact_required_targets;
+    compact_required_targets.reserve(required_targets.size());
+    for (const auto full_target : required_targets) {
+        if (full_target >= n) {
+            throw std::runtime_error("prepared required target is out of bounds");
+        }
+        const auto target = domain.compact_node_from_full(full_target);
+        if (target == detail::kNoCompactNode) {
+            throw std::runtime_error("prepared required target is not foreground");
+        }
+        compact_required_targets.push_back(target);
+    }
+    std::sort(
+        compact_required_targets.begin(), compact_required_targets.end(),
+        [&](const std::uint32_t first, const std::uint32_t second) {
+            if (root_field[first] != root_field[second]) {
+                return root_field[first] > root_field[second];
+            }
+            return first < second;
+        }
+    );
+    for (const auto target : compact_required_targets) {
+        if (vertex_of_node[target] < 0) {
+            trace_target(target);
+        }
+    }
+
+    std::vector<std::uint32_t> ordered_targets;
+    std::size_t ordered_target_cursor = 0;
+    std::size_t linear_target_selections = 0;
+    const auto linear_target_limit = std::max<std::size_t>(
+        16, std::bit_width(domain.size())
+    );
+    constexpr std::size_t ordered_target_minimum_nodes = 1U << 16;
+    const bool allow_ordered_targets =
+        domain.size() >= ordered_target_minimum_nodes;
+    bool targets_ordered = false;
+    while (active_count > 0) {
+        auto target = detail::kNoCompactNode;
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "target_selection")
+            if (
+                !targets_ordered &&
+                (!allow_ordered_targets ||
+                 linear_target_selections < linear_target_limit)
+            ) {
+                Distance target_distance = Distance{-1};
+                for (std::uint32_t node = 0; node < domain.size(); ++node) {
+                    const auto full = domain.compact_to_full[node];
+                    if (active[full] != 0 && root_field[node] > target_distance) {
+                        target = node;
+                        target_distance = root_field[node];
+                    }
+                }
+                ++linear_target_selections;
+            } else {
+                if (!targets_ordered) {
+                    ordered_targets.reserve(active_count);
+                    for (std::uint32_t node = 0; node < domain.size(); ++node) {
+                        if (active[domain.compact_to_full[node]] != 0) {
+                            ordered_targets.push_back(node);
+                        }
+                    }
+                    std::sort(
+                        ordered_targets.begin(), ordered_targets.end(),
+                        [&](const std::uint32_t first, const std::uint32_t second) {
+                            if (root_field[first] != root_field[second]) {
+                                return root_field[first] > root_field[second];
+                            }
+                            return first < second;
+                        }
+                    );
+                    targets_ordered = true;
+                }
+                while (
+                    ordered_target_cursor < ordered_targets.size() &&
+                    active[
+                        domain.compact_to_full[ordered_targets[ordered_target_cursor]]
+                    ] == 0
+                ) {
+                    ++ordered_target_cursor;
+                }
+                if (ordered_target_cursor < ordered_targets.size()) {
+                    target = ordered_targets[ordered_target_cursor++];
+                }
+            }
+        }
+        if (target == detail::kNoCompactNode) {
+            throw std::runtime_error("TEASAR active-voxel accounting became inconsistent");
+        }
+        trace_target(target);
     }
 
     if (report_profile) {
@@ -756,7 +888,7 @@ inline SkeletonGraph teasar_compact_impl(
 }
 
 template <detail::CompactAdjacency Adjacency, class Distance>
-inline SkeletonGraph teasar_compact(
+inline LatticeSkeletonGraph teasar_compact(
     const ConstArrayView<std::uint8_t> &mask,
     const TeasarOptions &options
 ) {
@@ -766,7 +898,7 @@ inline SkeletonGraph teasar_compact(
 }
 
 template <detail::CompactAdjacency Adjacency, class Distance>
-inline SkeletonGraph teasar_compact_prepared(
+inline LatticeSkeletonGraph teasar_compact_prepared(
     detail::PreparedTeasarComponent prepared,
     const TeasarOptions &options
 ) {
@@ -779,8 +911,8 @@ inline SkeletonGraph teasar_compact_prepared(
 namespace detail_teasar {
 
 inline void append_skeleton_graph(
-    SkeletonGraph &destination,
-    SkeletonGraph &&source
+    LatticeSkeletonGraph &destination,
+    LatticeSkeletonGraph &&source
 ) {
     if (destination.vertices.size() > std::numeric_limits<std::uint64_t>::max()) {
         throw std::overflow_error("skeleton vertex offset exceeds uint64 range");
@@ -809,8 +941,8 @@ inline void append_skeleton_graph(
     }
 }
 
-inline SkeletonGraph assemble_skeleton_graphs(
-    std::vector<SkeletonGraph> &graphs,
+inline LatticeSkeletonGraph assemble_skeleton_graphs(
+    std::vector<LatticeSkeletonGraph> &graphs,
     const std::vector<std::size_t> &component_ids
 ) {
     std::size_t vertices = 0;
@@ -825,13 +957,31 @@ inline SkeletonGraph assemble_skeleton_graphs(
             "assembled skeleton edge count overflows size_t"
         );
     }
-    SkeletonGraph result;
+    LatticeSkeletonGraph result;
     result.vertices.reserve(vertices);
     result.radii.reserve(vertices);
     result.edges.reserve(edges);
     for (const auto component_id : component_ids) {
         append_skeleton_graph(result, std::move(graphs[component_id]));
     }
+    return result;
+}
+
+inline SkeletonGraph lattice_to_physical(
+    LatticeSkeletonGraph graph,
+    const std::array<double, 3> &spacing
+) {
+    SkeletonGraph result;
+    result.vertices.reserve(graph.vertices.size());
+    for (const auto &coordinate : graph.vertices) {
+        result.vertices.push_back({
+            static_cast<double>(coordinate[0]) * spacing[0],
+            static_cast<double>(coordinate[1]) * spacing[1],
+            static_cast<double>(coordinate[2]) * spacing[2],
+        });
+    }
+    result.edges = std::move(graph.edges);
+    result.radii = std::move(graph.radii);
     return result;
 }
 
@@ -959,13 +1109,15 @@ std::vector<std::size_t> component_thread_budgets(
 }
 
 template <class LabelT>
-std::vector<SkeletonGraph> skeletonize_components(
+std::vector<LatticeSkeletonGraph> skeletonize_components(
     const detail::ComponentSet<LabelT> &components,
     const TeasarOptions &options,
-    const bool include_label_in_errors
+    const bool include_label_in_errors,
+    const std::vector<std::vector<std::array<std::ptrdiff_t, 3>>> *required_targets = nullptr,
+    const detail::OpenBlockFaces *open_faces = nullptr
 ) {
     const auto count = components.components.size();
-    std::vector<SkeletonGraph> results(count);
+    std::vector<LatticeSkeletonGraph> results(count);
     if (count == 0) {
         return results;
     }
@@ -996,7 +1148,12 @@ std::vector<SkeletonGraph> skeletonize_components(
         const std::size_t local_budget
     ) {
         try {
-            auto prepared = detail::prepare_component(components, component_id);
+            auto prepared = required_targets == nullptr
+                ? detail::prepare_component(components, component_id)
+                : detail::prepare_component(
+                    components, component_id, required_targets->at(component_id),
+                    open_faces
+                );
             auto local_options = options;
             local_options.number_of_threads = local_budget;
             results[component_id] = teasar_compact_prepared<
@@ -1052,18 +1209,28 @@ inline SkeletonGraph teasar_with_backend(
     const TeasarOptions &options,
     const TeasarBackend backend
 ) {
+    LatticeSkeletonGraph lattice;
     switch (backend) {
         case TeasarBackend::Auto:
         case TeasarBackend::CompactOnTheFlyFloat64:
-            return teasar_compact<detail::CompactAdjacency::OnTheFly, double>(
+            lattice = teasar_compact<detail::CompactAdjacency::OnTheFly, double>(
                 mask, options
             );
+            break;
         case TeasarBackend::DenseFloat64:
-            return teasar_dense(mask, options);
+            lattice = teasar_dense(mask, options);
+            break;
         case TeasarBackend::CompactCsrFloat64:
-            return teasar_compact<detail::CompactAdjacency::Csr, double>(mask, options);
+            lattice = teasar_compact<detail::CompactAdjacency::Csr, double>(
+                mask, options
+            );
+            break;
+        default:
+            throw std::invalid_argument("invalid TEASAR backend");
     }
-    throw std::invalid_argument("invalid TEASAR backend");
+    return detail_teasar::lattice_to_physical(
+        std::move(lattice), options.spacing
+    );
 }
 
 inline SkeletonGraph teasar(
@@ -1073,7 +1240,7 @@ inline SkeletonGraph teasar(
     detail_teasar::validate_options(mask, options);
     BIOIMAGE_PROFILE_INIT(profile)
     auto components = detail::extract_binary_components(mask, profile);
-    std::vector<SkeletonGraph> results;
+    std::vector<LatticeSkeletonGraph> results;
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "component_teasar")
         results = detail_teasar::skeletonize_components(
@@ -1082,7 +1249,85 @@ inline SkeletonGraph teasar(
     }
     std::vector<std::size_t> component_ids(results.size());
     std::iota(component_ids.begin(), component_ids.end(), std::size_t{0});
-    SkeletonGraph output;
+    LatticeSkeletonGraph output;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "forest_assembly")
+        output = detail_teasar::assemble_skeleton_graphs(results, component_ids);
+    }
+    BIOIMAGE_PROFILE_REPORT(profile)
+    return detail_teasar::lattice_to_physical(
+        std::move(output), options.spacing
+    );
+}
+
+inline LatticeSkeletonGraph teasar_block(
+    const ConstArrayView<std::uint8_t> &mask,
+    std::vector<VoxelCoordinate> required_targets,
+    const detail::OpenBlockFaces &open_faces,
+    const TeasarOptions &options = {}
+) {
+    detail_teasar::validate_options(mask, options);
+    std::vector<detail::ComponentTarget<std::uint8_t>> local_targets;
+    local_targets.reserve(required_targets.size());
+    for (std::size_t row = 0; row < required_targets.size(); ++row) {
+        const auto &target = required_targets[row];
+        std::array<std::ptrdiff_t, 3> coordinate{};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            if (
+                target[axis] < 0 ||
+                static_cast<std::uint64_t>(target[axis]) >=
+                    static_cast<std::uint64_t>(mask.shape[axis])
+            ) {
+                throw std::invalid_argument(
+                    "required_targets row " + std::to_string(row) +
+                    " is out of bounds at axis " + std::to_string(axis)
+                );
+            }
+            coordinate[axis] = static_cast<std::ptrdiff_t>(target[axis]);
+        }
+        const auto flat = static_cast<std::size_t>(
+            (coordinate[0] * mask.shape[1] + coordinate[1]) * mask.shape[2] +
+            coordinate[2]
+        );
+        if (mask.data[flat] == 0) {
+            throw std::invalid_argument(
+                "required_targets row " + std::to_string(row) +
+                " must lie on foreground"
+            );
+        }
+        local_targets.push_back({std::uint8_t{1}, coordinate});
+    }
+    std::sort(
+        local_targets.begin(), local_targets.end(),
+        [](const auto &first, const auto &second) {
+            return first.coordinate < second.coordinate;
+        }
+    );
+    local_targets.erase(
+        std::unique(
+            local_targets.begin(), local_targets.end(),
+            [](const auto &first, const auto &second) {
+                return first.coordinate == second.coordinate;
+            }
+        ),
+        local_targets.end()
+    );
+
+    BIOIMAGE_PROFILE_INIT(profile)
+    auto components = detail::extract_binary_components(mask, profile);
+    auto component_targets = detail::assign_targets_to_components(
+        components, local_targets
+    );
+    std::vector<LatticeSkeletonGraph> results;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "component_teasar")
+        results = detail_teasar::skeletonize_components(
+            components, options, false, &component_targets, &open_faces
+        );
+    }
+    std::vector<std::size_t> component_ids(results.size());
+    std::iota(component_ids.begin(), component_ids.end(), std::size_t{0});
+    LatticeSkeletonGraph output;
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "forest_assembly")
         output = detail_teasar::assemble_skeleton_graphs(results, component_ids);

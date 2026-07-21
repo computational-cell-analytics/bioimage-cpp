@@ -204,3 +204,7 @@ def teasar_labels(
 
 
 __all__ = ["clean_graph", "draw_instances", "join_close_components", "remove_ticks", "skeleton_to_graph", "teasar", "teasar_labels"]
+from . import distributed
+
+
+__all__ = ["distributed", "skeleton_to_graph", "teasar", "teasar_labels"]

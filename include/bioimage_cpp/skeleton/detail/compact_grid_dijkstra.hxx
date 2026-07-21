@@ -52,6 +52,28 @@ struct CompactGridDomain {
     [[nodiscard]] bool has_full_lookup() const noexcept {
         return !full_to_compact.empty();
     }
+
+    // CSR domains release the dense reverse map after building adjacency.
+    // Keep full-index conversion independent of that storage decision.
+    [[nodiscard]] std::uint32_t compact_node_from_full(
+        const std::size_t full
+    ) const noexcept {
+        if (has_full_lookup()) {
+            return full < full_to_compact.size()
+                ? full_to_compact[full] : kNoCompactNode;
+        }
+        if (full > static_cast<std::size_t>(kNoCompactNode)) {
+            return kNoCompactNode;
+        }
+        const auto full32 = static_cast<std::uint32_t>(full);
+        const auto it = std::lower_bound(
+            compact_to_full.begin(), compact_to_full.end(), full32
+        );
+        if (it == compact_to_full.end() || *it != full32) {
+            return kNoCompactNode;
+        }
+        return static_cast<std::uint32_t>(it - compact_to_full.begin());
+    }
 };
 
 inline void build_compact_neighbors(

@@ -24,3 +24,9 @@ conda install -c conda-forge bioimage-cpp
 ```
 
 Please refer to [the documentation](https://computational-cell-analytics.github.io/bioimage-cpp/) for details.
+
+**Disclaimer:** The functionality of this library was implemented mainly by coding agents (Claude Code and OpenAI Codex).
+We have made our best efforts to test the implementations thoroughly and are already using it heavily in our day-to-day research and have integrated with other software tools.
+Nevertheless, it may contain bugs or unintended behavior (as most software does).
+If you find such a problem, please [open an issue on github](https://github.com/computational-cell-analytics/bioimage-cpp/issues).
+We are committed to improving and mainting this software.
