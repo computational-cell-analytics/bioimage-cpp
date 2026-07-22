@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import bioimage_cpp as bic
-from bioimage_cpp.skeleton.postprocessing import split_degree3, split_degree4
+from bioimage_cpp.skeleton.postprocessing import _split_degree3, _split_degree4
 
 
 def _graph(vertices, edges):
@@ -22,7 +22,7 @@ def test_split_degree3_splits_odd_arm():
         [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
         [[0, 1], [0, 2], [0, 3]],
     )
-    assert split_degree3(0, graph, vertices, direction_span=1, min_branch_angle=30.0) == [2]
+    assert _split_degree3(0, graph, vertices, direction_span=1, min_branch_angle=30.0) == [2]
 
 
 def test_split_degree3_keeps_collinear_arm():
@@ -31,7 +31,7 @@ def test_split_degree3_keeps_collinear_arm():
         [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 1.0, 10.0]],
         [[0, 1], [0, 2], [0, 3]],
     )
-    assert split_degree3(0, graph, vertices, direction_span=1, min_branch_angle=30.0) is None
+    assert _split_degree3(0, graph, vertices, direction_span=1, min_branch_angle=30.0) is None
 
 
 def test_split_degree4_splits_through_pair():
@@ -40,7 +40,7 @@ def test_split_degree4_splits_through_pair():
         [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]],
         [[0, 1], [0, 2], [0, 3], [0, 4]],
     )
-    result = split_degree4(0, graph, vertices, direction_span=1, min_through_angle=170.0)
+    result = _split_degree4(0, graph, vertices, direction_span=1, min_through_angle=170.0)
     assert set(result) in ({0, 1}, {2, 3})
 
 
@@ -52,7 +52,7 @@ def test_split_degree4_keeps_non_collinear_crossing():
         np.concatenate([[[0.0, 0.0, 0.0]], arms]),
         [[0, 1], [0, 2], [0, 3], [0, 4]],
     )
-    assert split_degree4(0, graph, vertices, direction_span=1, min_through_angle=170.0) is None
+    assert _split_degree4(0, graph, vertices, direction_span=1, min_through_angle=170.0) is None
 
 
 @pytest.mark.parametrize(
@@ -141,7 +141,7 @@ def test_clean_graph_splits_crossing():
 
     assert _component_count(vertices, edges) == 1
 
-    out_vertices, out_edges, out_radii = bic.skeleton.clean_graph(
+    out_vertices, out_edges, out_radii = bic.skeleton.clean_filament_graph(
         vertices, edges, radii=radii, direction_span=1, tick_length=0.0, join_dist=0.0,
     )
 

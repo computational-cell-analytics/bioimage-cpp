@@ -45,7 +45,7 @@ def _compact(vertices, edges, radii):
     return vertices[used], remap[edges], radii
 
 
-def split_degree3(v, graph, vertices, direction_span=1, min_branch_angle=30.0):
+def _split_degree3(v, graph, vertices, direction_span=1, min_branch_angle=30.0):
     adj = np.asarray(graph.node_adjacency(int(v)))
     if adj.shape[0] != 3:
         return None
@@ -64,7 +64,7 @@ def split_degree3(v, graph, vertices, direction_span=1, min_branch_angle=30.0):
     return [int(edge_ids[odd])]
 
 
-def split_degree4(v, graph, vertices, direction_span=1, min_through_angle=160.0):
+def _split_degree4(v, graph, vertices, direction_span=1, min_through_angle=160.0):
     adj = np.asarray(graph.node_adjacency(int(v)))
     if adj.shape[0] != 4:
         return None
@@ -81,7 +81,7 @@ def split_degree4(v, graph, vertices, direction_span=1, min_through_angle=160.0)
     return [int(edge_ids[k]) for k in pair_b]
 
 
-def clean_graph(
+def clean_filament_graph(
     vertices: np.ndarray,
     edges: np.ndarray,
     radii: np.ndarray | None = None,
@@ -159,11 +159,11 @@ def clean_graph(
 
     splits, prune_edges = [], set()
     for v in np.where(degrees == 3)[0]:
-        ids = split_degree3(v, graph, vertices, direction_span, min_branch_angle)
+        ids = _split_degree3(v, graph, vertices, direction_span, min_branch_angle)
         if ids:
             prune_edges.update(ids)
     for v in np.where(degrees == 4)[0]:
-        ids = split_degree4(v, graph, vertices, direction_span, min_through_angle)
+        ids = _split_degree4(v, graph, vertices, direction_span, min_through_angle)
         if ids:
             splits.append((int(v), ids))
 
@@ -479,4 +479,4 @@ def draw_instances(vertices, edges, labels, shape, radius=1):
     return volume
 
 
-__all__ = ["clean_graph", "draw_instances", "join_close_components", "remove_ticks"]
+__all__ = ["clean_filament_graph", "draw_instances", "join_close_components", "remove_ticks"]

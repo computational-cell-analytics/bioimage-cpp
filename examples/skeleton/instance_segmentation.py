@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from bioimage_cpp.graph import connected_components
-from bioimage_cpp.skeleton import clean_graph, draw_instances, skeleton_to_graph, teasar
+from bioimage_cpp.skeleton import clean_filament_graph, draw_instances, skeleton_to_graph, teasar
 
 
 def parse_args():
@@ -78,7 +78,7 @@ def main():
         number_of_threads=args.number_of_threads,
     )
 
-    vertices, edges, radii = clean_graph(
+    vertices, edges, radii = clean_filament_graph(
         raw_vertices, raw_edges, radii=raw_radii,
         direction_span=args.direction_span, min_through_angle=args.min_through_angle,
         min_branch_angle=args.min_branch_angle, tick_length=args.tick_length,
