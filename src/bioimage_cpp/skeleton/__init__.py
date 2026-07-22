@@ -10,6 +10,7 @@ from .. import _core
 from .._validation import strict_index
 from ..distance._distance import _as_binary_input, _normalize_sampling, _normalize_threads
 from ._graph import skeleton_to_graph
+from .postprocessing import clean_filament_graph, draw_instances, join_close_components, remove_ticks
 
 
 _TEASAR_LABELS_BY_DTYPE = {
@@ -205,4 +206,4 @@ def teasar_labels(
 from . import distributed
 
 
-__all__ = ["distributed", "skeleton_to_graph", "teasar", "teasar_labels"]
+__all__ = ["clean_filament_graph", "distributed", "draw_instances", "join_close_components", "remove_ticks", "skeleton_to_graph", "teasar", "teasar_labels"]
