@@ -214,7 +214,7 @@ def _adjacency(num_nodes, edges):
 def remove_ticks(vertices, edges, tick_length, radii=None):
     """Prune short dead-end branches ("ticks") from a skeleton graph.
 
-    Ports kimimaro's `remove_ticks`. A distance graph is built over the critical
+    A distance graph is built over the critical
     points (terminals, degree 1; branch points, degree >= 3), whose superedges
     are the paths between them weighted by physical length. The shortest terminal
     branch below ``tick_length`` is pruned repeatedly; when a branch point drops
