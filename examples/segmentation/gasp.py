@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import argparse
+
+import napari
+import numpy as np
+from skimage.feature import peak_local_max
+from skimage.measure import label as label_components
+from skimage.segmentation import find_boundaries, watershed
+
+import bioimage_cpp as bic
+from bioimage_cpp._data import load_isbi_affinities, load_isbi_raw
+
+
+def load_problem(ndim: int, z_slice: int):
+    affinities, offsets = load_isbi_affinities()
+    offsets = [tuple(int(v) for v in offset) for offset in offsets]
+    if ndim == 2:
+        channels_2d = [index for index, offset in enumerate(offsets) if offset[0] == 0]
+        affinities = affinities[channels_2d, z_slice]
+        offsets = [offsets[index][1:] for index in channels_2d]
+    elif ndim != 3:
+        raise ValueError(f"ndim must be 2 or 3, got {ndim}")
+
+    direct_channels = [
+        index for index, offset in enumerate(offsets) if sum(abs(v) for v in offset) == 1
+    ]
+    direct_affinities = np.ascontiguousarray(affinities[direct_channels], dtype=np.float32)
+    direct_offsets = [offsets[index] for index in direct_channels]
+    return direct_affinities, direct_offsets
+
+
+def load_raw(ndim: int, z_slice: int) -> np.ndarray:
+    raw = load_isbi_raw()
+    return np.ascontiguousarray(raw[z_slice] if ndim == 2 else raw)
+
+
+def make_heightmap(affinities: np.ndarray) -> np.ndarray:
+    return np.ascontiguousarray(np.mean(affinities, axis=0), dtype=np.float32)
+
+
+def make_watershed_oversegmentation(
+    heightmap: np.ndarray,
+    *,
+    min_distance: int,
+    grid_spacing: int,
+    max_markers: int,
+) -> np.ndarray:
+    coordinates = peak_local_max(
+        -heightmap,
+        min_distance=min_distance,
+        exclude_border=False,
+        num_peaks=max_markers,
+    )
+    marker_mask = np.zeros(heightmap.shape, dtype=bool)
+    if len(coordinates) > 0:
+        marker_mask[tuple(coordinates.T)] = True
+    markers = label_components(marker_mask).astype(np.int32, copy=False)
+
+    if int(markers.max()) < 2:
+        markers = np.zeros(heightmap.shape, dtype=np.int32)
+        slices = tuple(slice(None, None, grid_spacing) for _ in heightmap.shape)
+        marker_coordinates = np.argwhere(np.ones(heightmap.shape, dtype=bool)[slices])
+        marker_coordinates *= grid_spacing
+        for marker_id, coord in enumerate(marker_coordinates, start=1):
+            markers[tuple(coord)] = marker_id
+
+    return watershed(heightmap, markers=markers).astype(np.uint32, copy=False)
+
+
+def gasp_from_affinities(
+    affinities: np.ndarray,
+    offsets: list[tuple[int, ...]],
+    *,
+    threshold: float,
+    linkage: str,
+    num_clusters_stop: int,
+    number_of_threads: int,
+    watershed_min_distance: int,
+    watershed_grid_spacing: int,
+    max_markers: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    heightmap = make_heightmap(affinities)
+    oversegmentation = make_watershed_oversegmentation(
+        heightmap,
+        min_distance=watershed_min_distance,
+        grid_spacing=watershed_grid_spacing,
+        max_markers=max_markers,
+    )
+
+    rag = bic.graph.region_adjacency_graph(
+        oversegmentation, number_of_threads=number_of_threads
+    )
+    features = bic.graph.features.affinity_features(
+        rag,
+        oversegmentation,
+        affinities,
+        offsets,
+        number_of_threads=number_of_threads,
+    )
+    edge_weights = threshold - features[:, 0]
+    edge_sizes = features[:, 1]
+
+    node_labels = bic.graph.agglomeration.GaspClusterPolicy(
+        num_clusters_stop=num_clusters_stop,
+        linkage=linkage,
+    ).optimize(rag, edge_weights, edge_sizes=edge_sizes)
+    segmentation = bic.graph.project_node_labels_to_pixels(
+        rag,
+        oversegmentation,
+        node_labels,
+        number_of_threads=number_of_threads,
+    )
+    return heightmap, oversegmentation, segmentation
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run watershed oversegmentation + GASP graph agglomeration on the "
+            "ISBI affinity example."
+        )
+    )
+    parser.add_argument("--ndim", type=int, choices=(2, 3), default=2)
+    parser.add_argument("--z-slice", type=int, default=0)
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.1,
+        help=(
+            "Affinity threshold for signed edge weights. Lower affinities "
+            "produce attractive edges (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--linkage",
+        choices=("sum", "mean", "max", "min", "abs_max", "mutex_watershed"),
+        default="mean",
+        help="GASP linkage rule (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--num-clusters-stop",
+        type=int,
+        default=1,
+        help=(
+            "Stop at this many RAG clusters. GASP may stop earlier when no "
+            "attractive edge remains (default: %(default)s)."
+        ),
+    )
+    parser.add_argument("--threads", type=int, default=0)
+    parser.add_argument("--watershed-min-distance", type=int, default=5)
+    parser.add_argument("--watershed-grid-spacing", type=int, default=12)
+    parser.add_argument("--max-markers", type=int, default=2048)
+    args = parser.parse_args()
+
+    affinities, offsets = load_problem(args.ndim, args.z_slice)
+    raw = load_raw(args.ndim, args.z_slice)
+    heightmap, oversegmentation, segmentation = gasp_from_affinities(
+        affinities,
+        offsets,
+        threshold=args.threshold,
+        linkage=args.linkage,
+        num_clusters_stop=args.num_clusters_stop,
+        number_of_threads=args.threads,
+        watershed_min_distance=args.watershed_min_distance,
+        watershed_grid_spacing=args.watershed_grid_spacing,
+        max_markers=args.max_markers,
+    )
+
+    viewer = napari.Viewer()
+    viewer.add_image(raw, name="raw")
+    viewer.add_image(affinities, name="direct affinities")
+    viewer.add_image(heightmap, name="watershed heightmap")
+    viewer.add_labels(oversegmentation, name="watershed oversegmentation")
+    viewer.add_labels(segmentation, name="GASP segmentation")
+    viewer.add_labels(find_boundaries(segmentation), name="GASP boundaries")
+    napari.run()
+
+
+if __name__ == "__main__":
+    main()
