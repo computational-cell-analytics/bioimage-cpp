@@ -2,7 +2,6 @@
 
 #include "bioimage_cpp/detail/mutex_storage.hxx"
 #include "bioimage_cpp/graph/agglomeration/cluster_policy_base.hxx"
-#include "bioimage_cpp/graph/multicut/detail.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <algorithm>
@@ -80,7 +79,6 @@ public:
 
     void initialize(
         const UndirectedGraph &graph,
-        DynamicGraph &dynamic_graph,
         EdgeHeap &heap
     ) override {
         const auto n_edges = static_cast<std::size_t>(graph.number_of_edges());
@@ -100,36 +98,26 @@ public:
         std::vector<EdgeHeap::Entry> entries;
         entries.reserve(n_edges);
         for (std::uint64_t edge_id = 0; edge_id < graph.number_of_edges(); ++edge_id) {
-            const auto uv = graph.uv(edge_id);
-            const auto u = static_cast<std::size_t>(uv.first);
-            const auto v = static_cast<std::size_t>(uv.second);
             const auto edge_index = static_cast<std::size_t>(edge_id);
             const double priority = priority_of(edge_weight_[edge_index]);
-            auto &edge = dynamic_graph.edges[edge_index];
-            edge.u = u;
-            edge.v = v;
-            edge.weight = priority;
-            edge.is_constraint = 0;
-            dynamic_graph.adjacency[u].push_back({v, edge_index});
-            dynamic_graph.adjacency[v].push_back({u, edge_index});
             entries.push_back({edge_index, priority});
         }
         heap.build_heap(std::move(entries));
     }
 
-    bool is_done(const DynamicGraph &dynamic_graph) const override {
-        return dynamic_graph.alive_count <= num_clusters_stop_;
+    bool is_done(const Topology &topology) const override {
+        return topology.number_of_nodes() <= num_clusters_stop_;
     }
 
     Action next_action(
         std::size_t edge_id,
         double priority,
-        const DynamicGraph &dynamic_graph
+        const Topology &topology
     ) override {
         (void)priority;
-        const auto &edge = dynamic_graph.edges[edge_id];
-        const auto u = static_cast<std::uint64_t>(edge.u);
-        const auto v = static_cast<std::uint64_t>(edge.v);
+        const auto [u, v] = topology.uv(
+            static_cast<std::uint64_t>(edge_id)
+        );
         if (check_mutex(u, v, cannot_link_)) {
             return Action::kRejectEdge;
         }

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bioimage_cpp/detail/indexed_heap.hxx"
-#include "bioimage_cpp/graph/multicut/detail.hxx"
+#include "bioimage_cpp/graph/detail/contraction_topology.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <cstddef>
@@ -13,11 +13,8 @@ namespace bioimage_cpp::graph::agglomeration {
 //
 // A cluster policy carries all per-edge / per-node auxiliary state required
 // to compute heap priorities (edge sizes, node sizes, histograms, features,
-// signed weights, cannot-link masks, ...). The driver
-// (`agglomerative_clustering`) owns the `DynamicGraph`, `UnionFind` and
-// `EdgeHeap` and delegates merge-rule decisions and weight updates to the
-// policy. Implementations are typically constructed once per problem and
-// passed by reference to the driver.
+// signed weights, and cannot-link masks). The driver owns the contraction
+// topology, union-find, and heap.
 //
 // The agglo heap is a min-heap (smallest priority pops first), matching
 // nifty's convention: edge indicators in the edge-weighted / node+edge-
@@ -27,7 +24,7 @@ namespace bioimage_cpp::graph::agglomeration {
 // top of the same min-heap container.
 class ClusterPolicyBase {
 public:
-    using DynamicGraph = multicut::detail::DynamicGraph;
+    using Topology = graph::detail::ContractionTopology;
     using EdgeHeap =
         bioimage_cpp::detail::DenseIndexedHeap<double, std::greater<double>>;
 
@@ -39,19 +36,14 @@ public:
 
     virtual ~ClusterPolicyBase() = default;
 
-    // Seed the heap with initial priorities and any per-edge / per-node
-    // policy state derived from `graph` / `dynamic_graph`. Called once at the
-    // start of `agglomerative_clustering` after `dynamic_graph` has been
-    // initialised.
+    // Seed the heap and initialize policy state.
     virtual void initialize(
         const UndirectedGraph &graph,
-        DynamicGraph &dynamic_graph,
         EdgeHeap &heap
     ) = 0;
 
-    // Iteration-level stop check, independent of the heap top. Typically
-    // checks `alive_count <= num_clusters_stop` or similar.
-    virtual bool is_done(const DynamicGraph &dynamic_graph) const = 0;
+    // Check termination independently of the heap top.
+    virtual bool is_done(const Topology &topology) const = 0;
 
     // Heap-top-dependent action. Called after `is_done` returns false and
     // before any contraction is attempted. `edge_id` is the heap top key
@@ -59,7 +51,7 @@ public:
     virtual Action next_action(
         std::size_t edge_id,
         double priority,
-        const DynamicGraph &dynamic_graph
+        const Topology &topology
     ) = 0;
 
     // Called once per contraction, before the per-fold loop, to let the
@@ -104,11 +96,11 @@ public:
     // changed. Default: no-op.
     virtual void contract_edge_done(
         std::size_t stable,
-        DynamicGraph &dynamic_graph,
+        const Topology &topology,
         EdgeHeap &heap
     ) {
         (void)stable;
-        (void)dynamic_graph;
+        (void)topology;
         (void)heap;
     }
 };

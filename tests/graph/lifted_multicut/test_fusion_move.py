@@ -313,13 +313,8 @@ def test_fusion_move_default_parallel_proposals_tracks_threads():
 
 def test_greedy_proposals_parallel_is_deterministic_on_dirty_base_graph():
     # Regression guard for the lazy-CSR-adjacency data race on the *base* graph.
-    # The greedy-additive proposal generator reads base_graph.node_adjacency()
-    # (via DynamicGraph::reset); with T>1 the parallel proposal slots used to
-    # race on the first rebuild of a not-yet-frozen base graph. Unlike the
-    # multicut driver, here the singleton warm-start only freezes the *lifted*
-    # graph, so the race is reachable from the default start. The solver now
-    # freezes the base graph before fan-out; the multi-threaded result must equal
-    # the single-threaded reference on every run.
+    # Proposal generators can read base adjacency from parallel slots. The
+    # solver must freeze a dirty base graph before the fan-out.
     #
     # Note: a regression here can surface as a process crash (it is a data race),
     # not just a value mismatch.

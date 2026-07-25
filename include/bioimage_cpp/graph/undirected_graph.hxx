@@ -45,11 +45,8 @@ struct Adjacency {
 // overwriting `adjacency_offsets_` — which corrupts the CSR (garbage neighbor
 // ids, out-of-bounds reads) and intermittently segfaults. The rule:
 //
-//   Any algorithm that reads `node_adjacency` (directly, or via
-//   `breadth_first_search`, `extract_subgraph_from_nodes`, or a sub-solver
-//   such as `multicut::greedy_additive`'s `DynamicGraph::reset`) from
-//   `parallel_for_chunks` or other threads MUST `freeze()` the graph on the
-//   calling thread *before* the fan-out.
+//   Any algorithm that reads `node_adjacency` directly or indirectly from
+//   worker threads MUST call `freeze()` before the fan-out.
 //
 // Once frozen (or built via `from_sorted_unique_edges`, which rebuilds the CSR
 // eagerly), the graph has no mutable read path and is safe to share by

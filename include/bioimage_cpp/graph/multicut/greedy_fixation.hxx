@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/graph/multicut/detail.hxx"
 #include "bioimage_cpp/graph/multicut/objective.hxx"
 
@@ -15,34 +16,46 @@ inline std::vector<std::uint64_t> greedy_fixation(
     const double weight_stop,
     const double node_num_stop
 ) {
+    BIOIMAGE_PROFILE_INIT(profile);
     validate_costs(graph, costs);
-    detail::DynamicGraph dynamic_graph(graph);
-    bioimage_cpp::util::UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
-    detail::EdgeHeap heap;
-    detail::initialize_dynamic_graph(graph, costs, dynamic_graph, heap, true);
+    detail::ContractionState state;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "workspace_reset");
+        state.reset(graph);
+    }
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "initialize");
+        detail::initialize_contraction_state(graph, costs, state, true);
+    }
 
-    while (!heap.empty() && dynamic_graph.alive_count > 1) {
-        const auto top = heap.top();
+    while (!state.heap.empty() && state.topology.number_of_nodes() > 1) {
+        const auto top = state.heap.top();
         // Priority is |weight|, so this also handles weight == 0 (stop).
         if (top.priority <= weight_stop) {
             break;
         }
         if (node_num_stop > 0.0
-            && dynamic_graph.alive_count <= detail::stop_node_count(graph, node_num_stop)) {
+            && state.topology.number_of_nodes()
+                <= detail::stop_node_count(graph, node_num_stop)) {
             break;
         }
         const auto edge_id = top.key;
-        const auto &edge = dynamic_graph.edges[edge_id];
-        if (edge.weight > 0.0) {
-            detail::merge_dynamic_nodes(dynamic_graph, sets, heap, edge.u, edge.v, true);
+        auto &objective_edge = state.topology.edge_payload(edge_id);
+        if (objective_edge.weight > 0.0) {
+            detail::contract_edge(state, edge_id, true, profile);
         } else {
-            // weight < 0: forbid merging through this edge. merge_dynamic_nodes
-            // propagates the flag onto any merged successor edges.
-            heap.pop();
-            dynamic_graph.edges[edge_id].is_constraint = 1;
+            // A negative edge installs a persistent constraint.
+            state.heap.pop();
+            objective_edge.is_constraint = 1;
         }
     }
-    return detail::labels_from_sets(sets, graph);
+    std::vector<std::uint64_t> labels;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "labels_from_sets");
+        labels = detail::labels_from_sets(state.union_find, graph);
+    }
+    BIOIMAGE_PROFILE_REPORT(profile);
+    return labels;
 }
 
 class GreedyFixationSolver final : public SolverBase {

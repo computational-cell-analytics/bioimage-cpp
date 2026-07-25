@@ -1,8 +1,9 @@
 #pragma once
 
+#include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/graph/agglomeration/cluster_policy_base.hxx"
 #include "bioimage_cpp/graph/agglomeration/detail.hxx"
-#include "bioimage_cpp/graph/multicut/detail.hxx"
+#include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 #include "bioimage_cpp/util/union_find.hxx"
 
@@ -14,26 +15,34 @@ namespace bioimage_cpp::graph::agglomeration {
 
 // Hierarchical agglomerative clustering driven by a `ClusterPolicyBase`.
 //
-// The driver owns the dynamic graph, union-find and heap. The policy carries
-// its own per-edge / per-node state (sizes, histograms, features, cannot-link
-// constraints, ...) and decides per iteration whether to merge, skip, or
-// stop. Returns dense node labels in `[0, k)` via the union-find roots.
+// The policy owns objective-specific state and controls merge decisions.
 inline std::vector<std::uint64_t> agglomerative_clustering(
     const UndirectedGraph &graph,
     ClusterPolicyBase &policy
 ) {
-    multicut::detail::DynamicGraph dynamic_graph(graph);
+    BIOIMAGE_PROFILE_INIT(profile);
+    ClusterPolicyBase::Topology topology;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "topology_reset");
+        topology.reset(graph);
+    }
     util::UnionFind sets(static_cast<std::size_t>(graph.number_of_nodes()));
     ClusterPolicyBase::EdgeHeap heap;
     heap.reset_capacity(static_cast<std::size_t>(graph.number_of_edges()));
-    policy.initialize(graph, dynamic_graph, heap);
-
-    while (!heap.empty() && dynamic_graph.alive_count > 1) {
-        if (policy.is_done(dynamic_graph)) {
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "initialize");
+        policy.initialize(graph, heap);
+    }
+    while (!heap.empty() && topology.number_of_nodes() > 1) {
+        if (policy.is_done(topology)) {
             break;
         }
         const auto top = heap.top();
-        const auto action = policy.next_action(top.key, top.priority, dynamic_graph);
+        const auto action = policy.next_action(
+            top.key,
+            top.priority,
+            topology
+        );
         if (action == ClusterPolicyBase::Action::kStop) {
             break;
         }
@@ -41,12 +50,25 @@ inline std::vector<std::uint64_t> agglomerative_clustering(
             heap.pop();
             continue;
         }
-        const auto &edge = dynamic_graph.edges[top.key];
-        detail::agglo_merge_dynamic_nodes(
-            dynamic_graph, sets, heap, edge.u, edge.v, policy
+        detail::contract_edge(
+            topology,
+            sets,
+            heap,
+            top.key,
+            policy,
+            profile
         );
     }
-    return multicut::detail::labels_from_sets(sets, graph);
+    std::vector<std::uint64_t> labels;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "labels_from_sets");
+        labels = dense_labels_from_union_find(
+            sets,
+            graph.number_of_nodes()
+        );
+    }
+    BIOIMAGE_PROFILE_REPORT(profile);
+    return labels;
 }
 
 } // namespace bioimage_cpp::graph::agglomeration

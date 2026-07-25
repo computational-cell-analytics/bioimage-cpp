@@ -1,7 +1,6 @@
 #pragma once
 
 #include "bioimage_cpp/graph/agglomeration/cluster_policy_base.hxx"
-#include "bioimage_cpp/graph/multicut/detail.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <cmath>
@@ -72,7 +71,6 @@ public:
 
     void initialize(
         const UndirectedGraph &graph,
-        DynamicGraph &dynamic_graph,
         EdgeHeap &heap
     ) override {
         const auto n_edges = static_cast<std::size_t>(graph.number_of_edges());
@@ -98,31 +96,24 @@ public:
             const auto u = static_cast<std::size_t>(uv.first);
             const auto v = static_cast<std::size_t>(uv.second);
             const auto edge_index = static_cast<std::size_t>(edge_id);
-            auto &edge = dynamic_graph.edges[edge_index];
-            edge.u = u;
-            edge.v = v;
             const auto priority = priority_of(edge_index, u, v);
-            edge.weight = priority;
-            edge.is_constraint = 0;
-            dynamic_graph.adjacency[u].push_back({v, edge_index});
-            dynamic_graph.adjacency[v].push_back({u, edge_index});
             entries.push_back({edge_index, priority});
         }
         heap.build_heap(std::move(entries));
     }
 
-    bool is_done(const DynamicGraph &dynamic_graph) const override {
-        return dynamic_graph.alive_count <= num_clusters_stop_;
+    bool is_done(const Topology &topology) const override {
+        return topology.number_of_nodes() <= num_clusters_stop_;
     }
 
     Action next_action(
         std::size_t edge_id,
         double priority,
-        const DynamicGraph &dynamic_graph
+        const Topology &topology
     ) override {
         (void)edge_id;
         (void)priority;
-        (void)dynamic_graph;
+        (void)topology;
         return Action::kMerge;
     }
 
@@ -171,19 +162,16 @@ public:
 
     void contract_edge_done(
         std::size_t stable,
-        DynamicGraph &dynamic_graph,
+        const Topology &topology,
         EdgeHeap &heap
     ) override {
-        for (const auto &entry : dynamic_graph.adjacency[stable]) {
-            const auto edge_id = entry.edge_id;
-            const auto neighbor = entry.neighbor;
+        for (const auto &entry : topology.node_adjacency(stable)) {
+            const auto edge_id = static_cast<std::size_t>(entry.edge);
+            const auto neighbor = static_cast<std::size_t>(entry.node);
             const auto new_priority = priority_of(edge_id, stable, neighbor);
-            auto &edge = dynamic_graph.edges[edge_id];
-            if (edge.weight != new_priority) {
-                edge.weight = new_priority;
-                if (heap.contains(edge_id)) {
-                    heap.change(edge_id, new_priority);
-                }
+            if (heap.contains(edge_id)
+                && heap.priority_of(edge_id) != new_priority) {
+                heap.change(edge_id, new_priority);
             }
         }
     }

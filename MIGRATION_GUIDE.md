@@ -1615,6 +1615,10 @@ Differences from nifty:
   underlying loop is the same.
 - Both `float32` and `float64` inputs are accepted; computation runs in
   `float64` internally.
+- `MalaClusterPolicy.num_edges_stop` counts all active edges after each
+  contraction. This includes the contracted edge and folded parallel edges.
+  Earlier bioimage-cpp versions counted only folds and could stop too late on
+  sparse graphs. The new behavior matches nifty's contraction graph.
 - Tie-breaks follow the deterministic order of edge ids returned by
   `UndirectedGraph`, which may differ from nifty's. On inputs where many
   edges share the same indicator value, this combines with the

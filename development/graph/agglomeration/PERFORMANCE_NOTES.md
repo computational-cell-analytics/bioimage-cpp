@@ -4,6 +4,17 @@ State of `bioimage_cpp.graph.agglomeration` vs `nifty.graph.agglo` on the
 external multicut problem set (samples A, B, C × sizes small, medium), and
 notes on the remaining algorithmic differences and possible optimisations.
 
+## Shared contraction topology
+
+The agglomeration driver now uses `graph::detail::ContractionTopology`.
+Policies keep only objective-specific state. Mutation observers update policy
+state, the heap, and the union-find as each topology event occurs. Profile
+builds report `topology_reset`, `contract`, `initialize`, and
+`labels_from_sets`.
+
+`MalaClusterPolicy.num_edges_stop` now reads the topology's active-edge
+count. This fixes the previous fold-only counter.
+
 ## Current benchmark matrix
 
 Produced 2026-05-24 with the per-policy `check_*.py` scripts, each run with
@@ -138,7 +149,7 @@ all policies:
    `O(log N)` and is called once per fold and once per neighbour in the
    final `contract_edge_done` sweep. For the largest problems we do
    ~10⁸ such updates; the `change` cycle dominates wall time.
-2. **Adjacency restructuring inside `agglo_merge_dynamic_nodes`.** Per
+2. **Adjacency restructuring inside `ContractionTopology`.** Per
    contraction we walk the removed node's adjacency, do an O(degree)
    `erase_by_neighbor` per fold, and write back into the survivor's
    adjacency. Memory-bound on large medium problems.
@@ -217,11 +228,11 @@ current behaviour as functionally complete and correct.
    heap top — empirically this is rare, so the trade should be
    favourable.
 
-6. **Profile-guided focus on `gasp_max` C/medium.** Add `BIOIMAGE_PROFILE`
-   scopes for `agglo_merge_dynamic_nodes` (broken into "fold loop",
-   "rekey loop", "contract_edge_done") and rerun. The 164 s vs 105 s
-   gap should be attributable to one of these phases; once it's
-   visible, the right primitive to optimise becomes obvious.
+6. **Profile-guided focus on `gasp_max` C/medium.** Use the existing
+   `BIOIMAGE_PROFILE` scopes to separate initialization, contraction, and
+   label materialization. The 164 s vs 105 s gap should be attributable to
+   one of these phases. Add a focused scope inside the largest phase before
+   changing the algorithm.
 
 7. **Sparse `MutexStorage` representation.** Each
    `std::unordered_set<uint64_t>` carries ~50 B of overhead and a hash

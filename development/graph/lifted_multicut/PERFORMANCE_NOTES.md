@@ -4,6 +4,14 @@ State of the lifted-multicut solvers vs nifty on the standard benchmark
 problems and notes on remaining optimization headroom. Read this before the
 next round of perf work.
 
+## Shared contraction topology
+
+Lifted greedy additive now uses
+`graph::detail::BasicContractionTopology`. An edge payload keeps each weight
+and lifted-edge flag next to its endpoints. Mutation observers update the
+heap and union-find without an intermediate event buffer. Folded edges remain
+lifted only when both inputs are lifted.
+
 ## Current benchmark matrix
 
 Produced by `python evaluate_solvers.py` (2026-05-17). All runs

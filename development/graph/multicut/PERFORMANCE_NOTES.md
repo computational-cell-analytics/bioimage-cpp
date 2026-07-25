@@ -4,6 +4,20 @@ State of the multicut solvers vs nifty on the standard benchmark problems and
 notes on remaining optimization headroom. Read this before the next round of
 perf work.
 
+## Shared contraction topology
+
+Greedy additive and greedy fixation now use
+`graph::detail::BasicContractionTopology`. An edge payload keeps each weight
+and constraint flag next to its endpoints. Mutation observers update the heap
+and union-find without an intermediate event buffer. The solver workspace
+retains all scratch allocations across calls.
+
+Profile builds report reset, initialization, contraction, and label
+materialization separately.
+
+The refactor keeps the previous merge direction: the larger-degree endpoint
+survives, and the edge's first endpoint survives a degree tie.
+
 ## Current benchmark matrix
 
 Produced by `python evaluate_solvers.py` (2026-05-17). Small problems were run

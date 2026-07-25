@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/graph/multicut/detail.hxx"
 #include "bioimage_cpp/graph/multicut/objective.hxx"
 
@@ -9,21 +10,12 @@
 
 namespace bioimage_cpp::graph::multicut {
 
-// Reusable scratch state for `greedy_additive`. Construct once and call
-// `greedy_additive(..., workspace)` repeatedly to avoid per-call allocation
-// of the DynamicGraph, UnionFind, and EdgeHeap. Capacities only grow; the
-// internal vectors are reset (not freed) between calls.
+// Reusable scratch state for `greedy_additive`.
 struct GreedyAdditiveWorkspace {
-    detail::DynamicGraph dynamic_graph;
-    bioimage_cpp::util::UnionFind union_find{0};
-    detail::EdgeHeap heap;
+    detail::ContractionState state;
 
     void reset(const UndirectedGraph &graph) {
-        dynamic_graph.reset(graph);
-        union_find.reset(static_cast<std::size_t>(graph.number_of_nodes()));
-        // The heap is sized by detail::initialize_dynamic_graph, which every
-        // caller runs immediately after reset(); resizing it here too would
-        // wipe the locator vector twice.
+        state.reset(graph);
     }
 };
 
@@ -37,26 +29,39 @@ inline std::vector<std::uint64_t> greedy_additive(
     const double sigma,
     GreedyAdditiveWorkspace &workspace
 ) {
+    BIOIMAGE_PROFILE_INIT(profile);
     validate_costs(graph, costs);
-    workspace.reset(graph);
-    auto &dynamic_graph = workspace.dynamic_graph;
-    auto &sets = workspace.union_find;
-    auto &heap = workspace.heap;
-    detail::initialize_dynamic_graph(graph, costs, dynamic_graph, heap, false, add_noise, seed, sigma);
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "workspace_reset");
+        workspace.reset(graph);
+    }
+    auto &state = workspace.state;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "initialize");
+        detail::initialize_contraction_state(
+            graph, costs, state, false, add_noise, seed, sigma
+        );
+    }
 
-    while (!heap.empty() && dynamic_graph.alive_count > 1) {
-        const auto top = heap.top();
+    while (!state.heap.empty() && state.topology.number_of_nodes() > 1) {
+        const auto top = state.heap.top();
         if (top.priority <= weight_stop) {
             break;
         }
         if (node_num_stop > 0.0
-            && dynamic_graph.alive_count <= detail::stop_node_count(graph, node_num_stop)) {
+            && state.topology.number_of_nodes()
+                <= detail::stop_node_count(graph, node_num_stop)) {
             break;
         }
-        const auto &edge = dynamic_graph.edges[top.key];
-        detail::merge_dynamic_nodes(dynamic_graph, sets, heap, edge.u, edge.v, false);
+        detail::contract_edge(state, top.key, false, profile);
     }
-    return detail::labels_from_sets(sets, graph);
+    std::vector<std::uint64_t> labels;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "labels_from_sets");
+        labels = detail::labels_from_sets(state.union_find, graph);
+    }
+    BIOIMAGE_PROFILE_REPORT(profile);
+    return labels;
 }
 
 inline std::vector<std::uint64_t> greedy_additive(

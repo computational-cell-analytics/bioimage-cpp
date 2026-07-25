@@ -51,6 +51,35 @@ def test_num_clusters_stop_respected():
     assert len(np.unique(labels)) == 3
 
 
+def test_num_edges_stop_counts_contracted_edges_on_chain():
+    graph = chain_graph(5)
+    indicators = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float64)
+
+    labels = bic.graph.agglomeration.MalaClusterPolicy(
+        threshold=1.0,
+        num_clusters_stop=1,
+        num_edges_stop=3,
+    ).optimize(graph, indicators)
+
+    assert len(np.unique(labels)) == 4
+
+
+def test_num_edges_stop_counts_contracted_and_folded_edges():
+    graph = bic.graph.UndirectedGraph.from_edges(
+        3,
+        [[0, 1], [0, 2], [1, 2]],
+    )
+    indicators = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+
+    labels = bic.graph.agglomeration.MalaClusterPolicy(
+        threshold=1.0,
+        num_clusters_stop=1,
+        num_edges_stop=1,
+    ).optimize(graph, indicators)
+
+    assert len(np.unique(labels)) == 2
+
+
 def test_float32_and_float64_match():
     graph = two_clusters_graph()
     indicators_f32 = np.array(

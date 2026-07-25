@@ -86,3 +86,39 @@ def test_greedy_additive_lifted_attractive_merges_through_base_path():
     )
     labels = bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(objective)
     same_partition(labels, [0, 0, 0])
+
+
+def test_folded_lifted_edges_do_not_become_merge_candidates():
+    base = bic.graph.UndirectedGraph.from_edges(3, [[0, 1]])
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
+        base,
+        np.array([10.0], dtype=np.float64),
+        lifted_uvs=np.array([[0, 2], [1, 2]], dtype=np.uint64),
+        lifted_costs=np.array([8.0, 9.0], dtype=np.float64),
+    )
+
+    labels = bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(
+        objective
+    )
+
+    assert labels[0] == labels[1]
+    assert labels[0] != labels[2]
+
+
+def test_base_and_lifted_fold_remains_a_base_merge_candidate():
+    base = bic.graph.UndirectedGraph.from_edges(
+        3,
+        [[0, 1], [0, 2]],
+    )
+    objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
+        base,
+        np.array([10.0, -5.0], dtype=np.float64),
+        lifted_uvs=np.array([[1, 2]], dtype=np.uint64),
+        lifted_costs=np.array([10.0], dtype=np.float64),
+    )
+
+    labels = bic.graph.lifted_multicut.LiftedGreedyAdditiveMulticut().optimize(
+        objective
+    )
+
+    assert len(np.unique(labels)) == 1
