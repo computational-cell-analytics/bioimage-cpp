@@ -273,6 +273,10 @@ public:
         return topology_.degree(node);
     }
 
+    [[nodiscard]] bool can_suppress_node(const NodeId node) const {
+        return topology_.can_suppress_node(node);
+    }
+
     [[nodiscard]] bool node_active(const NodeId node) const {
         return topology_.node_active(node);
     }

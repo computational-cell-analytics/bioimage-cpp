@@ -546,6 +546,10 @@ UInt64Array graph_node_adjacency(const Graph &graph, const std::uint64_t node) {
     return result;
 }
 
+UInt64Array graph_node_degrees(const Graph &graph) {
+    return detail::copy_vector_to_array(graph.node_degrees());
+}
+
 UInt64Array graph_serialize(const Graph &graph) {
     auto result = make_uint64_array({static_cast<std::size_t>(graph.serialization_size())});
     auto *data = result.data();
@@ -1895,6 +1899,11 @@ void bind_graph(nb::module_ &m) {
         .def("insert_edges", &graph_insert_edges, nb::arg("uvs"))
         .def("find_edges", &graph_find_edges, nb::arg("uvs"))
         .def("node_adjacency", &graph_node_adjacency, nb::arg("node"))
+        .def(
+            "node_degrees",
+            &graph_node_degrees,
+            "Return the degree of each node as a uint64 array."
+        )
         .def_prop_ro("serialization_size", &Graph::serialization_size)
         .def("serialize", &graph_serialize)
         .def(

@@ -55,6 +55,19 @@ def test_undirected_graph_node_adjacency():
     )
 
 
+def test_undirected_graph_node_degrees_updates_after_insertion():
+    graph = bic.graph.UndirectedGraph.from_edges(5, [[0, 1], [1, 2], [1, 3]])
+
+    degrees = graph.node_degrees()
+
+    assert degrees.dtype == np.uint64
+    np.testing.assert_array_equal(degrees, [1, 3, 1, 1, 0])
+
+    graph.insert_edge(3, 4)
+
+    np.testing.assert_array_equal(graph.node_degrees(), [1, 3, 1, 2, 1])
+
+
 def test_undirected_graph_serialize_and_deserialize():
     graph = bic.graph.UndirectedGraph.from_edges(3, [[0, 2], [0, 1]])
 
