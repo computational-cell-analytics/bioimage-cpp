@@ -460,6 +460,69 @@ Common method/property mapping:
 | `extractSubgraphFromNodes` | `extract_subgraph_from_nodes` |
 | `edgesFromNodeList` | `edges_from_node_list` |
 
+### Mutable Graph Contractions
+
+`ContractionGraph` supports custom graph postprocessing with stable ids and
+named value maps:
+
+```python
+import numpy as np
+import bioimage_cpp as bic
+
+graph = bic.graph.UndirectedGraph.from_edges(
+    3,
+    [[0, 1], [1, 2], [0, 2]],
+)
+work = bic.graph.ContractionGraph(graph)
+work.add_node_values(
+    "position",
+    np.array([[0.0], [2.0], [10.0]], dtype=np.float32),
+    reduction="mean",
+)
+work.add_edge_values(
+    "weight",
+    np.array([100.0, 2.0, 3.0], dtype=np.float64),
+    reduction="sum",
+)
+
+work.contract_edge(0, keep_node=0)
+result = work.materialize()
+
+contracted = result.graph
+positions = result.node_values["position"]
+weights = result.edge_values["weight"]
+```
+
+Register all value maps before the first mutation. Maps can use `float32` or
+`float64` independently. The supported reductions are `sum`, `mean`, `min`,
+and `max`.
+
+Node values reduce when an edge contraction merges two nodes. Edge values
+reduce when parallel edges merge. The contracted edge becomes internal and has
+no output value. `suppress_node` removes a degree-2 node and reduces its two
+incident edge values into the replacement edge.
+
+The input must be a simple `UndirectedGraph`. Use
+`parallel_edges="keep"` to keep parallel edges that mutations create:
+
+```python
+work = bic.graph.ContractionGraph(graph, parallel_edges="keep")
+```
+
+The default `parallel_edges="merge"` folds these edges immediately. In keep
+mode, `find_edges(u, v)` returns all matching active edge ids.
+
+`materialize()` always returns a simple-graph snapshot. In keep mode, it folds
+parallel edges in the snapshot with each edge map's reduction. It does not
+change the mutable graph. Rows in `node_values` and `edge_values` match the ids
+in the materialized graph. `node_mapping` and `edge_mapping` map input ids to
+materialized ids. Multiple input edges can map to one output edge. The mappings
+use `-1` when no output item represents an input item.
+
+The mutable object is not an `UndirectedGraph`. Active ids stay stable and can
+have gaps after mutations. Materialization creates the dense
+`UndirectedGraph`.
+
 ### Region Adjacency Graphs
 
 Nifty:
@@ -2605,6 +2668,22 @@ Important differences and current scope:
 - Compact-foreground root sweeps and rails remain ordered on the optimized
   heap. Compact IDs avoid full-volume shortest-path fields; the public Dijkstra
   functions remain dense and exact FP64.
+
+### Skeleton graph postprocessing
+
+`remove_ticks(vertices, edges, tick_length, radii=None)` removes short terminal
+branches from a skeleton graph. It compresses degree-2 paths, sums their
+physical lengths, and repeatedly removes the shortest terminal branch below
+the strict threshold.
+
+The mutable topology and length reduction run in the C++ contraction backend.
+The Python wrapper selects branches and compacts the output arrays. Distinct
+compressed paths between the same branch nodes remain separate, so cyclic and
+theta-shaped skeletons keep their degree semantics.
+
+Standalone paths and components that contain only a cycle remain unchanged.
+The result keeps the existing array contract: vertices are `float64`, edges are
+`int64`, and optional radii preserve their dtype.
 
 ### Blockwise skeletonization and exact stitching
 

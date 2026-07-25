@@ -93,6 +93,100 @@ def test_remove_ticks_empty_edges():
     assert len(out_edges) == 0
 
 
+def test_remove_ticks_rejects_duplicate_edges():
+    vertices = np.array([[0.0, 0.0], [1.0, 0.0]])
+    edges = np.array([[0, 1], [1, 0]], dtype=np.int64)
+
+    with pytest.raises(ValueError, match="duplicate undirected edges"):
+        bic.skeleton.remove_ticks(vertices, edges, tick_length=1.0)
+
+
+def test_remove_ticks_prunes_spurs_at_two_branch_points():
+    vertices = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+            [1.0, 1.0],
+            [3.0, 1.0],
+        ]
+    )
+    edges = np.array(
+        [[0, 1], [1, 2], [2, 3], [3, 4], [1, 5], [3, 6]],
+        dtype=np.int64,
+    )
+
+    out_vertices, out_edges, _ = bic.skeleton.remove_ticks(
+        vertices,
+        edges,
+        tick_length=1.5,
+    )
+
+    assert len(out_vertices) == 5
+    assert len(out_edges) == 4
+
+
+def test_remove_ticks_keeps_pure_cycle():
+    vertices = np.array(
+        [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]
+    )
+    edges = np.array([[0, 1], [1, 2], [2, 3], [3, 0]], dtype=np.int64)
+
+    out_vertices, out_edges, _ = bic.skeleton.remove_ticks(
+        vertices,
+        edges,
+        tick_length=100.0,
+    )
+
+    np.testing.assert_array_equal(out_vertices, vertices)
+    np.testing.assert_array_equal(out_edges, edges)
+
+
+def test_remove_ticks_preserves_parallel_paths_while_pruning_spur():
+    vertices = np.array(
+        [
+            [0.0, 0.0],
+            [4.0, 0.0],
+            [2.0, 1.0],
+            [2.0, 0.0],
+            [2.0, -1.0],
+            [0.0, 0.5],
+        ]
+    )
+    edges = np.array(
+        [[0, 2], [2, 1], [0, 3], [3, 1], [0, 4], [4, 1], [0, 5]],
+        dtype=np.int64,
+    )
+
+    out_vertices, out_edges, _ = bic.skeleton.remove_ticks(
+        vertices,
+        edges,
+        tick_length=1.0,
+    )
+
+    assert len(out_vertices) == 5
+    assert len(out_edges) == 6
+
+
+def test_remove_ticks_preserves_radii_dtype():
+    vertices = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 0.5], [2.0, 0.0]])
+    edges = np.array([[0, 1], [1, 2], [1, 3]], dtype=np.int64)
+    radii = np.arange(4, dtype=np.float32)
+
+    out_vertices, out_edges, out_radii = bic.skeleton.remove_ticks(
+        vertices,
+        edges,
+        tick_length=1.0,
+        radii=radii,
+    )
+
+    assert len(out_vertices) == 3
+    assert len(out_edges) == 2
+    assert out_radii.dtype == np.float32
+
+
 def test_join_close_components_links_collinear_endpoints():
     # Two collinear fragments along x with a gap of 2 between node 1 and node 2.
     vertices = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 3.0], [0.0, 0.0, 4.0]])

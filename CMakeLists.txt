@@ -18,6 +18,7 @@ nanobind_add_module(_core
     src/bindings/filters.cxx
     src/bindings/flow.cxx
     src/bindings/graph.cxx
+    src/bindings/graph_contraction.cxx
     src/bindings/ground_truth.cxx
     src/bindings/label_multiset.cxx
     src/bindings/mesh.cxx

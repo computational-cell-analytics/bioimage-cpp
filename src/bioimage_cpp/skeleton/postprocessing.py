@@ -8,11 +8,9 @@ the remaining arm(s) are either separated, or for short dead-ends (spurs), prune
 
 from __future__ import annotations
 
-from collections import defaultdict
-
 import numpy as np
 
-from ..graph import connected_components
+from ..graph import ContractionGraph, UndirectedGraph, connected_components
 from ..utils import UnionFind
 from ._graph import skeleton_to_graph
 
@@ -211,6 +209,30 @@ def _adjacency(num_nodes, edges):
     return indptr, dst, eid, degrees
 
 
+def _nodes_in_noncycle_components(indptr, dst, degrees):
+    eligible = np.zeros(len(degrees), dtype=bool)
+    visited = np.zeros(len(degrees), dtype=bool)
+    for start in range(len(degrees)):
+        if visited[start]:
+            continue
+        component = []
+        stack = [start]
+        visited[start] = True
+        has_critical_node = False
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            has_critical_node |= degrees[node] != 2
+            for index in range(indptr[node], indptr[node + 1]):
+                neighbor = int(dst[index])
+                if not visited[neighbor]:
+                    visited[neighbor] = True
+                    stack.append(neighbor)
+        if has_critical_node:
+            eligible[component] = True
+    return eligible
+
+
 def remove_ticks(vertices, edges, tick_length, radii=None):
     """Prune short dead-end branches ("ticks") from a skeleton graph.
 
@@ -227,7 +249,8 @@ def remove_ticks(vertices, edges, tick_length, radii=None):
     vertices:
         Float array with shape ``(V, D)`` of skeleton vertex coordinates.
     edges:
-        Integer array with shape ``(E, 2)`` indexing ``vertices``.
+        Integer array with shape ``(E, 2)`` indexing ``vertices``. Self-edges
+        and duplicate undirected edges are not supported.
     tick_length:
         Maximum branch length (physical) that may be pruned.
     radii:
@@ -240,75 +263,70 @@ def remove_ticks(vertices, edges, tick_length, radii=None):
         ``None`` when no input radii were given.
     """
     vertices = np.asarray(vertices, dtype=np.float64)
-    edges = np.asarray(edges, dtype=np.int64)
+    if vertices.ndim != 2:
+        raise ValueError(f"vertices must be a 2D array, got ndim={vertices.ndim}")
+    raw_edges = np.asarray(edges)
+    if not np.issubdtype(raw_edges.dtype, np.integer):
+        raise TypeError(f"edges must have an integer dtype, got dtype={raw_edges.dtype}")
+    if raw_edges.ndim != 2 or raw_edges.shape[1] != 2:
+        raise ValueError(f"edges must have shape (E, 2), got shape={raw_edges.shape}")
+    if np.issubdtype(raw_edges.dtype, np.signedinteger) and np.any(raw_edges < 0):
+        raise ValueError("edges must not contain negative node ids")
+    edges_u64 = np.ascontiguousarray(raw_edges, dtype=np.uint64)
     num_nodes = len(vertices)
+    if edges_u64.size and int(edges_u64.max()) >= num_nodes:
+        raise IndexError(
+            f"edge endpoint must be smaller than len(vertices)={num_nodes}"
+        )
+    if radii is not None and len(radii) != num_nodes:
+        raise ValueError(
+            f"radii length must be {num_nodes}, got length={len(radii)}"
+        )
+    edges = edges_u64.astype(np.int64, copy=False)
     if len(edges) == 0:
         return vertices, edges.copy(), radii
 
-    indptr, dst, eid, degrees = _adjacency(num_nodes, edges)
+    graph = UndirectedGraph.from_edges(num_nodes, edges_u64)
+    if graph.number_of_edges != len(edges):
+        raise ValueError("edges must not contain duplicate undirected edges")
 
-    # Distance supergraph: sid -> [end_a, end_b, length, edge_ids].
-    supers = {}
-    incident = defaultdict(set)
-    edge_used = np.zeros(len(edges), dtype=bool)
-    sid = 0
-    for node in map(int, np.where(degrees != 2)[0]):
-        for k in range(indptr[node], indptr[node + 1]):
-            if edge_used[eid[k]]:
-                continue
-            prev, cur = node, int(dst[k])
-            path = [int(eid[k])]
-            length = float(np.linalg.norm(vertices[cur] - vertices[node]))
-            while degrees[cur] == 2:
-                s, e = indptr[cur], indptr[cur + 1]
-                nbrs, eids = dst[s:e], eid[s:e]
-                pick = 0 if int(nbrs[0]) != prev else 1
-                path.append(int(eids[pick]))
-                nxt = int(nbrs[pick])
-                length += float(np.linalg.norm(vertices[nxt] - vertices[cur]))
-                prev, cur = cur, nxt
-            for pe in path:
-                edge_used[pe] = True
-            supers[sid] = [node, cur, length, path]
-            incident[node].add(sid)
-            incident[cur].add(sid)
-            sid += 1
+    indptr, dst, _, degrees = _adjacency(num_nodes, edges)
+    lengths = np.linalg.norm(
+        vertices[edges[:, 1]] - vertices[edges[:, 0]],
+        axis=1,
+    )
+    work = ContractionGraph(graph, parallel_edges="keep")
+    work.add_edge_values("length", lengths, reduction="sum")
 
-    dropped = set()
+    eligible = _nodes_in_noncycle_components(indptr, dst, degrees)
+    for node in np.where((degrees == 2) & eligible)[0]:
+        node = int(node)
+        if work.is_node_active(node) and work.degree(node) == 2:
+            work.suppress_node(node)
+
+    threshold = float(tick_length)
     while True:
-        best, best_len = None, tick_length
-        for s, (a, b, length, _) in supers.items():
-            terminal_a, terminal_b = len(incident[a]) == 1, len(incident[b]) == 1
-            if (terminal_a ^ terminal_b) and length < best_len:
-                best, best_len = s, length
+        edge_ids, active_lengths = work.active_edge_values("length")
+        best = None
+        for edge, length in zip(edge_ids, active_lengths, strict=True):
+            edge = int(edge)
+            length = float(length)
+            a, b = work.uv(edge)
+            terminal_a = work.degree(a) == 1
+            terminal_b = work.degree(b) == 1
+            if terminal_a ^ terminal_b and length < threshold:
+                candidate = (length, edge, a, b)
+                if best is None or candidate[:2] < best[:2]:
+                    best = candidate
         if best is None:
             break
-        a, b, length, path = supers.pop(best)
-        incident[a].discard(best)
-        incident[b].discard(best)
-        dropped.update(path)
+        _, edge, a, b = best
+        work.erase_edge(edge)
         for node in (a, b):
-            if len(incident[node]) == 2:
-                s1, s2 = incident[node]
-                a1, b1, l1, p1 = supers.pop(s1)
-                a2, b2, l2, p2 = supers.pop(s2)
-                far1 = b1 if a1 == node else a1
-                far2 = b2 if a2 == node else a2
-                for x in (far1, far2, node):
-                    incident[x].discard(s1)
-                    incident[x].discard(s2)
-                supers[sid] = [far1, far2, l1 + l2, p1 + p2]
-                incident[far1].add(sid)
-                incident[far2].add(sid)
-                sid += 1
+            if work.is_node_active(node) and work.degree(node) == 2:
+                work.suppress_node(node)
 
-    if dropped:
-        keep = np.ones(len(edges), dtype=bool)
-        keep[list(dropped)] = False
-        edges = edges[keep]
-    else:
-        edges = edges.copy()
-
+    edges = edges[work.materialize().edge_mapping >= 0]
     vertices, edges, radii = _compact(vertices, edges, radii)
     return vertices, edges, radii
 
