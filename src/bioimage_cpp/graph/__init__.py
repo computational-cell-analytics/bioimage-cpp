@@ -267,6 +267,10 @@ class ContractionGraph:
     def degree(self, node: int) -> int:
         return int(self._core.degree(int(node)))
 
+    def can_suppress_node(self, node: int) -> bool:
+        """Return whether :meth:`suppress_node` accepts this node."""
+        return bool(self._core.can_suppress_node(int(node)))
+
     def is_node_active(self, node: int) -> bool:
         return bool(self._core.is_node_active(int(node)))
 

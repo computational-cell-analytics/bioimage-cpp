@@ -1,3 +1,5 @@
+import builtins
+
 import numpy as np
 import pytest
 
@@ -170,6 +172,31 @@ def test_remove_ticks_preserves_parallel_paths_while_pruning_spur():
     assert len(out_edges) == 6
 
 
+def test_remove_ticks_preserves_two_parallel_paths_while_pruning_spur():
+    vertices = np.array(
+        [
+            [0.0, 0.0],
+            [4.0, 0.0],
+            [2.0, 1.0],
+            [2.0, -1.0],
+            [0.0, 0.5],
+        ]
+    )
+    edges = np.array(
+        [[0, 2], [2, 1], [0, 3], [3, 1], [0, 4]],
+        dtype=np.int64,
+    )
+
+    out_vertices, out_edges, _ = bic.skeleton.remove_ticks(
+        vertices,
+        edges,
+        tick_length=1.0,
+    )
+
+    assert len(out_vertices) == 4
+    assert len(out_edges) == 4
+
+
 def test_remove_ticks_preserves_radii_dtype():
     vertices = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 0.5], [2.0, 0.0]])
     edges = np.array([[0, 1], [1, 2], [1, 3]], dtype=np.int64)
@@ -226,6 +253,24 @@ def test_join_close_components_skips_same_component():
     assert len(out_edges) == 2
 
 
+def test_join_close_components_reports_missing_scipy(monkeypatch):
+    original_import = builtins.__import__
+
+    def import_without_scipy(name, *args, **kwargs):
+        if name == "scipy.spatial":
+            raise ModuleNotFoundError("No module named 'scipy'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_scipy)
+
+    with pytest.raises(ImportError, match="requires scipy"):
+        bic.skeleton.join_close_components(
+            np.array([[0.0, 0.0], [1.0, 0.0]]),
+            np.array([[0, 1]], dtype=np.int64),
+            dist=1.0,
+        )
+
+
 def test_clean_graph_splits_crossing():
     vertices = np.array(
         [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]],
@@ -241,6 +286,39 @@ def test_clean_graph_splits_crossing():
 
     assert _component_count(out_vertices, out_edges) == 2
     assert len(out_radii) == len(out_vertices)
+
+
+def test_clean_graph_cuts_degree3_junction_edge():
+    vertices = np.array(
+        [[0.0, 0.0], [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, 2.0]]
+    )
+    edges = np.array([[0, 1], [0, 2], [0, 3], [3, 4]], dtype=np.int64)
+
+    out_vertices, out_edges, _ = bic.skeleton.clean_filament_graph(
+        vertices,
+        edges,
+        direction_span=1,
+    )
+
+    np.testing.assert_array_equal(out_vertices, vertices)
+    np.testing.assert_array_equal(out_edges, [[0, 1], [0, 2], [3, 4]])
+    assert _component_count(out_vertices, out_edges) == 2
+
+
+def test_clean_graph_removes_one_edge_degree3_arm():
+    vertices = np.array(
+        [[0.0, 0.0], [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]]
+    )
+    edges = np.array([[0, 1], [0, 2], [0, 3]], dtype=np.int64)
+
+    out_vertices, out_edges, _ = bic.skeleton.clean_filament_graph(
+        vertices,
+        edges,
+        direction_span=1,
+    )
+
+    np.testing.assert_array_equal(out_vertices, vertices[:3])
+    np.testing.assert_array_equal(out_edges, [[0, 1], [0, 2]])
 
 
 def test_draw_instances_labels_edge():

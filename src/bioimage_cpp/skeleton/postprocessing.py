@@ -1,9 +1,7 @@
 """Post-processing for skeleton graphs.
 
-Resolve junction nodes so each filament becomes its own connected component.
-Degree-3 and degree-4 nodes are split or pruned based on the angles between their
-incident edges: the straightest pair is kept as the through-going filament and
-the remaining arm(s) are either separated, or for short dead-ends (spurs), pruned.
+Cut degree-3 branches and split degree-4 crossings based on the angles between
+their incident edges. Short dead-end branches can also be pruned by length.
 """
 
 from __future__ import annotations
@@ -92,14 +90,17 @@ def clean_filament_graph(
     min_join_angle: float = 175.0,
     save_intermediates: list | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """Split skeleton junctions so each filament is its own component.
+    """Clean a skeleton graph by cutting branches and splitting crossings.
 
     Postprocessing steps, in order:
 
     1. If ``tick_length > 0``, prune dead-end branches shorter than it via
        :func:`remove_ticks`.
-    2. Split each degree-3 junction, separating the odd arm when it diverges
-       from the through pair by at least ``min_branch_angle``.
+    2. At each degree-3 junction, identify the straightest pair of arms. If the
+       remaining arm diverges by at least ``min_branch_angle``, remove its edge
+       adjacent to the junction. This cuts the arm from the through-going
+       filament and removes its first segment. A one-edge arm is removed
+       completely.
     3. Split each degree-4 crossing, separating its two through pairs when they
        are collinear to within ``min_through_angle``.
     4. If ``join_dist > 0``, join collinear endpoints across gaps up to
@@ -118,8 +119,9 @@ def clean_filament_graph(
     min_through_angle:
         Minimum through-pair angle (degrees) for a degree-4 crossing to split.
     min_branch_angle:
-        Minimum angle (degrees) between a degree-3 node's odd arm and its
-        through pair for the odd arm to be separated.
+        Minimum angle in degrees between a degree-3 node's odd arm and its
+        through pair. When the angle meets this threshold, the edge adjacent
+        to the junction on the odd arm is removed.
     tick_length:
         If > 0, prune dead-end branches shorter than this (physical) distance.
     join_dist:
@@ -153,7 +155,7 @@ def clean_filament_graph(
         edges = edges.copy()
     _snapshot("ticks")
     graph = skeleton_to_graph(vertices, edges)
-    degrees = np.bincount(edges.reshape(-1), minlength=len(vertices))
+    degrees = graph.node_degrees()
 
     splits, prune_edges = [], set()
     for v in np.where(degrees == 3)[0]:
@@ -301,7 +303,7 @@ def remove_ticks(vertices, edges, tick_length, radii=None):
     eligible = _nodes_in_noncycle_components(indptr, dst, degrees)
     for node in np.where((degrees == 2) & eligible)[0]:
         node = int(node)
-        if work.is_node_active(node) and work.degree(node) == 2:
+        if work.can_suppress_node(node):
             work.suppress_node(node)
 
     threshold = float(tick_length)
@@ -323,7 +325,7 @@ def remove_ticks(vertices, edges, tick_length, radii=None):
         _, edge, a, b = best
         work.erase_edge(edge)
         for node in (a, b):
-            if work.is_node_active(node) and work.degree(node) == 2:
+            if work.can_suppress_node(node):
                 work.suppress_node(node)
 
     edges = edges[work.materialize().edge_mapping >= 0]
@@ -378,7 +380,12 @@ def join_close_components(vertices, edges, dist, *, min_join_angle=175.0,
     vertices, edges, radii:
         ``vertices`` and ``radii`` unchanged; ``edges`` has the join edges added.
     """
-    from scipy.spatial import cKDTree
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError as error:
+        raise ImportError(
+            "join_close_components requires scipy; install scipy to use this function"
+        ) from error
 
     vertices = np.asarray(vertices, dtype=np.float64)
     edges = np.asarray(edges, dtype=np.int64)
@@ -450,7 +457,8 @@ def draw_instances(vertices, edges, labels, shape, radius=1):
         Integer array with shape ``(E, 2)`` indexing ``vertices``.
     labels:
         Per-vertex integer labels, e.g. from
-        :func:`bioimage_cpp.graph.connected_components`.
+        :func:`bioimage_cpp.graph.connected_components`. Both endpoints of
+        each edge should have the same label.
     shape:
         Output volume shape ``(Z, Y, X)``.
     radius:

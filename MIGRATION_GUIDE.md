@@ -460,6 +460,8 @@ Common method/property mapping:
 | `extractSubgraphFromNodes` | `extract_subgraph_from_nodes` |
 | `edgesFromNodeList` | `edges_from_node_list` |
 
+`node_degrees()` returns the degree of every node as a `uint64` array.
+
 ### Mutable Graph Contractions
 
 `ContractionGraph` supports custom graph postprocessing with stable ids and
@@ -501,6 +503,10 @@ Node values reduce when an edge contraction merges two nodes. Edge values
 reduce when parallel edges merge. The contracted edge becomes internal and has
 no output value. `suppress_node` removes a degree-2 node and reduces its two
 incident edge values into the replacement edge.
+
+Use `can_suppress_node(node)` before suppression when the mutable graph can
+contain parallel edges. The method also rejects a suppression that would create
+a self-edge.
 
 The input must be a simple `UndirectedGraph`. Use
 `parallel_edges="keep"` to keep parallel edges that mutations create:

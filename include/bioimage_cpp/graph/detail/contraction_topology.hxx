@@ -149,6 +149,17 @@ public:
         return adjacency_[static_cast<std::size_t>(node)].size();
     }
 
+    [[nodiscard]] bool can_suppress_node(const NodeId node) const {
+        validate_node_id(node);
+        if (!nodes_active_[static_cast<std::size_t>(node)]) {
+            return false;
+        }
+        const auto &incident = adjacency_[static_cast<std::size_t>(node)];
+        return incident.size() == 2 &&
+            incident[0].edge != incident[1].edge &&
+            incident[0].node != incident[1].node;
+    }
+
     [[nodiscard]] const std::vector<ContractionAdjacency> &node_adjacency(
         const NodeId node
     ) const {

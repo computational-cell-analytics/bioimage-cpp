@@ -246,8 +246,11 @@ def test_keep_parallel_edges_fold_only_in_materialized_snapshot(
 
 def test_keep_parallel_edges_rejects_self_edge_from_suppression():
     work = bic.graph.ContractionGraph(_triangle(), parallel_edges="keep")
+    assert work.can_suppress_node(0)
     work.suppress_node(0)
 
+    assert not work.can_suppress_node(0)
+    assert not work.can_suppress_node(1)
     with pytest.raises(ValueError, match="self edge"):
         work.suppress_node(1)
 

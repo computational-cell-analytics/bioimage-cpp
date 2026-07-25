@@ -166,6 +166,16 @@ public:
         );
     }
 
+    [[nodiscard]] std::vector<EdgeId> node_degrees() const {
+        ensure_adjacency_built();
+        std::vector<EdgeId> result(static_cast<std::size_t>(number_of_nodes_));
+        for (NodeId node = 0; node < number_of_nodes_; ++node) {
+            const auto index = static_cast<std::size_t>(node);
+            result[index] = adjacency_offsets_[index + 1] - adjacency_offsets_[index];
+        }
+        return result;
+    }
+
     virtual EdgeId insert_edge(const NodeId u, const NodeId v) {
         validate_node(u);
         validate_node(v);

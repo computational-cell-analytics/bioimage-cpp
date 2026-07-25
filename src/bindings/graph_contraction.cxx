@@ -243,6 +243,11 @@ void bind_graph_contraction(nb::module_ &m) {
             nb::arg("node")
         )
         .def("degree", &ContractionGraph::degree, nb::arg("node"))
+        .def(
+            "can_suppress_node",
+            &ContractionGraph::can_suppress_node,
+            nb::arg("node")
+        )
         .def("is_node_active", &ContractionGraph::node_active, nb::arg("node"))
         .def("is_edge_active", &ContractionGraph::edge_active, nb::arg("edge"))
         .def(
