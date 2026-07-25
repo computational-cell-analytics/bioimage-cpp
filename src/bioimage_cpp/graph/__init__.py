@@ -2,8 +2,9 @@
 
 Top-level surface:
 
-- Graph structures: :class:`UndirectedGraph`, :class:`GridGraph2D`,
-  :class:`GridGraph3D`, :class:`RegionAdjacencyGraph`.
+- Graph structures: :class:`UndirectedGraph`, :class:`ContractionGraph`,
+  :class:`GridGraph2D`, :class:`GridGraph3D`,
+  :class:`RegionAdjacencyGraph`.
 - Constructors: :func:`undirected_graph`, :func:`grid_graph`,
   :func:`region_adjacency_graph`.
 - Algorithms: :func:`connected_components`, :func:`breadth_first_search`,
@@ -40,6 +41,8 @@ no-op on an already-built graph.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from .. import _core
@@ -54,6 +57,7 @@ from ._shared import (
     _as_uv_array,
     _normalize_labels,
     _normalize_number_of_threads,
+    _resolve_weight_dtype,
 )
 
 
@@ -118,6 +122,257 @@ class UndirectedGraph(_core.UndirectedGraph):
         number_of_edges = int(serialization[1])
         uvs = serialization[2:].reshape(number_of_edges, 2)
         return cls.from_edges(number_of_nodes, uvs)
+
+
+@dataclass(frozen=True)
+class ContractionResult:
+    """Materialized graph and values from a :class:`ContractionGraph`.
+
+    Rows in each node or edge value array match the corresponding ids in
+    ``graph``. ``node_mapping`` and ``edge_mapping`` map ids from the input
+    graph to these dense ids. Multiple input ids can map to one output id. An
+    entry is ``-1`` when no materialized item represents the input item.
+    """
+
+    graph: UndirectedGraph
+    node_values: dict[str, np.ndarray]
+    edge_values: dict[str, np.ndarray]
+    node_mapping: np.ndarray
+    edge_mapping: np.ndarray
+
+
+_CONTRACTION_REDUCTIONS = {
+    "sum": 0,
+    "mean": 1,
+    "min": 2,
+    "max": 3,
+}
+
+_CONTRACTION_PARALLEL_EDGES = {
+    "merge": 0,
+    "keep": 1,
+}
+
+
+def _contraction_values(values, name: str, expected_items: int) -> np.ndarray:
+    array = _resolve_weight_dtype(values, name)
+    if array.ndim == 0:
+        raise ValueError(f"{name} must have at least one dimension")
+    if array.shape[0] != expected_items:
+        raise ValueError(
+            f"{name}.shape[0] must be {expected_items}, got {array.shape[0]}"
+        )
+    return np.ascontiguousarray(array)
+
+
+def _contraction_reduction(reduction: str) -> int:
+    try:
+        return _CONTRACTION_REDUCTIONS[reduction]
+    except KeyError as error:
+        supported = ", ".join(_CONTRACTION_REDUCTIONS)
+        raise ValueError(
+            f"reduction must be one of ({supported}), got {reduction!r}"
+        ) from error
+
+
+def _contraction_parallel_edges(parallel_edges: str) -> int:
+    try:
+        return _CONTRACTION_PARALLEL_EDGES[parallel_edges]
+    except KeyError as error:
+        supported = ", ".join(_CONTRACTION_PARALLEL_EDGES)
+        raise ValueError(
+            f"parallel_edges must be one of ({supported}), got {parallel_edges!r}"
+        ) from error
+
+
+class ContractionGraph:
+    """Mutable graph for edge contractions and value reduction.
+
+    The graph copies the input topology. Node and edge ids stay stable while
+    they are active. Mutations can leave gaps in the id range. The input graph
+    must be simple.
+
+    Register value maps before the first mutation. A map must have shape
+    ``(number_of_items, ...)`` and a floating dtype. ``float32`` and
+    ``float64`` are preserved. The reduction is component-wise:
+
+    - ``"sum"`` adds represented values.
+    - ``"mean"`` computes the mean over represented input items.
+    - ``"min"`` and ``"max"`` select the extrema.
+
+    Node maps reduce when an edge contraction merges its endpoints. Edge maps
+    reduce when two surviving edges are folded into one. The contracted edge
+    has no surviving target, so its value is discarded.
+
+    ``parallel_edges="merge"`` folds parallel edges during each mutation.
+    ``parallel_edges="keep"`` keeps them separate in the mutable graph.
+    :meth:`materialize` always creates a simple graph and folds remaining
+    parallel edges only in the returned snapshot.
+
+    This class is not thread-safe.
+    """
+
+    def __init__(
+        self,
+        graph: UndirectedGraph,
+        *,
+        parallel_edges: str = "merge",
+    ):
+        parallel_edges_code = _contraction_parallel_edges(parallel_edges)
+        self._core = _core._ContractionGraph(graph, parallel_edges_code)
+        self._original_number_of_nodes = int(graph.number_of_nodes)
+        self._original_number_of_edges = int(graph.number_of_edges)
+        self._parallel_edges = parallel_edges
+        self._mutation_started = False
+
+    @property
+    def parallel_edges(self) -> str:
+        """Policy for parallel edges created by mutations."""
+        return self._parallel_edges
+
+    @property
+    def number_of_nodes(self) -> int:
+        """Number of active nodes."""
+        return int(self._core.number_of_nodes)
+
+    @property
+    def number_of_edges(self) -> int:
+        """Number of active edges."""
+        return int(self._core.number_of_edges)
+
+    def nodes(self) -> np.ndarray:
+        """Return active stable node ids in ascending order."""
+        return np.asarray(self._core.nodes(), dtype=np.uint64)
+
+    def edges(self) -> np.ndarray:
+        """Return active stable edge ids in ascending order."""
+        return np.asarray(self._core.edges(), dtype=np.uint64)
+
+    def uv(self, edge: int) -> tuple[int, int]:
+        u, v = self._core.uv(int(edge))
+        return int(u), int(v)
+
+    def find_edge(self, u: int, v: int) -> int:
+        """Return the smallest matching active edge id, or ``-1``."""
+        return int(self._core.find_edge(int(u), int(v)))
+
+    def find_edges(self, u: int, v: int) -> np.ndarray:
+        """Return all matching active edge ids in ascending order."""
+        return np.asarray(self._core.find_edges(int(u), int(v)), dtype=np.uint64)
+
+    def node_adjacency(self, node: int) -> np.ndarray:
+        """Return ``(neighbor, edge)`` rows for an active node."""
+        return self._core.node_adjacency(int(node))
+
+    def degree(self, node: int) -> int:
+        return int(self._core.degree(int(node)))
+
+    def is_node_active(self, node: int) -> bool:
+        return bool(self._core.is_node_active(int(node)))
+
+    def is_edge_active(self, edge: int) -> bool:
+        return bool(self._core.is_edge_active(int(edge)))
+
+    def representative(self, original_node: int) -> int:
+        """Return the current representative of an input node."""
+        return int(self._core.representative(int(original_node)))
+
+    def add_node_values(self, name: str, values, *, reduction: str) -> None:
+        """Register a node value map before the first mutation."""
+        if self._mutation_started:
+            raise ValueError(
+                "value maps must be registered before the first graph mutation"
+            )
+        array = _contraction_values(
+            values,
+            name,
+            self._original_number_of_nodes,
+        )
+        code = _contraction_reduction(reduction)
+        getattr(self._core, f"_add_node_values_{array.dtype.name}")(
+            str(name), array, code
+        )
+
+    def add_edge_values(self, name: str, values, *, reduction: str) -> None:
+        """Register an edge value map before the first mutation."""
+        if self._mutation_started:
+            raise ValueError(
+                "value maps must be registered before the first graph mutation"
+            )
+        array = _contraction_values(
+            values,
+            name,
+            self._original_number_of_edges,
+        )
+        code = _contraction_reduction(reduction)
+        getattr(self._core, f"_add_edge_values_{array.dtype.name}")(
+            str(name), array, code
+        )
+
+    def contract_edge(self, edge: int, *, keep_node: int | None = None) -> int:
+        """Contract an active edge and return the retained node id."""
+        keep = None if keep_node is None else int(keep_node)
+        result = int(self._core.contract_edge(int(edge), keep))
+        self._mutation_started = True
+        return result
+
+    def erase_edge(self, edge: int) -> None:
+        """Erase an active edge without merging its endpoints."""
+        self._core.erase_edge(int(edge))
+        self._mutation_started = True
+
+    def suppress_node(self, node: int) -> int:
+        """Suppress a degree-2 node and return the replacement edge id.
+
+        The operation removes the node and its two incident edges. It connects
+        the two neighbors and reduces both edge value rows into the replacement
+        edge. The suppressed node value has no target and is discarded.
+        """
+        result = int(self._core.suppress_node(int(node)))
+        self._mutation_started = True
+        return result
+
+    def node_value(self, name: str, node: int) -> np.ndarray:
+        """Return a copy of one active node value."""
+        return self._core.node_value(str(name), int(node))
+
+    def edge_value(self, name: str, edge: int) -> np.ndarray:
+        """Return a copy of one active edge value."""
+        return self._core.edge_value(str(name), int(edge))
+
+    def active_node_values(self, name: str) -> tuple[np.ndarray, np.ndarray]:
+        """Return active node ids and their value rows."""
+        return self._core.active_node_values(str(name))
+
+    def active_edge_values(self, name: str) -> tuple[np.ndarray, np.ndarray]:
+        """Return active edge ids and their value rows."""
+        return self._core.active_edge_values(str(name))
+
+    def materialize(self) -> ContractionResult:
+        """Create a dense graph and aligned copies of all registered values.
+
+        The output graph is simple. The snapshot folds active parallel edges
+        with each edge map's registered reduction.
+
+        Materialization does not change this contraction graph. The result
+        remains valid after later mutations.
+        """
+        (
+            number_of_nodes,
+            uvs,
+            node_values,
+            edge_values,
+            node_mapping,
+            edge_mapping,
+        ) = self._core.materialize()
+        graph = UndirectedGraph.from_unique_edges(int(number_of_nodes), uvs)
+        return ContractionResult(
+            graph=graph,
+            node_values=dict(node_values),
+            edge_values=dict(edge_values),
+            node_mapping=node_mapping,
+            edge_mapping=edge_mapping,
+        )
 
 
 def _normalize_projection_offsets(offsets, ndim: int) -> list[list[int]]:
@@ -678,6 +933,8 @@ from . import mutex_watershed  # noqa: E402
 
 
 __all__ = [
+    "ContractionGraph",
+    "ContractionResult",
     "GridGraph2D",
     "GridGraph3D",
     "RagCoordinates",

@@ -25,6 +25,7 @@ NB_MODULE(_core, m) {
     bioimage_cpp::bindings::bind_filters(m);
     bioimage_cpp::bindings::bind_flow(m);
     bioimage_cpp::bindings::bind_graph(m);
+    bioimage_cpp::bindings::bind_graph_contraction(m);
     bioimage_cpp::bindings::bind_ground_truth(m);
     bioimage_cpp::bindings::bind_label_multiset(m);
     bioimage_cpp::bindings::bind_mesh(m);
