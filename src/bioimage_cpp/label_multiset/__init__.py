@@ -11,7 +11,7 @@ This is a re-implementation of the label-multiset utilities from
 
 Storage layout (mirrors nifty):
 
-- ``offsets``         length ``n_spatial``: spatial position to byte offset into ``ids`` / ``counts``
+- ``offsets``         length ``n_spatial``: spatial position to element offset into ``ids`` / ``counts``
 - ``entry_offsets``   length ``n_spatial``: spatial position to unique-entry index
 - ``entry_sizes``     length ``n_unique``: number of ``(id, count)`` pairs per entry
 - ``ids``             length ``total_elems``: concatenated label ids (sorted within each entry)
@@ -28,15 +28,106 @@ import numpy as np
 
 from .. import _core
 from .._core import Blocking
+from .._validation import strict_integer_array
 
 _ID_DTYPE = np.dtype(np.uint64)
 _COUNT_DTYPE = np.dtype(np.uint32)
 _OFFSET_DTYPE = np.dtype(np.uint64)
 
 
+def _as_integer_metadata(values, name: str, dtype: np.dtype) -> np.ndarray:
+    untyped = np.asarray(values)
+    if untyped.size == 0 and untyped.ndim == 1:
+        return np.ascontiguousarray(untyped, dtype=dtype)
+    return strict_integer_array(
+        values,
+        name,
+        dtype=dtype,
+        ndim=1,
+        non_negative=True,
+    )
+
+
+def _validate_multiset_arrays(
+    argmax,
+    offsets,
+    entry_offsets,
+    entry_sizes,
+    ids,
+    counts,
+) -> tuple[np.ndarray, ...]:
+    arrays = (
+        _as_integer_metadata(argmax, "argmax", _ID_DTYPE),
+        _as_integer_metadata(offsets, "offsets", _OFFSET_DTYPE),
+        _as_integer_metadata(entry_offsets, "entry_offsets", _OFFSET_DTYPE),
+        _as_integer_metadata(entry_sizes, "entry_sizes", _OFFSET_DTYPE),
+        _as_integer_metadata(ids, "ids", _ID_DTYPE),
+        _as_integer_metadata(counts, "counts", _COUNT_DTYPE),
+    )
+    argmax_array, offset_array, entry_offset_array, size_array, id_array, count_array = arrays
+
+    if id_array.size != count_array.size:
+        raise ValueError(
+            "ids and counts must have the same length, got "
+            f"{id_array.size} and {count_array.size}"
+        )
+    n_spatial = offset_array.size
+    if argmax_array.size != n_spatial or entry_offset_array.size != n_spatial:
+        raise ValueError(
+            "argmax, offsets, and entry_offsets must have the same length, got "
+            f"{argmax_array.size}, {n_spatial}, and {entry_offset_array.size}"
+        )
+    if n_spatial == 0:
+        if size_array.size != 0 or id_array.size != 0:
+            raise ValueError(
+                "an empty LabelMultiset must have empty entry_sizes, ids, and counts"
+            )
+        return arrays
+    if size_array.size == 0:
+        raise ValueError(
+            "entry_sizes must not be empty when spatial entries are present"
+        )
+    if np.any(size_array == 0):
+        raise ValueError("entry_sizes must contain only positive values")
+    if np.any(entry_offset_array >= size_array.size):
+        raise ValueError(
+            "entry_offsets values must be less than the length of entry_sizes"
+        )
+    referenced = np.bincount(
+        entry_offset_array.astype(np.intp, copy=False),
+        minlength=size_array.size,
+    )
+    if np.any(referenced == 0):
+        raise ValueError("every entry_sizes element must be referenced by entry_offsets")
+    if np.any(offset_array > id_array.size):
+        raise ValueError("offsets values must not exceed the flat storage length")
+    selected_sizes = size_array[entry_offset_array.astype(np.intp, copy=False)]
+    remaining = id_array.size - offset_array
+    if np.any(selected_sizes > remaining):
+        raise ValueError("an entry range exceeds the flat storage length")
+    return arrays
+
+
+def _validated_multiset(multiset: "LabelMultiset") -> tuple[np.ndarray, ...]:
+    if not isinstance(multiset, LabelMultiset):
+        raise TypeError("multiset must be a LabelMultiset")
+    return _validate_multiset_arrays(
+        multiset.argmax,
+        multiset.offsets,
+        multiset.entry_offsets,
+        multiset.entry_sizes,
+        multiset.ids,
+        multiset.counts,
+    )
+
+
 @dataclass
 class LabelMultiset:
-    """A deduplicated label-histogram representation over a spatial grid."""
+    """A validated, deduplicated label histogram over a spatial grid.
+
+    Construction converts integer inputs to the storage dtypes. Native
+    operations validate the arrays again because the dataclass is mutable.
+    """
 
     argmax: np.ndarray  # shape (n_spatial,), dtype uint64
     offsets: np.ndarray  # shape (n_spatial,), dtype uint64
@@ -44,6 +135,23 @@ class LabelMultiset:
     entry_sizes: np.ndarray  # shape (n_unique,), dtype uint64
     ids: np.ndarray  # shape (total_elems,), dtype uint64
     counts: np.ndarray  # shape (total_elems,), dtype uint32
+
+    def __post_init__(self) -> None:
+        (
+            self.argmax,
+            self.offsets,
+            self.entry_offsets,
+            self.entry_sizes,
+            self.ids,
+            self.counts,
+        ) = _validate_multiset_arrays(
+            self.argmax,
+            self.offsets,
+            self.entry_offsets,
+            self.entry_sizes,
+            self.ids,
+            self.counts,
+        )
 
     @property
     def n_spatial(self) -> int:
@@ -117,14 +225,22 @@ def downsample_multiset(
     ``blocking`` must be defined over the same spatial extent as the input
     multiset (i.e. ``prod(blocking.roi_end) == multiset.n_spatial``).
     """
+    (
+        _,
+        offsets,
+        entry_offsets,
+        entry_sizes,
+        ids,
+        counts,
+    ) = _validated_multiset(multiset)
     argmax, new_offsets, new_entry_offsets, new_entry_sizes, new_ids, new_counts = (
         _core._downsample_multiset(
             blocking,
-            multiset.offsets,
-            multiset.entry_sizes,
-            multiset.entry_offsets,
-            multiset.ids,
-            multiset.counts,
+            offsets,
+            entry_sizes,
+            entry_offsets,
+            ids,
+            counts,
             restrict_set,
         )
     )
@@ -149,19 +265,23 @@ def read_subset(
 
     Returns the summed ``(ids, counts)``, sorted by id if ``argsort``.
     """
-    offsets = np.ascontiguousarray(offsets, dtype=_OFFSET_DTYPE)
-    sizes = np.ascontiguousarray(sizes, dtype=_OFFSET_DTYPE)
-    ids = np.ascontiguousarray(ids, dtype=_ID_DTYPE)
-    counts = np.ascontiguousarray(counts, dtype=_COUNT_DTYPE)
+    offsets = _as_integer_metadata(offsets, "offsets", _OFFSET_DTYPE)
+    sizes = _as_integer_metadata(sizes, "sizes", _OFFSET_DTYPE)
+    ids = _as_integer_metadata(ids, "ids", _ID_DTYPE)
+    counts = _as_integer_metadata(counts, "counts", _COUNT_DTYPE)
     return _core._read_subset(offsets, sizes, ids, counts, argsort)
 
 
-def _unique_offsets_of(multiset: "LabelMultiset") -> np.ndarray:
-    """For each unique entry of ``multiset``, return the byte offset into ids/counts."""
-    n = multiset.n_entries
+def _unique_offsets_of(
+    offsets: np.ndarray,
+    entry_offsets: np.ndarray,
+    n_entries: int,
+) -> np.ndarray:
+    """Return one element offset for each unique multiset entry."""
+    n = int(n_entries)
     out = np.empty(n, dtype=_OFFSET_DTYPE)
     for e in range(n):
-        out[e] = multiset.offsets[np.where(multiset.entry_offsets == e)[0][0]]
+        out[e] = offsets[np.flatnonzero(entry_offsets == e)[0]]
     return out
 
 
@@ -175,7 +295,7 @@ class MultisetMerger:
     Call :meth:`update` with subsequent batches; each call extends the
     internal storage with any genuinely new entries and rewrites the
     passed-in ``offsets`` array so each spatial position points at its
-    final deduplicated byte offset.
+    final deduplicated element offset.
     """
 
     def __init__(
@@ -185,8 +305,12 @@ class MultisetMerger:
         ids: np.ndarray,
         counts: np.ndarray,
     ) -> None:
-        unique_offsets = np.ascontiguousarray(unique_offsets, dtype=_OFFSET_DTYPE)
-        entry_sizes = np.ascontiguousarray(entry_sizes, dtype=_OFFSET_DTYPE)
+        unique_offsets = _as_integer_metadata(
+            unique_offsets, "unique_offsets", _OFFSET_DTYPE
+        )
+        entry_sizes = _as_integer_metadata(
+            entry_sizes, "entry_sizes", _OFFSET_DTYPE
+        )
         if unique_offsets.shape != entry_sizes.shape:
             raise ValueError(
                 "unique_offsets and entry_sizes must have the same length "
@@ -196,18 +320,21 @@ class MultisetMerger:
         self._impl = _core._MultisetMerger(
             unique_offsets,
             entry_sizes,
-            np.ascontiguousarray(ids, dtype=_ID_DTYPE),
-            np.ascontiguousarray(counts, dtype=_COUNT_DTYPE),
+            _as_integer_metadata(ids, "ids", _ID_DTYPE),
+            _as_integer_metadata(counts, "counts", _COUNT_DTYPE),
         )
 
     @classmethod
     def from_multiset(cls, multiset: "LabelMultiset") -> "MultisetMerger":
         """Build a merger seeded with the unique entries of ``multiset``."""
+        _, offsets, entry_offsets, entry_sizes, ids, counts = _validated_multiset(
+            multiset
+        )
         return cls(
-            _unique_offsets_of(multiset),
-            multiset.entry_sizes,
-            multiset.ids,
-            multiset.counts,
+            _unique_offsets_of(offsets, entry_offsets, entry_sizes.size),
+            entry_sizes,
+            ids,
+            counts,
         )
 
     def update(
@@ -222,15 +349,21 @@ class MultisetMerger:
 
         ``offsets`` is mutated in-place and also returned.
         """
-        if offsets.dtype != _OFFSET_DTYPE or not offsets.flags["C_CONTIGUOUS"]:
+        if (
+            not isinstance(offsets, np.ndarray)
+            or offsets.dtype != _OFFSET_DTYPE
+            or offsets.ndim != 1
+            or not offsets.flags["C_CONTIGUOUS"]
+            or not offsets.flags["WRITEABLE"]
+        ):
             raise TypeError(
-                "offsets must be a contiguous uint64 array (it is modified in place)"
+                "offsets must be a writable contiguous 1D uint64 array"
             )
         return self._impl.update(
-            np.ascontiguousarray(unique_offsets, dtype=_OFFSET_DTYPE),
-            np.ascontiguousarray(entry_sizes, dtype=_OFFSET_DTYPE),
-            np.ascontiguousarray(ids, dtype=_ID_DTYPE),
-            np.ascontiguousarray(counts, dtype=_COUNT_DTYPE),
+            _as_integer_metadata(unique_offsets, "unique_offsets", _OFFSET_DTYPE),
+            _as_integer_metadata(entry_sizes, "entry_sizes", _OFFSET_DTYPE),
+            _as_integer_metadata(ids, "ids", _ID_DTYPE),
+            _as_integer_metadata(counts, "counts", _COUNT_DTYPE),
             offsets,
         )
 

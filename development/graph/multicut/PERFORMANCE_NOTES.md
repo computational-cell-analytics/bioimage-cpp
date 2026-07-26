@@ -88,6 +88,30 @@ positive means nifty did. The only nonzero differences are KL/chained rows, and
 they are tiny relative to the objective scale. Fusion-move, greedy-additive,
 greedy-fixation, and decomposer match nifty energies on every benchmark row.
 
+The decomposer rows above are legacy measurements. The old bioimage-cpp
+configuration used `GreedyAdditiveMulticut` without a fallthrough solver, so
+it selected the documented greedy-additive fast path and did not run
+decomposition. The benchmark now supplies matching greedy-additive sub- and
+fallthrough solvers to both implementations, passes `number_of_threads`, and
+requires multiple non-singleton positive-cost components. Do not use the
+legacy decomposer runtimes for performance comparisons.
+
+### Corrected decomposer smoke benchmark
+
+The corrected benchmark ran on `A_small` on 2026-07-26. Each row used one
+repeat. Both implementations used greedy-additive sub- and fallthrough
+solvers. The benchmark verified that the graph had at least two non-singleton
+positive-cost components.
+
+| Threads | bic energy | nifty energy | bic runtime | nifty runtime |
+|---|---|---|---|---|
+| 1 | -76 914.5 | -76 914.5 | 0.469 s | 0.335 s |
+| 4 | -76 914.5 | -76 914.5 | 0.429 s | 0.378 s |
+
+These single-repeat rows confirm matched objective values and exercise the
+real decomposer path. They are smoke measurements, not stable performance
+estimates.
+
 ## Current read
 
 `KernighanLinMulticut` is the dominant runtime target. It is faster than nifty

@@ -92,7 +92,7 @@ def _as_edge_costs(edge_costs, graph) -> np.ndarray:
         raise ValueError("edge_costs must be a 1D array")
     if array.shape[0] != graph.number_of_edges:
         raise ValueError("edge_costs length must match graph number_of_edges")
-    return np.ascontiguousarray(array)
+    return _require_finite_weights(np.ascontiguousarray(array), "edge_costs")
 
 
 def _as_node_labels(labels, graph) -> np.ndarray:
@@ -117,6 +117,12 @@ def _as_1d_array(values, dtype, name: str, expected_size: int) -> np.ndarray:
     return np.ascontiguousarray(array)
 
 
+def _require_finite_weights(array: np.ndarray, name: str) -> np.ndarray:
+    if array.size and not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    return array
+
+
 def _dense_labels(labels) -> np.ndarray:
     labels = strict_integer_array(
         labels, "labels", dtype=np.uint64, non_negative=True
@@ -125,14 +131,12 @@ def _dense_labels(labels) -> np.ndarray:
     return np.ascontiguousarray(dense.astype(np.uint64, copy=False))
 
 
-def _subproblem_from_edges(number_of_nodes: int, nodes, uvs, edge_costs):
+def _subproblem_from_edges(nodes, uvs, edge_costs, global_to_local):
     # Local import to avoid a circular dependency with the multicut submodule
     # at module-load time (this helper is only called from the decomposer).
     from . import UndirectedGraph
 
-    local_ids = np.full(int(number_of_nodes), -1, dtype=np.int64)
-    local_ids[nodes] = np.arange(nodes.size, dtype=np.int64)
-    local_uvs = local_ids[np.asarray(uvs, dtype=np.uint64)]
+    local_uvs = global_to_local[np.asarray(uvs, dtype=np.uint64)]
     sub_graph = UndirectedGraph(int(nodes.size), int(len(edge_costs)))
     if local_uvs.size:
         sub_graph.insert_edges(np.ascontiguousarray(local_uvs.astype(np.uint64, copy=False)))

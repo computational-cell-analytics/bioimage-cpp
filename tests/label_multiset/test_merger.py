@@ -57,7 +57,7 @@ def test_merger_deduplicates_identical_entry():
 def test_merger_update_with_identical_entries_is_idempotent():
     # Building a merger from a multiset and feeding the same multiset back as
     # an update should leave ids/counts unchanged and rewrite spatial offsets
-    # to point at the original byte offsets.
+    # to point at the original element offsets.
     rng = np.random.default_rng(3)
     labels = rng.integers(0, 4, size=(4, 4), dtype=np.uint64)
     ms = multiset_from_labels(labels, (2, 2))

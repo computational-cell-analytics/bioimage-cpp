@@ -37,6 +37,7 @@ from .._shared import (
     _as_node_labels,
     _as_uv_array,
     _normalize_number_of_threads,
+    _require_finite_weights,
 )
 
 
@@ -151,13 +152,13 @@ from ..multicut import (
 class LiftedMulticutObjective:
     """Lifted multicut objective.
 
-    Stores a base graph + base edge costs together with an internal *lifted
+    Stores a base graph and finite base costs together with an internal *lifted
     graph* that is a superset of the base graph (base edges occupy ids
     ``0 .. base.number_of_edges - 1``; lifted edges follow). The energy of a
     node labeling is the sum of base + lifted edge weights across cut edges.
 
-    The lifted edges can be supplied either as explicit ``(uvs, costs)``
-    arrays, via a ``bfs_distance=k`` constructor argument that inserts a
+    All explicit costs must be finite. Lifted edges can be supplied as
+    ``(uvs, costs)`` arrays, via a ``bfs_distance=k`` argument that inserts a
     zero-weight lifted edge for every pair of nodes within ``k`` hops of each
     other in the base graph, or by calling :meth:`set_cost` after construction.
     """
@@ -237,11 +238,14 @@ class LiftedMulticutObjective:
                     f"lifted_uvs.shape[0]={uv_array.shape[0]}, "
                     f"lifted_costs.shape[0]={cost_array.shape[0]}"
                 )
+            cost_array = _require_finite_weights(
+                np.ascontiguousarray(cost_array), "lifted_costs"
+            )
             _add_lifted_edges(
                 lifted_graph,
                 weights_list,
                 uv_array,
-                np.ascontiguousarray(cost_array),
+                cost_array,
                 overwrite_existing=overwrite_existing,
             )
 
@@ -250,6 +254,7 @@ class LiftedMulticutObjective:
         self._n_base_edges = int(base_graph.number_of_edges)
         self._weights = np.ascontiguousarray(np.concatenate(weights_list)) \
             if len(weights_list) > 1 else weights_list[0]
+        _require_finite_weights(self._weights, "weights")
         if initial_labels is None:
             self._labels = np.arange(base_graph.number_of_nodes, dtype=np.uint64)
         else:
@@ -304,25 +309,34 @@ class LiftedMulticutObjective:
         previously inserted lifted edge), the weight is accumulated unless
         ``overwrite=True``.
         """
-        pre = int(self._lifted_graph.number_of_edges)
+        weight_value = float(weight)
+        if not np.isfinite(weight_value):
+            raise ValueError("weight must be finite")
+        edge = int(self._lifted_graph.find_edge(int(u), int(v)))
+        if edge >= 0:
+            new_value = (
+                weight_value if overwrite else float(self._weights[edge]) + weight_value
+            )
+            if not np.isfinite(new_value):
+                raise ValueError("accumulated weight must be finite")
+            self._weights[edge] = new_value
+            return edge, False
+
         edge = int(self._lifted_graph.insert_edge(int(u), int(v)))
-        if int(self._lifted_graph.number_of_edges) > pre:
+        if edge == int(self._weights.size):
             self._weights = np.concatenate(
-                [self._weights, np.asarray([float(weight)], dtype=np.float64)]
+                [self._weights, np.asarray([weight_value], dtype=np.float64)]
             )
             return edge, True
-        if overwrite:
-            self._weights[edge] = float(weight)
-        else:
-            self._weights[edge] = self._weights[edge] + float(weight)
-        return edge, False
+        raise RuntimeError("lifted graph insertion did not append a new edge")
 
     def energy(self, labels=None) -> float:
         label_array = (
             self._labels if labels is None else _as_node_labels(labels, self._base_graph)
         )
+        weights = _require_finite_weights(self._weights, "weights")
         return float(
-            _core._lifted_multicut_energy(self._lifted_graph, self._weights, label_array)
+            _core._lifted_multicut_energy(self._lifted_graph, weights, label_array)
         )
 
 
@@ -448,9 +462,10 @@ class LiftedGreedyAdditiveMulticut(LiftedMulticutSolver):
         self.sigma = float(sigma)
 
     def optimize(self, objective: LiftedMulticutObjective) -> np.ndarray:
+        weights = _require_finite_weights(objective.weights, "weights")
         labels = _core._lifted_multicut_greedy_additive(
             objective.lifted_graph,
-            objective.weights,
+            weights,
             objective.number_of_base_edges,
             self.weight_stop,
             self.node_num_stop,
@@ -491,6 +506,7 @@ class LiftedKernighanLinMulticut(LiftedMulticutSolver):
         self.epsilon = float(epsilon)
 
     def optimize(self, objective: LiftedMulticutObjective) -> np.ndarray:
+        weights = _require_finite_weights(objective.weights, "weights")
         initial_labels = objective.labels
         if np.array_equal(
             initial_labels,
@@ -498,7 +514,7 @@ class LiftedKernighanLinMulticut(LiftedMulticutSolver):
         ):
             initial_labels = _core._lifted_multicut_greedy_additive(
                 objective.lifted_graph,
-                objective.weights,
+                weights,
                 objective.number_of_base_edges,
                 0.0,
                 -1.0,
@@ -509,7 +525,7 @@ class LiftedKernighanLinMulticut(LiftedMulticutSolver):
         labels = _core._lifted_multicut_kernighan_lin(
             objective.graph,
             objective.lifted_graph,
-            objective.weights,
+            weights,
             objective.number_of_base_edges,
             initial_labels,
             self.number_of_outer_iterations,
@@ -595,9 +611,10 @@ class FusionMoveLiftedMulticut(LiftedMulticutSolver):
 
     def optimize(self, objective: LiftedMulticutObjective) -> np.ndarray:
         n_base = objective.number_of_base_edges
+        weights = _require_finite_weights(objective.weights, "weights")
         # The base costs back the proposal generators (the lifted weights
         # cannot drive base-graph contraction or watershed segmentation).
-        base_costs = np.ascontiguousarray(objective.weights[:n_base])
+        base_costs = np.ascontiguousarray(weights[:n_base])
         cpp_pgens = [
             self.proposal_generator._build_for_thread(
                 objective.graph, base_costs, slot
@@ -610,7 +627,7 @@ class FusionMoveLiftedMulticut(LiftedMulticutSolver):
         labels = _core._lifted_multicut_fusion_move(
             objective.graph,
             objective.lifted_graph,
-            objective.weights,
+            weights,
             n_base,
             objective.labels,
             cpp_pgens,

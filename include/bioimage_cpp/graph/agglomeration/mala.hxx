@@ -49,8 +49,8 @@ public:
           num_clusters_stop_(num_clusters_stop),
           num_edges_stop_(num_edges_stop),
           threshold_(threshold) {
-        if (num_bins_ == 0) {
-            throw std::invalid_argument("num_bins must be >= 1");
+        if (num_bins_ < 2) {
+            throw std::invalid_argument("num_bins must be >= 2");
         }
         if (!(bin_max_ > bin_min_)) {
             throw std::invalid_argument(

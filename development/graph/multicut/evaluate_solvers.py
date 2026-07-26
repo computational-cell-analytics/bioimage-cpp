@@ -61,7 +61,9 @@ def solver_configs():
         ),
         "decomposer": SolverConfig(
             make_bic_solver=lambda threads: bic.graph.multicut.MulticutDecomposer(
-                bic.graph.multicut.GreedyAdditiveMulticut()
+                bic.graph.multicut.GreedyAdditiveMulticut(),
+                fallthrough_solver=bic.graph.multicut.GreedyAdditiveMulticut(),
+                number_of_threads=threads,
             ),
             make_nifty_factory=lambda objective, threads: objective.multicutDecomposerFactory(
                 submodelFactory=objective.greedyAdditiveFactory(),
@@ -137,6 +139,17 @@ def evaluate(problem_name: str, solver_name: str, config: SolverConfig, args):
     import nifty.graph.opt.multicut as nmc
 
     bic_graph, nifty_graph, costs = load_problem(problem_name, timeout=args.timeout)
+    if solver_name == "decomposer":
+        component_labels = bic.graph.connected_components(
+            bic_graph,
+            edge_mask=costs > 0.0,
+        )
+        component_sizes = np.bincount(component_labels.astype(np.intp, copy=False))
+        if np.count_nonzero(component_sizes > 1) < 2:
+            raise ValueError(
+                "decomposer benchmark requires at least two non-singleton "
+                "positive-cost components"
+            )
     bic_energies = []
     nifty_energies = []
     bic_runtimes = []

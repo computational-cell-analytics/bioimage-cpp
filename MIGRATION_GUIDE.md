@@ -204,6 +204,7 @@ Notes:
   wrapper dispatches to a templated C++ instantiation per dtype; other
   floating dtypes are cast to `float32`. If the two arrays' dtypes do not
   match, both are promoted to `float64` rather than silently downcast.
+- Both weight arrays must contain only finite values.
 - Higher weights are processed first (in descending order) — the same
   convention affogato uses.
 - The implementation reuses the union-find and per-root mutex-set helpers
@@ -331,6 +332,7 @@ Notes:
 - All three weight arrays (`weights`, `mutex_weights`, `semantic_weights`)
   must have the same floating dtype, or all three are promoted to
   `float64`.
+- All three weight arrays must contain only finite values.
 - Output `labels` are dense `uint64` ids in `0 .. number_of_clusters - 1`
   (first-occurrence order, matching the regular graph mutex watershed —
   *not* the 1-based foreground labels produced by the grid variant).
@@ -946,7 +948,7 @@ Notes:
 - `edge_weights` must be 1D with length `graph.number_of_edges`. Supported
   dtypes are `float32` and `float64`; other floating dtypes are promoted to
   `float32` (matching nifty, whose Python binding is `float32`-only). Non-float
-  dtypes raise `TypeError`.
+  dtypes raise `TypeError`. All weights must be finite.
 - `seeds` must be 1D with length `graph.number_of_nodes`. Supported dtypes are
   `uint32`, `uint64`, `int32`, `int64`. The value `0` marks unlabeled nodes;
   non-zero ids are propagated along low-weight paths. Signed seed arrays must
@@ -1153,6 +1155,12 @@ Notes:
   `downsampleMultiset` returns only four of them and leaves the caller to
   reconstruct `entry_offsets` / `entry_sizes`; `bioimage-cpp` returns them
   directly so multi-level downsample chains compose without bookkeeping.
+- `offsets` and `unique_offsets` are element offsets into `ids` and `counts`.
+  They are not byte offsets.
+- Construction checks integer ranges and the complete flat-storage structure.
+  Native operations repeat the checks because `LabelMultiset` is mutable.
+- Stored entries must contain at least one `(id, count)` pair. A completely
+  empty top-level `LabelMultiset` is valid.
 - `multiset_from_labels(labels, block_shape)` builds the level-0 multiset
   from a `uint32` or `uint64` label volume in one call. There is no nifty
   equivalent.
@@ -1210,10 +1218,10 @@ energy = objective.energy(labels)
 - `graph` — an `UndirectedGraph` or `RegionAdjacencyGraph`. The constructor
   copies the topology, so further mutations on the input graph do not affect
   the objective.
-- `edge_costs` — 1D `float64` array of length `graph.number_of_edges`.
+- `edge_costs` — 1D array of finite values with length
+  `graph.number_of_edges`; compatible inputs are converted to `float64`.
 - `lifted_uvs` / `lifted_costs` — optional `(n_lifted, 2)` uint64 array and 1D
-  float64 array of equal length, listing the additional lifted edges and
-  their weights.
+  float64 array of equal length. Lifted costs must be finite.
 - `bfs_distance` — optional positive integer. Adds a zero-weight lifted edge
   for every pair of nodes within this many base-graph hops of each other
   (excluding nodes already connected by a base edge). Pairs with both
@@ -1394,10 +1402,11 @@ labels = bic.graph.multicut.GreedyAdditiveMulticut().optimize(objective)
 energy = objective.energy(labels)
 ```
 
-`MulticutObjective` accepts an `UndirectedGraph` or a `RegionAdjacencyGraph` and
-a 1D `edge_costs` array of length `graph.number_of_edges`. The objective owns
-the current best `labels`; `optimize` updates them in place and also returns
-the new array.
+`MulticutObjective` accepts an `UndirectedGraph` or a `RegionAdjacencyGraph`.
+It converts a 1D `edge_costs` array to `float64`. The array length must equal
+`graph.number_of_edges`, and all costs must be finite. The objective owns the
+current best `labels`; `optimize` updates them in place and also returns the
+new array.
 
 Available solvers:
 
@@ -1459,12 +1468,19 @@ labels = solver.optimize(objective)
 
 Notes:
 
-- `edge_costs` must be `float64` and 1D with length `graph.number_of_edges`.
+- `edge_costs` must be finite and 1D with length `graph.number_of_edges`.
 - Output labels are dense `uint64` ids in `0 .. number_of_clusters - 1`.
 - `MulticutObjective.energy(labels)` is the multicut energy used internally; it
   matches `nmc.multicutObjective(...).evalNodeLabels(labels)`.
 - `objective.reset_labels()` restores the per-node initial labeling, useful when
   re-running solvers from a clean state.
+- `number_of_threads=0` on `MulticutDecomposer` uses available hardware
+  concurrency. A positive value sets the maximum worker count.
+- `MulticutDecomposer` calls `sub_solver.clone()` for each non-singleton
+  component. Custom stateful solvers must return an equivalent solver with
+  independent mutable state. The default implementation uses `copy.deepcopy`.
+- Components can finish in any order. The decomposer applies labels in
+  component order, so scheduling does not change output labels.
 
 Intentional differences vs. nifty:
 
@@ -1615,6 +1631,9 @@ Differences from nifty:
   underlying loop is the same.
 - Both `float32` and `float64` inputs are accepted; computation runs in
   `float64` internally.
+- All indicators, weights, sizes, and node features that affect priorities
+  must contain finite values.
+- `MalaClusterPolicy.num_bins` must be an integer greater than or equal to `2`.
 - `MalaClusterPolicy.num_edges_stop` counts all active edges after each
   contraction. This includes the contracted edge and folded parallel edges.
   Earlier bioimage-cpp versions counted only folds and could stop too late on

@@ -7,6 +7,7 @@
 #include "bioimage_cpp/label_multiset/from_labels.hxx"
 #include "bioimage_cpp/label_multiset/merger.hxx"
 #include "bioimage_cpp/label_multiset/read_subset.hxx"
+#include "bioimage_cpp/label_multiset/validation.hxx"
 
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/pair.h>
@@ -77,12 +78,7 @@ bind_read_subset_flat(OffsetArray offsets, OffsetArray sizes,
     auto sizes_v = view_1d(sizes, "sizes");
     auto ids_v = view_1d(ids, "ids");
     auto counts_v = view_1d(counts, "counts");
-    if (offsets_v.shape[0] != sizes_v.shape[0]) {
-        throw std::invalid_argument("offsets and sizes must have the same length");
-    }
-    if (ids_v.shape[0] != counts_v.shape[0]) {
-        throw std::invalid_argument("ids and counts must have the same length");
-    }
+    label_multiset::validate_read_subset(offsets_v, sizes_v, ids_v, counts_v);
 
     std::vector<IdT> ids_out;
     std::vector<CountT> counts_out;
@@ -115,14 +111,9 @@ bind_downsample_multiset(const Blocking &blocking,
     auto entry_offsets_v = view_1d(entry_offsets, "entry_offsets");
     auto ids_v = view_1d(ids, "ids");
     auto counts_v = view_1d(counts, "counts");
-    if (ids_v.shape[0] != counts_v.shape[0]) {
-        throw std::invalid_argument("ids and counts must have the same length");
-    }
-    if (offsets_v.shape[0] != entry_offsets_v.shape[0]) {
-        throw std::invalid_argument(
-            "offsets and entry_offsets must have the same length"
-        );
-    }
+    label_multiset::validate_downsample_input(
+        blocking, offsets_v, entry_sizes_v, entry_offsets_v, ids_v, counts_v
+    );
 
     const std::size_t n_blocks = static_cast<std::size_t>(blocking.number_of_blocks());
 
@@ -255,6 +246,12 @@ public:
             offsets.data(),
             {static_cast<std::ptrdiff_t>(offsets.shape(0))},
             {}};
+        label_multiset::validate_merger_entries(
+            uo_v, es_v, ids_v, counts_v
+        );
+        label_multiset::validate_update_entry_indices(
+            off_view, static_cast<std::size_t>(uo_v.shape[0])
+        );
         {
             nb::gil_scoped_release release;
             merger_.update(uo_v, es_v, ids_v, counts_v, off_view);

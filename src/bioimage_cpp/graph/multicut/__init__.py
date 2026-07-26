@@ -18,6 +18,9 @@ Public surface:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import copy
+from concurrent.futures import ThreadPoolExecutor
+import os
 
 import numpy as np
 
@@ -38,12 +41,13 @@ from .._shared import (
     _copy_graph,
     _dense_labels,
     _normalize_number_of_threads,
+    _require_finite_weights,
     _subproblem_from_edges,
 )
 
 
 class MulticutObjective:
-    """Multicut objective for an undirected graph and edge costs."""
+    """Multicut objective for an undirected graph and finite edge costs."""
 
     def __init__(
         self,
@@ -82,7 +86,8 @@ class MulticutObjective:
 
     def energy(self, labels=None) -> float:
         label_array = self._labels if labels is None else _as_node_labels(labels, self._graph)
-        return float(_core._multicut_energy(self._graph, self._edge_costs, label_array))
+        costs = _require_finite_weights(self._edge_costs, "edge_costs")
+        return float(_core._multicut_energy(self._graph, costs, label_array))
 
 
 class MulticutSolver(ABC):
@@ -91,6 +96,32 @@ class MulticutSolver(ABC):
     @abstractmethod
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
         """Optimize ``objective`` and return the node labeling."""
+
+    def clone(self) -> "MulticutSolver":
+        """Return an equivalent solver with independent mutable state."""
+        try:
+            cloned = copy.deepcopy(self)
+        except Exception as error:
+            raise TypeError(
+                f"{type(self).__name__}.clone() must return an independent "
+                "MulticutSolver for parallel decomposition"
+            ) from error
+        return _validated_solver_clone(self, cloned)
+
+
+def _validated_solver_clone(
+    original: MulticutSolver,
+    cloned,
+) -> MulticutSolver:
+    if not isinstance(cloned, MulticutSolver):
+        raise TypeError(
+            f"{type(original).__name__}.clone() must return a MulticutSolver"
+        )
+    if cloned is original:
+        raise TypeError(
+            f"{type(original).__name__}.clone() must return a distinct solver"
+        )
+    return cloned
 
 
 class GreedyAdditiveMulticut(MulticutSolver):
@@ -116,9 +147,10 @@ class GreedyAdditiveMulticut(MulticutSolver):
         self.sigma = float(sigma)
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        costs = _require_finite_weights(objective.edge_costs, "edge_costs")
         labels = _core._multicut_greedy_additive(
             objective.graph,
-            objective.edge_costs,
+            costs,
             self.weight_stop,
             self.node_num_stop,
             self.add_noise,
@@ -130,6 +162,15 @@ class GreedyAdditiveMulticut(MulticutSolver):
 
     def _build_cpp_sub_solver(self):
         return _core._GreedyAdditiveMulticutSubSolver(
+            weight_stop=self.weight_stop,
+            node_num_stop=self.node_num_stop,
+            add_noise=self.add_noise,
+            seed=self.seed,
+            sigma=self.sigma,
+        )
+
+    def clone(self) -> "GreedyAdditiveMulticut":
+        return GreedyAdditiveMulticut(
             weight_stop=self.weight_stop,
             node_num_stop=self.node_num_stop,
             add_noise=self.add_noise,
@@ -151,9 +192,10 @@ class GreedyFixationMulticut(MulticutSolver):
         self.node_num_stop = float(node_num_stop)
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        costs = _require_finite_weights(objective.edge_costs, "edge_costs")
         labels = _core._multicut_greedy_fixation(
             objective.graph,
-            objective.edge_costs,
+            costs,
             self.weight_stop,
             self.node_num_stop,
         )
@@ -162,6 +204,12 @@ class GreedyFixationMulticut(MulticutSolver):
 
     def _build_cpp_sub_solver(self):
         return _core._GreedyFixationMulticutSubSolver(
+            weight_stop=self.weight_stop,
+            node_num_stop=self.node_num_stop,
+        )
+
+    def clone(self) -> "GreedyFixationMulticut":
+        return GreedyFixationMulticut(
             weight_stop=self.weight_stop,
             node_num_stop=self.node_num_stop,
         )
@@ -190,6 +238,7 @@ class KernighanLinMulticut(MulticutSolver):
         self.epsilon = float(epsilon)
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        costs = _require_finite_weights(objective.edge_costs, "edge_costs")
         initial_labels = objective.labels
         if np.array_equal(
             initial_labels,
@@ -197,7 +246,7 @@ class KernighanLinMulticut(MulticutSolver):
         ):
             initial_labels = _core._multicut_greedy_additive(
                 objective.graph,
-                objective.edge_costs,
+                costs,
                 0.0,
                 -1.0,
                 False,
@@ -206,7 +255,7 @@ class KernighanLinMulticut(MulticutSolver):
             )
         labels = _core._multicut_kernighan_lin(
             objective.graph,
-            objective.edge_costs,
+            costs,
             initial_labels,
             self.number_of_outer_iterations,
             self.epsilon,
@@ -217,6 +266,13 @@ class KernighanLinMulticut(MulticutSolver):
     def _build_cpp_sub_solver(self):
         return _core._KernighanLinMulticutSubSolver(
             number_of_outer_iterations=self.number_of_outer_iterations,
+            epsilon=self.epsilon,
+        )
+
+    def clone(self) -> "KernighanLinMulticut":
+        return KernighanLinMulticut(
+            number_of_outer_iterations=self.number_of_outer_iterations,
+            number_of_inner_iterations=self.number_of_inner_iterations,
             epsilon=self.epsilon,
         )
 
@@ -375,12 +431,13 @@ class FusionMoveMulticut(MulticutSolver):
             raise ValueError("stop_if_no_improvement must be >= 1")
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        costs = _require_finite_weights(objective.edge_costs, "edge_costs")
         # Build one C++ proposal generator per parallel slot, each with a
         # distinct seed offset, so parallel streams are independent and
         # reproducible.
         cpp_pgens = [
             self.proposal_generator._build_for_thread(
-                objective.graph, objective.edge_costs, slot
+                objective.graph, costs, slot
             )
             for slot in range(self.number_of_parallel_proposals)
         ]
@@ -389,7 +446,7 @@ class FusionMoveMulticut(MulticutSolver):
         )
         labels = _core._multicut_fusion_move(
             objective.graph,
-            objective.edge_costs,
+            costs,
             objective.labels,
             cpp_pgens,
             cpp_sub_solver,
@@ -400,6 +457,26 @@ class FusionMoveMulticut(MulticutSolver):
         )
         objective.labels = labels
         return objective.labels
+
+    def clone(self) -> "FusionMoveMulticut":
+        try:
+            proposal_generator = copy.deepcopy(self.proposal_generator)
+        except Exception as error:
+            raise TypeError(
+                "FusionMoveMulticut proposal_generator must be cloneable"
+            ) from error
+        if proposal_generator is self.proposal_generator:
+            raise TypeError(
+                "FusionMoveMulticut proposal_generator clone must be distinct"
+            )
+        return FusionMoveMulticut(
+            proposal_generator=proposal_generator,
+            sub_solver=None if self.sub_solver is None else self.sub_solver.clone(),
+            number_of_iterations=self.number_of_iterations,
+            stop_if_no_improvement=self.stop_if_no_improvement,
+            number_of_threads=self.number_of_threads,
+            number_of_parallel_proposals=self.number_of_parallel_proposals,
+        )
 
 
 class ChainedMulticutSolvers(MulticutSolver):
@@ -416,6 +493,29 @@ class ChainedMulticutSolvers(MulticutSolver):
             labels = solver.optimize(objective)
         return labels
 
+    def clone(self) -> "ChainedMulticutSolvers":
+        return ChainedMulticutSolvers([solver.clone() for solver in self.solvers])
+
+
+def _solve_decomposer_component(
+    component: int,
+    nodes: np.ndarray,
+    edge_ids: np.ndarray,
+    all_uvs: np.ndarray,
+    edge_costs: np.ndarray,
+    global_to_local: np.ndarray,
+    solver: MulticutSolver,
+) -> tuple[int, np.ndarray]:
+    sub_graph, sub_costs = _subproblem_from_edges(
+        nodes,
+        all_uvs[edge_ids],
+        edge_costs[edge_ids],
+        global_to_local,
+    )
+    sub_objective = MulticutObjective(sub_graph, sub_costs)
+    labels = _dense_labels(solver.optimize(sub_objective))
+    return component, labels
+
 
 class MulticutDecomposer(MulticutSolver):
     """Decomposition-based multicut solver.
@@ -426,6 +526,10 @@ class MulticutDecomposer(MulticutSolver):
 
     Splits the multicut problem into connected components (based on positive
     edge costs) and solves each component independently with ``sub_solver``.
+
+    ``number_of_threads=0`` uses available hardware concurrency. Each component
+    receives a distinct clone of ``sub_solver``. Results are assembled in
+    component order, independent of worker scheduling.
     """
 
     def __init__(
@@ -452,40 +556,122 @@ class MulticutDecomposer(MulticutSolver):
         if self.fallthrough_solver is None and isinstance(self.sub_solver, GreedyAdditiveMulticut):
             return self.sub_solver.optimize(objective)
 
+        edge_costs = _require_finite_weights(objective.edge_costs, "edge_costs")
         component_labels = connected_components(
             objective.graph,
-            edge_mask=objective.edge_costs > 0.0,
+            edge_mask=edge_costs > 0.0,
         )
         number_of_components = int(component_labels.max()) + 1 if component_labels.size else 0
         if number_of_components <= 1:
             solver = self.fallthrough_solver or self.sub_solver
             return solver.optimize(objective)
 
+        component_labels_index = component_labels.astype(np.intp, copy=False)
+        node_counts = np.bincount(
+            component_labels_index,
+            minlength=number_of_components,
+        )
+        node_starts = np.concatenate(
+            [np.array([0], dtype=np.intp), np.cumsum(node_counts, dtype=np.intp)]
+        )
+        grouped_nodes = np.argsort(
+            component_labels_index, kind="stable"
+        ).astype(np.uint64, copy=False)
+        global_to_local = np.empty(
+            int(objective.graph.number_of_nodes), dtype=np.uint64
+        )
+        for component in range(number_of_components):
+            begin = int(node_starts[component])
+            end = int(node_starts[component + 1])
+            nodes = grouped_nodes[begin:end]
+            global_to_local[nodes] = np.arange(nodes.size, dtype=np.uint64)
+
+        all_uvs = objective.graph.uv_ids()
+        u_components = component_labels_index[
+            all_uvs[:, 0].astype(np.intp, copy=False)
+        ]
+        v_components = component_labels_index[
+            all_uvs[:, 1].astype(np.intp, copy=False)
+        ]
+        internal_edge_ids = np.flatnonzero(u_components == v_components)
+        internal_components = u_components[internal_edge_ids]
+        edge_order = np.argsort(internal_components, kind="stable")
+        grouped_edge_ids = internal_edge_ids[edge_order].astype(np.uint64, copy=False)
+        edge_counts = np.bincount(
+            internal_components,
+            minlength=number_of_components,
+        )
+        edge_starts = np.concatenate(
+            [np.array([0], dtype=np.intp), np.cumsum(edge_counts, dtype=np.intp)]
+        )
+
+        tasks = []
+        for component in range(number_of_components):
+            node_begin = int(node_starts[component])
+            node_end = int(node_starts[component + 1])
+            nodes = grouped_nodes[node_begin:node_end]
+            if nodes.size <= 1:
+                continue
+            edge_begin = int(edge_starts[component])
+            edge_end = int(edge_starts[component + 1])
+            edge_ids = grouped_edge_ids[edge_begin:edge_end]
+            cloned_solver = _validated_solver_clone(
+                self.sub_solver, self.sub_solver.clone()
+            )
+            tasks.append(
+                (
+                    component,
+                    nodes,
+                    edge_ids,
+                    all_uvs,
+                    edge_costs,
+                    global_to_local,
+                    cloned_solver,
+                )
+            )
+
+        requested_threads = self.number_of_threads
+        if requested_threads == 0:
+            requested_threads = os.cpu_count() or 1
+        effective_threads = max(1, min(requested_threads, len(tasks) or 1))
+        if effective_threads == 1:
+            solved = [_solve_decomposer_component(*task) for task in tasks]
+        else:
+            with ThreadPoolExecutor(max_workers=effective_threads) as executor:
+                futures = [
+                    executor.submit(_solve_decomposer_component, *task)
+                    for task in tasks
+                ]
+                solved = [future.result() for future in futures]
+
+        labels_by_component = dict(solved)
         global_labels = np.empty(objective.graph.number_of_nodes, dtype=np.uint64)
         label_offset = 0
-        all_uvs = objective.graph.uv_ids()
         for component in range(number_of_components):
-            nodes = np.flatnonzero(component_labels == component).astype(np.uint64)
+            begin = int(node_starts[component])
+            end = int(node_starts[component + 1])
+            nodes = grouped_nodes[begin:end]
             if nodes.size == 1:
                 global_labels[int(nodes[0])] = label_offset
                 label_offset += 1
                 continue
-
-            edge_ids = objective.graph.edges_from_node_list(nodes)
-            sub_graph, sub_costs = _subproblem_from_edges(
-                objective.graph.number_of_nodes,
-                nodes,
-                all_uvs[edge_ids],
-                objective.edge_costs[edge_ids],
-            )
-            sub_objective = MulticutObjective(sub_graph, sub_costs)
-            sub_labels = self.sub_solver.optimize(sub_objective)
-            sub_labels = _dense_labels(sub_labels)
+            sub_labels = labels_by_component[component]
             global_labels[nodes] = sub_labels + label_offset
             label_offset += int(sub_labels.max()) + 1
 
         objective.labels = _dense_labels(global_labels)
         return objective.labels
+
+    def clone(self) -> "MulticutDecomposer":
+        return MulticutDecomposer(
+            self.sub_solver.clone(),
+            fallthrough_solver=(
+                None
+                if self.fallthrough_solver is None
+                else self.fallthrough_solver.clone()
+            ),
+            number_of_threads=self.number_of_threads,
+        )
 
 
 __all__ = [
