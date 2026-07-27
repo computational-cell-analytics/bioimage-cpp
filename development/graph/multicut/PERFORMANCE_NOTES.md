@@ -18,7 +18,88 @@ materialization separately.
 The refactor keeps the previous merge direction: the larger-degree endpoint
 survives, and the edge's first endpoint survives a degree tie.
 
-## Current benchmark matrix
+## Kernighan-Lin optimization
+
+The P1 optimization ran on 2026-07-27. The acceptance run used a production
+build, one thread, five repeats, and alternating backend order:
+
+```bash
+python development/graph/multicut/evaluate_solvers.py \
+    --solvers kernighan_lin \
+    --problems A_small B_small C_small A_medium B_medium C_medium \
+    --n-repeats 5 --backend both --require-reference nifty \
+    --results-jsonl \
+    development/graph/multicut/benchmark_results/kl_p1_final_accepted.jsonl \
+    --build-command 'pip install -e . --no-build-isolation'
+```
+
+The acceptance criteria were:
+
+- Each bioimage-cpp median must be at most 1.03 times its baseline median.
+- `B_medium` must be no slower than nifty.
+- Every bioimage-cpp repeat must reproduce its baseline energy and label
+  SHA-256 digest.
+
+Run the executable gate with:
+
+```bash
+python development/graph/multicut/check_benchmark_acceptance.py \
+    development/graph/multicut/benchmark_results/kl_p1_baseline.jsonl \
+    development/graph/multicut/benchmark_results/kl_p1_final_accepted.jsonl \
+    --reference-parity B_medium
+```
+
+All six problems passed. This includes `A_medium` and `C_medium`.
+
+| Problem | Baseline bic | Final bic | Final / baseline | Final nifty | Nifty / bic | Exact output |
+|---|---:|---:|---:|---:|---:|---|
+| A_small | 1.974 s | 1.691 s | 0.857 | 2.533 s | 1.498 | yes |
+| B_small | 4.343 s | 3.759 s | 0.865 | 5.308 s | 1.412 | yes |
+| C_small | 6.496 s | 6.126 s | 0.943 | 7.856 s | 1.282 | yes |
+| A_medium | 125.723 s | 60.070 s | 0.478 | 134.766 s | 2.243 | yes |
+| B_medium | 275.021 s | 156.324 s | 0.568 | 165.150 s | 1.056 | yes |
+| C_medium | 220.694 s | 130.206 s | 0.590 | 234.075 s | 1.798 | yes |
+
+The implementation skips pair chains and split checks for clusters that did
+not change in the previous iteration. The final configured iteration always
+runs all checks. This final pass preserves the previous fixed output.
+
+Each chain stores only adjacency entries whose other endpoint is in the active
+cluster pair. The move loop reuses this filtered adjacency. It also derives
+heap membership from the maintained cross-border count and resets scratch
+state only for nodes that the chain touched.
+
+The ordinary and lifted implementations now share the cluster-change helper in
+`detail/relabel.hxx`. Phase instrumentation uses `detail/profile.hxx` and has no
+production-build cost.
+
+The `B_medium` profile changed as follows:
+
+| Scope | Before | After |
+|---|---:|---:|
+| End-to-end bic runtime | 267.927 s | 153.626 s |
+| `pair_chains` | 257.111 s | 143.886 s |
+| `chain_gain_init` | 110.342 s | 84.403 s |
+| `chain_loop` | 134.652 s | 54.715 s |
+| `chain_cleanup` | 7.520 s | 1.918 s |
+
+Profile scopes are nested and must not be summed. The retained evidence is in:
+
+- `benchmark_results/kl_p1_baseline.jsonl`
+- `benchmark_results/kl_p1_final_accepted.jsonl`
+- `benchmark_results/kl_p1_final_accepted.txt`
+- `benchmark_results/kl_p1_profile_before.jsonl`
+- `benchmark_results/kl_p1_profile_before.txt`
+- `benchmark_results/kl_p1_profile_accepted.jsonl`
+- `benchmark_results/kl_p1_profile_accepted.txt`
+
+The benchmark harness now records raw runtimes, medians, minima, energies,
+label digests, commands, build commands, source state, package paths, compiler
+details, CPU details, and thread-related environment variables. It loads nifty
+only when requested and can require the reference with
+`--require-reference nifty`.
+
+## Previous benchmark matrix
 
 Produced by `python evaluate_solvers.py` (2026-05-17). Small problems were run
 with both implementations in one pass:
@@ -127,7 +208,7 @@ The native implementation matched the reference energy. It was 1.48 times
 faster than nifty with one thread and 1.62 times faster with four threads on
 this problem.
 
-## Current read
+## Previous read
 
 `KernighanLinMulticut` is the dominant runtime target. It is faster than nifty
 on most rows, but `B_medium` is the clear exception: bic KL/chained takes about
