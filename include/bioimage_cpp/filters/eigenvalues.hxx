@@ -1,8 +1,13 @@
 #pragma once
 
+#if defined(BIOIMAGE_FILTERS_AVX2_DISPATCH)
+#include "bioimage_cpp/filters/dispatch.hxx"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 namespace bioimage_cpp::filters {
 
@@ -55,13 +60,22 @@ inline void ev3_one_descending(
         return;
     }
 
-    const float inv_m = 1.0f / m;
-    a00 *= inv_m;
-    a01 *= inv_m;
-    a02 *= inv_m;
-    a11 *= inv_m;
-    a12 *= inv_m;
-    a22 *= inv_m;
+    if (m < std::numeric_limits<float>::min()) {
+        a00 /= m;
+        a01 /= m;
+        a02 /= m;
+        a11 /= m;
+        a12 /= m;
+        a22 /= m;
+    } else {
+        const float inv_m = 1.0f / m;
+        a00 *= inv_m;
+        a01 *= inv_m;
+        a02 *= inv_m;
+        a11 *= inv_m;
+        a12 *= inv_m;
+        a22 *= inv_m;
+    }
 
     const float a = (a00 + a11 + a22) * (1.0f / 3.0f);
     const float b00 = a00 - a;
@@ -91,17 +105,26 @@ inline void ev3_one_descending(
     // otherwise produce NaN from acos.
     r = std::max(-1.0f, std::min(1.0f, r));
 
-    constexpr float kTwoPiOver3 = 2.0943951023931953f;
+    constexpr float kSqrtThreeOverTwo = 0.8660254037844386f;
     const float phi = std::acos(r) * (1.0f / 3.0f);
     const float two_p = 2.0f * p;
+    const float cos_phi = std::cos(phi);
+    const float sin_phi = std::sqrt(std::max(0.0f, 1.0f - cos_phi * cos_phi));
 
-    const float root_large = a + two_p * std::cos(phi);
-    const float root_small = a + two_p * std::cos(phi + kTwoPiOver3);
+    const float root_large = a + two_p * cos_phi;
+    const float root_small =
+        a + two_p * (-0.5f * cos_phi - kSqrtThreeOverTwo * sin_phi);
     const float root_mid = 3.0f * a - root_large - root_small;
 
-    e0 = m * root_large;
-    e1 = m * root_mid;
-    e2 = m * root_small;
+    const float value_large = m * root_large;
+    const float value_mid = m * root_mid;
+    const float value_small = m * root_small;
+    const float high01 = std::max(value_large, value_mid);
+    const float low01 = std::min(value_large, value_mid);
+    e0 = std::max(high01, value_small);
+    const float middle_candidate = std::min(high01, value_small);
+    e1 = std::max(low01, middle_candidate);
+    e2 = std::min(low01, middle_candidate);
 }
 
 } // namespace detail
@@ -129,6 +152,40 @@ inline void ev3_symmetric_descending(
             e0[i], e1[i], e2[i]
         );
     }
+}
+
+inline void ev3_symmetric_descending_interleaved(
+    const float *__restrict a00,
+    const float *__restrict a01,
+    const float *__restrict a02,
+    const float *__restrict a11,
+    const float *__restrict a12,
+    const float *__restrict a22,
+    float *__restrict out,
+    const std::ptrdiff_t n
+) {
+#if defined(BIOIMAGE_FILTERS_AVX2_DISPATCH)
+    if (dispatch::try_ev3_symmetric_descending_interleaved(
+            a00, a01, a02, a11, a12, a22, out, n
+        )) {
+        return;
+    }
+#endif
+
+    for (std::ptrdiff_t i = 0; i < n; ++i) {
+        detail::ev3_one_descending(
+            a00[i], a01[i], a02[i], a11[i], a12[i], a22[i],
+            out[3 * i], out[3 * i + 1], out[3 * i + 2]
+        );
+    }
+}
+
+inline const char *eigenvalue_backend() {
+#if defined(BIOIMAGE_FILTERS_AVX2_DISPATCH)
+    return dispatch::eigenvalue_backend();
+#else
+    return "scalar";
+#endif
 }
 
 } // namespace bioimage_cpp::filters

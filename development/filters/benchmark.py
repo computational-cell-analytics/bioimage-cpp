@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import csv
-import math
+import os
 import sys
 from statistics import geometric_mean
+
+import numpy as np
 
 from _bench_utils import (
     BenchConfig,
@@ -41,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-3d", action="store_true")
     parser.add_argument("--no-2d", action="store_true")
     parser.add_argument(
+        "--force-scalar",
+        action="store_true",
+        help="Disable the runtime AVX2 filter backend.",
+    )
+    parser.add_argument(
         "--filters", default=",".join(FILTERS),
         help="Comma-separated subset of filters to benchmark.",
     )
@@ -52,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_test_data(args) -> list[tuple[str, "np.ndarray"]]:
+def _load_test_data(args) -> list[tuple[str, np.ndarray]]:
     crop_2d = (128, 128) if args.small else None
     crop_3d = (32, 64, 64) if args.small else None
     targets = []
@@ -65,6 +72,11 @@ def _load_test_data(args) -> list[tuple[str, "np.ndarray"]]:
 
 def main() -> int:
     args = parse_args()
+    if args.force_scalar:
+        os.environ["BIOIMAGE_CPP_FILTERS_FORCE_SCALAR"] = "1"
+
+    from bioimage_cpp import _core
+
     cfg = BenchConfig(
         sigma=args.sigma,
         inner_sigma=args.inner_sigma,
@@ -81,7 +93,9 @@ def main() -> int:
 
     print(
         f"sigma={cfg.sigma}, inner={cfg.inner_sigma}, outer={cfg.outer_sigma}, "
-        f"window_size={cfg.window_size}, repeats={args.repeats}"
+        f"window_size={cfg.window_size}, repeats={args.repeats}, "
+        f"convolution_backend={_core._filters_convolution_backend()}, "
+        f"eigenvalue_backend={_core._filters_eigenvalue_backend()}"
     )
 
     rows = []
