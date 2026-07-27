@@ -32,8 +32,6 @@ def parse_args():
                         help="Threads for teasar.")
     parser.add_argument("--direction_span", type=int, default=10,
                         help="Nodes walked along each arm to estimate its direction at a junction.")
-    parser.add_argument("--min_through_angle", type=float, default=170.0,
-                        help="Min through-pair angle (degrees) for a degree-4 crossing to split.")
     parser.add_argument("--min_branch_angle", type=float, default=30.0,
                         help="Min branch angle (degrees) for a degree-3 odd arm to be separated.")
     parser.add_argument("--tick_length", type=float, default=50.0,
@@ -80,7 +78,7 @@ def main():
 
     vertices, edges, radii = clean_filament_graph(
         raw_vertices, raw_edges, radii=raw_radii,
-        direction_span=args.direction_span, min_through_angle=args.min_through_angle,
+        direction_span=args.direction_span,
         min_branch_angle=args.min_branch_angle, tick_length=args.tick_length,
         join_dist=args.join_dist, min_join_angle=args.min_join_angle,
     )

@@ -64,19 +64,17 @@ def _split_degree3(v, graph, vertices, direction_span=1, min_branch_angle=30.0):
     return [int(edge_ids[odd])]
 
 
-def _split_degree4(v, graph, vertices, direction_span=1, min_through_angle=160.0):
+def _split_degree4(v, graph, vertices, direction_span=1):
     adj = np.asarray(graph.node_adjacency(int(v)))
     if adj.shape[0] != 4:
         return None
     neighbors, edge_ids = adj[:, 0], adj[:, 1]
     dirs = np.stack([_tangent(int(v), n, graph, vertices, direction_span) for n in neighbors])
-    best, best_score, best_min = None, -np.inf, 0.0
+    best, best_score = None, -np.inf
     for (a, b), (c, d) in [((0, 1), (2, 3)), ((0, 2), (1, 3)), ((0, 3), (1, 2))]:
         ang1, ang2 = _pair_angle(dirs[a], dirs[b]), _pair_angle(dirs[c], dirs[d])
         if ang1 + ang2 > best_score:
-            best_score, best, best_min = ang1 + ang2, ((a, b), (c, d)), min(ang1, ang2)
-    if best_min < min_through_angle:
-        return None
+            best_score, best = ang1 + ang2, ((a, b), (c, d))
     (_, pair_b) = best
     return [int(edge_ids[k]) for k in pair_b]
 
@@ -87,7 +85,6 @@ def clean_filament_graph(
     radii: np.ndarray | None = None,
     *,
     direction_span: int = 5,
-    min_through_angle: float = 160.0,
     min_branch_angle: float = 30.0,
     tick_length: float = 0.0,
     join_dist: float = 0.0,
@@ -102,8 +99,7 @@ def clean_filament_graph(
        :func:`remove_ticks`.
     2. Split each degree-3 junction, separating the odd arm when it diverges
        from the through pair by at least ``min_branch_angle``.
-    3. Split each degree-4 crossing, separating its two through pairs when they
-       are collinear to within ``min_through_angle``.
+    3. Split every degree-4 crossing into its two straightest through pairs.
     4. If ``join_dist > 0``, join collinear endpoints across gaps up to
        this distance via :func:`join_close_components`.
 
@@ -117,8 +113,6 @@ def clean_filament_graph(
         Optional per-vertex radii, carried through the same remapping.
     direction_span:
         Number of nodes over which each arm's tangent is measured.
-    min_through_angle:
-        Minimum through-pair angle (degrees) for a degree-4 crossing to split.
     min_branch_angle:
         Minimum angle (degrees) between a degree-3 node's odd arm and its
         through pair for the odd arm to be separated.
@@ -163,7 +157,7 @@ def clean_filament_graph(
         if ids:
             prune_edges.update(ids)
     for v in np.where(degrees == 4)[0]:
-        ids = _split_degree4(v, graph, vertices, direction_span, min_through_angle)
+        ids = _split_degree4(v, graph, vertices, direction_span)
         if ids:
             splits.append((int(v), ids))
 

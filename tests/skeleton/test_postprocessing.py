@@ -40,19 +40,8 @@ def test_split_degree4_splits_through_pair():
         [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]],
         [[0, 1], [0, 2], [0, 3], [0, 4]],
     )
-    result = _split_degree4(0, graph, vertices, direction_span=1, min_through_angle=170.0)
+    result = _split_degree4(0, graph, vertices, direction_span=1)
     assert set(result) in ({0, 1}, {2, 3})
-
-
-def test_split_degree4_keeps_non_collinear_crossing():
-    # Four arms at 0, 60, 120, 180 degrees: no pair is collinear enough to split.
-    angle = np.deg2rad([0.0, 60.0, 120.0, 180.0])
-    arms = np.stack([np.zeros_like(angle), np.sin(angle), np.cos(angle)], axis=1)
-    vertices, _, graph = _graph(
-        np.concatenate([[[0.0, 0.0, 0.0]], arms]),
-        [[0, 1], [0, 2], [0, 3], [0, 4]],
-    )
-    assert _split_degree4(0, graph, vertices, direction_span=1, min_through_angle=170.0) is None
 
 
 @pytest.mark.parametrize(
