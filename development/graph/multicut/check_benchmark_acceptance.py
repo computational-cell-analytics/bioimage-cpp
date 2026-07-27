@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from statistics import median
 
@@ -13,14 +14,24 @@ PROBLEMS = tuple(
 )
 
 
-def load_results(path: Path) -> dict[tuple[str, str], dict]:
-    results = {}
+def load_results(
+    path: Path,
+    *,
+    latest_run_only: bool,
+) -> dict[tuple[str, str], dict]:
+    rows = []
     with path.open(encoding="utf-8") as file:
         for line in file:
             row = json.loads(line)
             if row.get("record_type") == "result":
-                results[(row["problem"], row["solver"])] = row
-    return results
+                rows.append(row)
+    if latest_run_only and rows:
+        latest_run_id = rows[-1]["run_id"]
+        rows = [row for row in rows if row["run_id"] == latest_run_id]
+    return {
+        (row["problem"], row["solver"]): row
+        for row in rows
+    }
 
 
 def check_raw_measurements(
@@ -44,6 +55,10 @@ def check_raw_measurements(
         errors.append(
             f"{backend} has {len(digests)} digests; expected {expected_repeats}"
         )
+    if any(not math.isfinite(value) or value <= 0.0 for value in runtimes):
+        errors.append(f"{backend} runtimes must be finite and positive")
+    if any(not math.isfinite(value) for value in energies):
+        errors.append(f"{backend} energies must be finite")
     if energies and len(set(energies)) != 1:
         errors.append(f"{backend} energies differ between repeats")
     if digests and len(set(digests)) != 1:
@@ -53,6 +68,8 @@ def check_raw_measurements(
             errors.append(f"{backend} runtime median does not match raw runtimes")
         if min(runtimes) != row[f"{backend}_runtime_min_s"]:
             errors.append(f"{backend} runtime minimum does not match raw runtimes")
+    if energies and median(energies) != row[f"{backend}_energy"]:
+        errors.append(f"{backend} energy does not match raw energies")
     return errors
 
 
@@ -182,8 +199,8 @@ def main() -> None:
     if args.max_regression < 0.0:
         raise ValueError("--max-regression must be non-negative")
 
-    baseline = load_results(args.baseline)
-    candidate = load_results(args.candidate)
+    baseline = load_results(args.baseline, latest_run_only=False)
+    candidate = load_results(args.candidate, latest_run_only=True)
     rows = []
     failures = []
     parity_problems = set(args.reference_parity)

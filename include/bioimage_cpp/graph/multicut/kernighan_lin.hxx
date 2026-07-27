@@ -275,6 +275,8 @@ inline double run_chain(
                     ? 2.0 * adjacency.weight
                     : -2.0 * adjacency.weight;
                 bufs.stash_gain[u_key] += delta;
+                // Each unmoved split node stays in the heap. An unmoved pair
+                // node is in the heap exactly when it has a cross-side edge.
                 const bool was_in_heap =
                     is_split || bufs.cross_count[u_key] > 0;
                 if (was_in_heap) {
@@ -435,6 +437,8 @@ inline std::vector<std::uint64_t> kernighan_lin(
 
     for (std::uint64_t iteration = 0; iteration < number_of_outer_iterations; ++iteration) {
         bool improved = false;
+        // Disable the gate in the last configured iteration. This preserves
+        // the fixed output when an unchanged cluster becomes splittable.
         const bool use_changed_gate =
             iteration + 1 < number_of_outer_iterations;
 
@@ -456,31 +460,28 @@ inline std::vector<std::uint64_t> kernighan_lin(
         if (iteration == 0) {
             changed.assign(static_cast<std::size_t>(number_of_clusters), 1);
         }
-        {
-            BIOIMAGE_PROFILE_SCOPE(profile, "pair_chains");
-            for (const auto &pair : pairs_for_chain) {
-                if (use_changed_gate
-                    && !changed[static_cast<std::size_t>(pair.a)]
-                    && !changed[static_cast<std::size_t>(pair.b)]) {
-                    continue;
-                }
-                const auto delta = detail_kl::run_chain(
-                    graph,
-                    costs,
-                    labels,
-                    cluster_to_nodes,
-                    bufs,
-                    scratch,
-                    pair.a,
-                    pair.b,
-                    epsilon,
-                    profile
-                );
-                if (delta > epsilon) {
-                    improved = true;
-                    changed[static_cast<std::size_t>(pair.a)] = 1;
-                    changed[static_cast<std::size_t>(pair.b)] = 1;
-                }
+        for (const auto &pair : pairs_for_chain) {
+            if (use_changed_gate
+                && !changed[static_cast<std::size_t>(pair.a)]
+                && !changed[static_cast<std::size_t>(pair.b)]) {
+                continue;
+            }
+            const auto delta = detail_kl::run_chain(
+                graph,
+                costs,
+                labels,
+                cluster_to_nodes,
+                bufs,
+                scratch,
+                pair.a,
+                pair.b,
+                epsilon,
+                profile
+            );
+            if (delta > epsilon) {
+                improved = true;
+                changed[static_cast<std::size_t>(pair.a)] = 1;
+                changed[static_cast<std::size_t>(pair.b)] = 1;
             }
         }
 
@@ -491,36 +492,33 @@ inline std::vector<std::uint64_t> kernighan_lin(
         // Whether a given problem actually benefits depends on whether the
         // pair-chain phase leaves any cluster with internally-negative-weight
         // nodes.
-        {
-            BIOIMAGE_PROFILE_SCOPE(profile, "cluster_splits");
-            std::uint64_t next_label = number_of_clusters;
-            for (std::uint64_t cluster = 0; cluster < number_of_clusters; ++cluster) {
-                if (use_changed_gate
-                    && !changed[static_cast<std::size_t>(cluster)]) {
-                    continue;
+        std::uint64_t next_label = number_of_clusters;
+        for (std::uint64_t cluster = 0; cluster < number_of_clusters; ++cluster) {
+            if (use_changed_gate
+                && !changed[static_cast<std::size_t>(cluster)]) {
+                continue;
+            }
+            while (true) {
+                if (next_label >= cluster_to_nodes.size()) {
+                    cluster_to_nodes.resize(static_cast<std::size_t>(next_label) + 1);
                 }
-                while (true) {
-                    if (next_label >= cluster_to_nodes.size()) {
-                        cluster_to_nodes.resize(static_cast<std::size_t>(next_label) + 1);
-                    }
-                    const auto delta = detail_kl::run_chain(
-                        graph,
-                        costs,
-                        labels,
-                        cluster_to_nodes,
-                        bufs,
-                        scratch,
-                        cluster,
-                        next_label,
-                        epsilon,
-                        profile
-                    );
-                    if (delta <= epsilon) {
-                        break;
-                    }
-                    improved = true;
-                    ++next_label;
+                const auto delta = detail_kl::run_chain(
+                    graph,
+                    costs,
+                    labels,
+                    cluster_to_nodes,
+                    bufs,
+                    scratch,
+                    cluster,
+                    next_label,
+                    epsilon,
+                    profile
+                );
+                if (delta <= epsilon) {
+                    break;
                 }
+                improved = true;
+                ++next_label;
             }
         }
 

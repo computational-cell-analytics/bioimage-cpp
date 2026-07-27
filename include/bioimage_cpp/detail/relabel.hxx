@@ -25,7 +25,8 @@ inline std::vector<std::uint64_t> dense_relabel(const std::vector<std::uint64_t>
 }
 
 // Mark each current cluster whose node set differs from the previous
-// partition. `labels` must use the dense range [0, number_of_clusters).
+// partition. An unchanged cluster contains all nodes from exactly one previous
+// cluster. `labels` must use the dense range [0, number_of_clusters).
 inline std::vector<std::uint8_t> changed_clusters(
     const std::vector<std::uint64_t> &labels,
     const std::vector<std::uint64_t> &previous_labels,

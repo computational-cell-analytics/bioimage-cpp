@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from development.graph.agglomeration import _compatibility
+import _compatibility
 
 
 def test_variation_of_information_identical_partitions():

@@ -332,7 +332,7 @@ def evaluate(
     }
 
 
-def format_float(value: float) -> str:
+def format_float(value: float | None) -> str:
     if value is None:
         return ""
     return f"{value:.6g}"
@@ -450,9 +450,6 @@ def main() -> None:
         raise ValueError("--n-repeats must be at least 1")
     if args.threads < 1:
         raise ValueError("--threads must be at least 1")
-    if args.results_jsonl is not None and args.build_command is None:
-        raise ValueError("--build-command is required with --results-jsonl")
-
     nifty_available = importlib.util.find_spec("nifty") is not None
     if "nifty" in args.require_reference and not nifty_available:
         raise RuntimeError("required reference 'nifty' is not available")

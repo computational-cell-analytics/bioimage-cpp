@@ -28,8 +28,7 @@ python development/graph/multicut/evaluate_solvers.py \
     --solvers kernighan_lin \
     --problems A_small B_small C_small A_medium B_medium C_medium \
     --n-repeats 5 --backend both --require-reference nifty \
-    --results-jsonl \
-    development/graph/multicut/benchmark_results/kl_p1_final_accepted.jsonl \
+    --results-jsonl /tmp/kl_p1_final.jsonl \
     --build-command 'pip install -e . --no-build-isolation'
 ```
 
@@ -44,8 +43,7 @@ Run the executable gate with:
 
 ```bash
 python development/graph/multicut/check_benchmark_acceptance.py \
-    development/graph/multicut/benchmark_results/kl_p1_baseline.jsonl \
-    development/graph/multicut/benchmark_results/kl_p1_final_accepted.jsonl \
+    BASELINE.jsonl CANDIDATE.jsonl \
     --reference-parity B_medium
 ```
 
@@ -61,8 +59,9 @@ All six problems passed. This includes `A_medium` and `C_medium`.
 | C_medium | 220.694 s | 130.206 s | 0.590 | 234.075 s | 1.798 | yes |
 
 The implementation skips pair chains and split checks for clusters that did
-not change in the previous iteration. The final configured iteration always
-runs all checks. This final pass preserves the previous fixed output.
+not change in the previous iteration. The last configured iteration does not
+use this gate. This final pass preserves the previous fixed output when the
+solver reaches it.
 
 Each chain stores only adjacency entries whose other endpoint is in the active
 cluster pair. The move loop reuses this filtered adjacency. It also derives
@@ -78,20 +77,14 @@ The `B_medium` profile changed as follows:
 | Scope | Before | After |
 |---|---:|---:|
 | End-to-end bic runtime | 267.927 s | 153.626 s |
-| `pair_chains` | 257.111 s | 143.886 s |
 | `chain_gain_init` | 110.342 s | 84.403 s |
 | `chain_loop` | 134.652 s | 54.715 s |
 | `chain_cleanup` | 7.520 s | 1.918 s |
 
-Profile scopes are nested and must not be summed. The retained evidence is in:
-
-- `benchmark_results/kl_p1_baseline.jsonl`
-- `benchmark_results/kl_p1_final_accepted.jsonl`
-- `benchmark_results/kl_p1_final_accepted.txt`
-- `benchmark_results/kl_p1_profile_before.jsonl`
-- `benchmark_results/kl_p1_profile_before.txt`
-- `benchmark_results/kl_p1_profile_accepted.jsonl`
-- `benchmark_results/kl_p1_profile_accepted.txt`
+The P1 profile used a nested `pair_chains` aggregate. The current
+instrumentation uses non-overlapping phase scopes, so the reported total does
+not count any phase twice. Raw benchmark artifacts are environment-specific
+and are not versioned.
 
 The benchmark harness now records raw runtimes, medians, minima, energies,
 label digests, commands, build commands, source state, package paths, compiler

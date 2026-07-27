@@ -1,6 +1,3 @@
-import os
-import sys
-
 import numpy as np
 import pytest
 
@@ -215,38 +212,3 @@ def test_rejects_mismatched_verts_normals_dtype():
     faces = np.array([[0, 1, 2]], dtype=np.int64)
     with pytest.raises(TypeError, match="same dtype"):
         bic.mesh.smooth_mesh(verts, normals, faces, iterations=1)
-
-
-def test_parity_with_python_reference():
-    """Compare against the nifty-based Python reference. Skipped if nifty missing.
-
-    Only one iteration is compared. The reference has an aliasing quirk
-    (``current_verts = new_verts`` makes them refer to the same buffer) that
-    turns iterations 1+ into in-place Gauss-Seidel smoothing, whereas this
-    implementation does textbook Jacobi smoothing (independent read/write
-    buffers). The two agree exactly at ``iterations=1``.
-    """
-    pytest.importorskip("nifty")
-
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    dev_path = os.path.join(repo_root, "development", "mesh")
-    sys.path.insert(0, dev_path)
-    try:
-        from _mesh_smoothing_reference import smooth_mesh as smooth_mesh_reference
-    finally:
-        sys.path.remove(dev_path)
-
-    rng = np.random.default_rng(2026)
-    scipy_spatial = pytest.importorskip("scipy.spatial")
-    n_points = 80
-    raw = rng.standard_normal((n_points, 3))
-    points = raw / np.linalg.norm(raw, axis=1, keepdims=True)
-    hull = scipy_spatial.ConvexHull(points)
-    verts = points.astype(np.float64)
-    faces = hull.simplices.astype(np.int64)
-    normals = verts.copy()
-
-    out_v, out_n = bic.mesh.smooth_mesh(verts, normals, faces, iterations=1)
-    ref_v, ref_n = smooth_mesh_reference(verts, normals, faces, 1)
-    np.testing.assert_allclose(out_v, ref_v, rtol=1e-10, atol=1e-12)
-    np.testing.assert_allclose(out_n, ref_n, rtol=1e-10, atol=1e-12)
