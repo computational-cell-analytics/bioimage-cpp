@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace bioimage_cpp::graph::multicut {
@@ -58,7 +59,7 @@ inline std::vector<std::uint64_t> greedy_fixation(
     return labels;
 }
 
-class GreedyFixationSolver final : public SolverBase {
+class GreedyFixationSolver final : public CloneableSolverBase {
 public:
     GreedyFixationSolver(const double weight_stop = 0.0, const double node_num_stop = -1.0)
         : weight_stop_(weight_stop),
@@ -69,6 +70,10 @@ public:
         auto labels = greedy_fixation(objective.graph(), objective.costs(), weight_stop_, node_num_stop_);
         objective.set_labels(labels);
         return labels;
+    }
+
+    std::unique_ptr<CloneableSolverBase> clone() const override {
+        return std::make_unique<GreedyFixationSolver>(*this);
     }
 
 private:

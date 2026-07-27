@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace bioimage_cpp::graph::multicut {
@@ -79,7 +80,7 @@ inline std::vector<std::uint64_t> greedy_additive(
     );
 }
 
-class GreedyAdditiveSolver final : public SolverBase {
+class GreedyAdditiveSolver final : public CloneableSolverBase {
 public:
     GreedyAdditiveSolver(
         const double weight_stop = 0.0,
@@ -107,6 +108,10 @@ public:
         );
         objective.set_labels(labels);
         return labels;
+    }
+
+    std::unique_ptr<CloneableSolverBase> clone() const override {
+        return std::make_unique<GreedyAdditiveSolver>(*this);
     }
 
 private:

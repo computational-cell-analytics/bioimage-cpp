@@ -123,26 +123,6 @@ def _require_finite_weights(array: np.ndarray, name: str) -> np.ndarray:
     return array
 
 
-def _dense_labels(labels) -> np.ndarray:
-    labels = strict_integer_array(
-        labels, "labels", dtype=np.uint64, non_negative=True
-    )
-    _, dense = np.unique(labels, return_inverse=True)
-    return np.ascontiguousarray(dense.astype(np.uint64, copy=False))
-
-
-def _subproblem_from_edges(nodes, uvs, edge_costs, global_to_local):
-    # Local import to avoid a circular dependency with the multicut submodule
-    # at module-load time (this helper is only called from the decomposer).
-    from . import UndirectedGraph
-
-    local_uvs = global_to_local[np.asarray(uvs, dtype=np.uint64)]
-    sub_graph = UndirectedGraph(int(nodes.size), int(len(edge_costs)))
-    if local_uvs.size:
-        sub_graph.insert_edges(np.ascontiguousarray(local_uvs.astype(np.uint64, copy=False)))
-    return sub_graph, np.ascontiguousarray(np.asarray(edge_costs, dtype=np.float64))
-
-
 def _normalize_labels(labels: np.ndarray) -> np.ndarray:
     array = np.asarray(labels)
     if array.ndim not in (2, 3):

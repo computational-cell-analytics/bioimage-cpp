@@ -1476,9 +1476,14 @@ Notes:
   re-running solvers from a clean state.
 - `number_of_threads=0` on `MulticutDecomposer` uses available hardware
   concurrency. A positive value sets the maximum worker count.
-- `MulticutDecomposer` calls `sub_solver.clone()` for each non-singleton
-  component. Custom stateful solvers must return an equivalent solver with
-  independent mutable state. The default implementation uses `copy.deepcopy`.
+- `MulticutDecomposer` runs decomposition and component solvers in C++. It
+  accepts `GreedyAdditiveMulticut`, `GreedyFixationMulticut`,
+  `KernighanLinMulticut`, and chains composed only of these solvers.
+- `MulticutDecomposer` does not accept custom Python solvers,
+  `FusionMoveMulticut`, or another `MulticutDecomposer` as a component or
+  fallthrough solver. Use one of the supported native solvers instead.
+- Multicut solvers no longer expose `clone()`. Native decomposition creates
+  independent C++ solver instances for its workers.
 - Components can finish in any order. The decomposer applies labels in
   component order, so scheduling does not change output labels.
 
@@ -1492,6 +1497,9 @@ Intentional differences vs. nifty:
 - `MulticutDecomposer` short-circuits the trivial case where the sub-solver is
   `GreedyAdditiveMulticut` and no fallthrough is given — the greedy solver
   already operates on each connected component internally.
+- Unlike nifty's factory-based decomposer, the native decomposer supports only
+  the solver types listed above. This keeps worker execution outside the GIL
+  and avoids Python callbacks from native threads.
 
 #### Fusion Moves
 

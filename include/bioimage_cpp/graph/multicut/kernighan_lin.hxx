@@ -2,12 +2,14 @@
 
 #include "bioimage_cpp/detail/edge_hash.hxx"
 #include "bioimage_cpp/detail/indexed_heap.hxx"
-#include "bioimage_cpp/util/union_find.hxx"
+#include "bioimage_cpp/graph/multicut/greedy_additive.hxx"
 #include "bioimage_cpp/graph/multicut/objective.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -444,21 +446,35 @@ inline std::vector<std::uint64_t> kernighan_lin(
     return labels;
 }
 
-class KernighanLinSolver final : public SolverBase {
+class KernighanLinSolver final : public CloneableSolverBase {
 public:
     KernighanLinSolver(
         const std::uint64_t number_of_outer_iterations = 100,
-        const double epsilon = 1.0e-6
+        const double epsilon = 1.0e-6,
+        const bool warm_start_greedy = false
     )
         : number_of_outer_iterations_(number_of_outer_iterations),
-          epsilon_(epsilon) {
+          epsilon_(epsilon),
+          warm_start_greedy_(warm_start_greedy) {
     }
 
     std::vector<std::uint64_t> optimize(Objective &objective) const override {
+        auto initial_labels = objective.labels();
+        if (warm_start_greedy_ && is_singleton_labeling(initial_labels)) {
+            initial_labels = greedy_additive(
+                objective.graph(),
+                objective.costs(),
+                0.0,
+                -1.0,
+                false,
+                42,
+                1.0
+            );
+        }
         auto labels = kernighan_lin(
             objective.graph(),
             objective.costs(),
-            objective.labels(),
+            std::move(initial_labels),
             number_of_outer_iterations_,
             epsilon_
         );
@@ -466,9 +482,23 @@ public:
         return labels;
     }
 
+    std::unique_ptr<CloneableSolverBase> clone() const override {
+        return std::make_unique<KernighanLinSolver>(*this);
+    }
+
 private:
+    static bool is_singleton_labeling(const std::vector<std::uint64_t> &labels) {
+        for (std::size_t index = 0; index < labels.size(); ++index) {
+            if (labels[index] != static_cast<std::uint64_t>(index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     std::uint64_t number_of_outer_iterations_;
     double epsilon_;
+    bool warm_start_greedy_;
 };
 
 } // namespace bioimage_cpp::graph::multicut

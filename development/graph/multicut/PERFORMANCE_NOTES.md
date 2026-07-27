@@ -112,6 +112,21 @@ These single-repeat rows confirm matched objective values and exercise the
 real decomposer path. They are smoke measurements, not stable performance
 estimates.
 
+### Native decomposer benchmark
+
+The decomposer moved from Python orchestration to C++ on 2026-07-26. Matched
+`A_small` runs used five repeats with greedy-additive sub- and fallthrough
+solvers.
+
+| Threads | bic energy | nifty energy | bic runtime | nifty runtime |
+|---|---|---|---|---|
+| 1 | -76 914.5 | -76 914.5 | 0.240 s | 0.354 s |
+| 4 | -76 914.5 | -76 914.5 | 0.221 s | 0.359 s |
+
+The native implementation matched the reference energy. It was 1.48 times
+faster than nifty with one thread and 1.62 times faster with four threads on
+this problem.
+
 ## Current read
 
 `KernighanLinMulticut` is the dominant runtime target. It is faster than nifty

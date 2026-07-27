@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <utility>
@@ -110,5 +111,21 @@ public:
     virtual ~SolverBase() = default;
     virtual std::vector<std::uint64_t> optimize(Objective &objective) const = 0;
 };
+
+class CloneableSolverBase : public SolverBase {
+public:
+    // Return an independent solver for one worker.
+    virtual std::unique_ptr<CloneableSolverBase> clone() const = 0;
+};
+
+inline std::unique_ptr<CloneableSolverBase> clone_solver(
+    const CloneableSolverBase &solver
+) {
+    auto cloned = solver.clone();
+    if (cloned == nullptr) {
+        throw std::runtime_error("solver clone must not be null");
+    }
+    return cloned;
+}
 
 } // namespace bioimage_cpp::graph::multicut
