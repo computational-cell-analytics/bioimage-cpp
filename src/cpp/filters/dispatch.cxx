@@ -52,13 +52,13 @@ void convolve_outer_products_3d(
 );
 
 void ev3_symmetric_descending_interleaved(
-    const float *a00,
-    const float *a01,
-    const float *a02,
-    const float *a11,
-    const float *a12,
-    const float *a22,
-    float *out,
+    const float *__restrict a00,
+    const float *__restrict a01,
+    const float *__restrict a02,
+    const float *__restrict a11,
+    const float *__restrict a12,
+    const float *__restrict a22,
+    float *__restrict out,
     std::ptrdiff_t n
 );
 
