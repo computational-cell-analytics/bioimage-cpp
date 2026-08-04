@@ -35,7 +35,7 @@ struct Adjacency {
 // CSR is rebuilt lazily: incremental `insert_edge*` only appends to `edges_`
 // (and `edge_lookup_`) and marks the adjacency dirty; the first subsequent
 // `node_adjacency` read triggers a single bulk rebuild. Bulk construction
-// paths (`from_sorted_unique_edges`, subclass `build_edges` overrides) call
+// paths (`from_unique_edges`, subclass `build_edges` overrides) call
 // `rebuild_adjacency_from_edges()` explicitly, which keeps reads cheap and
 // thread-safe.
 //
@@ -45,13 +45,10 @@ struct Adjacency {
 // overwriting `adjacency_offsets_` — which corrupts the CSR (garbage neighbor
 // ids, out-of-bounds reads) and intermittently segfaults. The rule:
 //
-//   Any algorithm that reads `node_adjacency` (directly, or via
-//   `breadth_first_search`, `extract_subgraph_from_nodes`, or a sub-solver
-//   such as `multicut::greedy_additive`'s `DynamicGraph::reset`) from
-//   `parallel_for_chunks` or other threads MUST `freeze()` the graph on the
-//   calling thread *before* the fan-out.
+//   Any algorithm that reads `node_adjacency` directly or indirectly from
+//   worker threads MUST call `freeze()` before the fan-out.
 //
-// Once frozen (or built via `from_sorted_unique_edges`, which rebuilds the CSR
+// Once frozen (or built via `from_unique_edges`, which rebuilds the CSR
 // eagerly), the graph has no mutable read path and is safe to share by
 // `const&` across reader threads. Graphs built incrementally via `insert_edge*`
 // (including the `from_edges` binding and `region_adjacency_graph`) start dirty.
@@ -255,20 +252,15 @@ public:
         return copy;
     }
 
-    // Fast construction from a pre-sorted, deduplicated edge list.
+    // Fast construction from a deduplicated edge list.
     //
-    // Precondition: `edges` is sorted ascending by `(u, v)` with `u < v` in
-    // every entry, and contains no duplicates. No node id may equal or exceed
-    // `number_of_nodes`. The call takes ownership of `edges` and uses it as
-    // the graph's edge storage, bypassing the per-edge hash dedup that
-    // `insert_edge` performs — useful when bulk-building a contracted graph
-    // whose unique edges are already known.
+    // Precondition: every edge has `u < v`, no edge is duplicated, and all
+    // node ids are less than `number_of_nodes`. The function preserves input
+    // edge order and bypasses the hash-based deduplication in `insert_edge`.
     //
-    // When `populate_lookup` is false, the edge-lookup hash map is left empty
-    // and `find_edge`/`insert_edge` are not available on the returned graph.
-    // Used by the fusion-move contraction primitive, whose sub-solver only
-    // walks edges and adjacency lists.
-    static UndirectedGraph from_sorted_unique_edges(
+    // When `populate_lookup` is false, `find_edge` cannot resolve these edges.
+    // A later `insert_edge` call cannot deduplicate against them.
+    static UndirectedGraph from_unique_edges(
         const NodeId number_of_nodes,
         std::vector<Edge> edges,
         const bool populate_lookup = true
@@ -289,6 +281,17 @@ public:
             }
         }
         return graph;
+    }
+
+    // Fast construction when the unique edge list is also sorted by `(u, v)`.
+    static UndirectedGraph from_sorted_unique_edges(
+        const NodeId number_of_nodes,
+        std::vector<Edge> edges,
+        const bool populate_lookup = true
+    ) {
+        return from_unique_edges(
+            number_of_nodes, std::move(edges), populate_lookup
+        );
     }
 
     [[nodiscard]] std::pair<std::vector<EdgeId>, std::vector<EdgeId>>

@@ -4,6 +4,69 @@ State of the lifted-multicut solvers vs nifty on the standard benchmark
 problems and notes on remaining optimization headroom. Read this before the
 next round of perf work.
 
+## Shared contraction topology
+
+Lifted greedy additive now uses
+`graph::detail::BasicContractionTopology`. An edge payload keeps each weight
+and lifted-edge flag next to its endpoints. Mutation observers update the
+heap and union-find without an intermediate event buffer. Folded edges remain
+lifted only when both inputs are lifted.
+
+## Lifted KL optimization (2026-07-27)
+
+The P4 work kept the solver API and output unchanged. It made three changes:
+
+- Store the move chain in `ChainScratch` so pair chains reuse its allocation.
+- Reset `moved` only for nodes that the chain popped. Do not reset
+  `cross_count`, because gain initialization overwrites it before each read.
+- Remove nested profiler scopes. The reported phase total now matches the
+  measured solver work.
+
+The cleanup phase decreased from approximately 1.6 ms to 1.1 ms on the 3D
+problem. The allocation reuse reduces work outside the previous nested
+profile scopes.
+
+The final comparison used separate production wheels for commit `19ca22d` and
+the candidate. Each row used 30 repeats and alternated bioimage-cpp with
+nifty. The second comparison reversed the wheel order.
+
+| Order | Problem | Baseline | Candidate | Change | Nifty | Nifty / candidate |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| baseline, candidate | 2D | 5.467 ms | 5.175 ms | -5.3% | 5.226 ms | 1.010 |
+| baseline, candidate | 3D | 98.330 ms | 92.393 ms | -6.0% | 115.965 ms | 1.255 |
+| candidate, baseline | 2D | 5.540 ms | 5.172 ms | -6.6% | 5.245 ms | 1.014 |
+| candidate, baseline | 3D | 95.142 ms | 89.787 ms | -5.6% | 114.645 ms | 1.277 |
+
+Both comparison orders passed the executable acceptance gate:
+
+```bash
+python development/graph/lifted_multicut/check_benchmark_acceptance.py \
+    BASELINE.jsonl CANDIDATE.jsonl \
+    --expected-repeats 30 \
+    --min-improvement 0.03 \
+    --reference-parity 3d
+```
+
+Every repeat preserved the baseline energy and label SHA-256 digest. The 3D
+energy difference from nifty remains `+0.069589`.
+
+A final production grid run preserved energy `-690544`. It took 569.5 s and
+used 917,608 KiB peak RSS.
+
+The benchmark harness now records raw runtimes, medians, minima, energies,
+label digests, source and build metadata, package paths, compiler details,
+CPU details, and thread-related environment variables. It can run either
+implementation independently and can require nifty.
+
+The following experiments did not meet the retention criteria:
+
+- Deriving heap membership from `cross_count` made the 3D median 2.7% slower.
+- A solver-local adjacency-weight snapshot improved one grid run by 2.9% but
+  added 6.8% peak RSS. Its 2D and 3D gain did not reproduce in isolated-wheel
+  comparisons.
+- A compact filtered-adjacency layout, a separate `in_heap` byte, and a sorted
+  cluster-pair pass did not reduce their profiled phases.
+
 ## Current benchmark matrix
 
 Produced by `python evaluate_solvers.py` (2026-05-17). All runs
@@ -317,12 +380,13 @@ The KL solver now beats nifty by ~17% on 3D and matches it on 2D.
 Further optimization is not currently a priority. Sketched levers, in
 case the workload changes:
 
-### CSR adjacency layout (estimated: 10–15% off `pair_chains`)
+### Solver-local adjacency snapshot
 
-`UndirectedGraph` stores adjacency as `vector<vector<Adjacency>>` — one
-heap allocation per node. A flat CSR built once at the start of
-`kernighan_lin` would reduce per-node cache-line misses in
-`chain_gain_init` and `chain_loop`. Doesn't change algorithm output.
+`UndirectedGraph` already stores adjacency as contiguous CSR. The 2026-07-27
+work tested a solver-local array that aligned each directed adjacency with its
+weight. The cache did not produce a stable 2D or 3D gain and increased grid
+peak RSS. Do not repeat this experiment without a workload that shows a
+larger weight-lookup cost.
 
 ### Skip pair-chains where heap stays empty (estimated: <5 ms)
 
@@ -370,8 +434,9 @@ Unchanged from before; useful for sanity-checking future estimates:
 
 1. Re-run `cd development/graph/lifted_multicut && python check_kernighan_lin.py --size 3d --repeats 5` to confirm the baseline hasn't drifted.
 2. Build with `pip install -e . --no-build-isolation -C cmake.define.BIOIMAGE_PROFILE=ON` for the profile breakdown.
-3. The next-most-attractive lever is CSR adjacency layout (10–15%),
-   but only worth doing if a heavier workload reveals the need.
+3. Optimize another chain-loop operation only when a new profile identifies
+   a stable cost. The current heap-state and adjacency-layout experiments did
+   not improve the matched benchmark.
 
 ## Files that matter
 

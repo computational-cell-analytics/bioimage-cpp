@@ -797,6 +797,38 @@ UInt64Array multicut_kernighan_lin(
     return vector_to_uint64_array(label_vector);
 }
 
+UInt64Array multicut_decomposer(
+    const Graph &graph,
+    ConstDoubleArray costs,
+    ConstUInt64Array initial_labels,
+    const graph::multicut::CloneableSolverBase *sub_solver,
+    const graph::multicut::CloneableSolverBase *fallthrough_solver,
+    const std::size_t number_of_threads
+) {
+    if (sub_solver == nullptr) {
+        throw std::invalid_argument("sub_solver must not be null");
+    }
+    auto cost_vector =
+        double_array_to_vector(costs, "edge_costs", graph.number_of_edges());
+    auto label_vector =
+        uint64_array_to_vector(
+            initial_labels, "initial_labels", graph.number_of_nodes()
+        );
+    graph::multicut::DecomposerSolver solver(
+        *sub_solver, fallthrough_solver, number_of_threads
+    );
+
+    std::vector<std::uint64_t> result;
+    {
+        nb::gil_scoped_release release;
+        graph::multicut::Objective objective(
+            graph, std::move(cost_vector), std::move(label_vector)
+        );
+        result = solver.optimize(objective);
+    }
+    return vector_to_uint64_array(result);
+}
+
 std::pair<UInt64Array, UInt64Array> graph_breadth_first_search(
     const Graph &graph,
     const std::uint64_t source,
@@ -2169,10 +2201,17 @@ void bind_graph(nb::module_ &m) {
         nb::arg("epsilon")
     );
 
-    // Multicut sub-solver hierarchy used by fusion moves. The classes are
-    // opaque to Python; constructors carry per-solver settings.
+    // Native solver hierarchy used by fusion moves and decomposition. The
+    // classes are opaque to Python; constructors carry solver settings.
     nb::class_<graph::multicut::SolverBase>(m, "_MulticutSolverBase");
-    nb::class_<graph::multicut::GreedyAdditiveSolver, graph::multicut::SolverBase>(
+    nb::class_<
+        graph::multicut::CloneableSolverBase,
+        graph::multicut::SolverBase
+    >(m, "_CloneableMulticutSolverBase");
+    nb::class_<
+        graph::multicut::GreedyAdditiveSolver,
+        graph::multicut::CloneableSolverBase
+    >(
         m, "_GreedyAdditiveMulticutSubSolver"
     )
         .def(
@@ -2183,7 +2222,10 @@ void bind_graph(nb::module_ &m) {
             nb::arg("seed") = 42,
             nb::arg("sigma") = 1.0
         );
-    nb::class_<graph::multicut::GreedyFixationSolver, graph::multicut::SolverBase>(
+    nb::class_<
+        graph::multicut::GreedyFixationSolver,
+        graph::multicut::CloneableSolverBase
+    >(
         m, "_GreedyFixationMulticutSubSolver"
     )
         .def(
@@ -2191,14 +2233,41 @@ void bind_graph(nb::module_ &m) {
             nb::arg("weight_stop") = 0.0,
             nb::arg("node_num_stop") = -1.0
         );
-    nb::class_<graph::multicut::KernighanLinSolver, graph::multicut::SolverBase>(
+    nb::class_<
+        graph::multicut::KernighanLinSolver,
+        graph::multicut::CloneableSolverBase
+    >(
         m, "_KernighanLinMulticutSubSolver"
     )
         .def(
-            nb::init<std::uint64_t, double>(),
+            nb::init<std::uint64_t, double, bool>(),
             nb::arg("number_of_outer_iterations") = 100,
-            nb::arg("epsilon") = 1.0e-6
+            nb::arg("epsilon") = 1.0e-6,
+            nb::arg("warm_start_greedy") = false
         );
+    nb::class_<
+        graph::multicut::ChainedSolver,
+        graph::multicut::CloneableSolverBase
+    >(m, "_ChainedMulticutSubSolver")
+        .def(
+            nb::init<
+                const std::vector<
+                    const graph::multicut::CloneableSolverBase *
+                > &
+            >(),
+            nb::arg("solvers")
+        );
+
+    m.def(
+        "_multicut_decomposer",
+        &multicut_decomposer,
+        nb::arg("graph"),
+        nb::arg("edge_costs"),
+        nb::arg("initial_labels"),
+        nb::arg("sub_solver"),
+        nb::arg("fallthrough_solver") = nullptr,
+        nb::arg("number_of_threads") = 0
+    );
 
     // Proposal generators used by fusion moves.
     nb::class_<graph::ProposalGeneratorBase>(m, "_ProposalGeneratorBase");

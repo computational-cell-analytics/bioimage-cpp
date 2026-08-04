@@ -2,11 +2,13 @@
 
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/label_multiset/multiset.hxx"
+#include "bioimage_cpp/label_multiset/validation.hxx"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -24,11 +26,12 @@ public:
         const ConstArrayView<OffsetT> &entry_sizes,
         const ConstArrayView<IdT> &ids,
         const ConstArrayView<CountT> &counts
-    )
-        : offsets_(offsets.data, offsets.data + offsets.shape[0]),
-          entry_sizes_(entry_sizes.data, entry_sizes.data + entry_sizes.shape[0]),
-          ids_(ids.data, ids.data + ids.shape[0]),
-          counts_(counts.data, counts.data + counts.shape[0]) {
+    ) {
+        validate_merger_entries(offsets, entry_sizes, ids, counts);
+        copy_view(offsets, offsets_);
+        copy_view(entry_sizes, entry_sizes_);
+        copy_view(ids, ids_);
+        copy_view(counts, counts_);
         init_hashed();
     }
 
@@ -40,7 +43,7 @@ public:
     // Ingest a batch of *unique* entries described by (unique_offsets,
     // entry_sizes, ids, counts), then rewrite `offsets` so that each element
     // (which was indexed by "entry id within the input batch") becomes the
-    // absolute byte offset into the deduplicated ids_/counts_ arrays.
+    // absolute element offset into the deduplicated ids_/counts_ arrays.
     void update(
         const ConstArrayView<OffsetT> &unique_offsets,
         const ConstArrayView<OffsetT> &batch_entry_sizes,
@@ -49,12 +52,15 @@ public:
         ArrayView<OffsetT> &offsets
     ) {
         const std::size_t n_entries = static_cast<std::size_t>(unique_offsets.shape[0]);
-        // Maps batch entry id → absolute byte offset in ids_/counts_.
-        std::unordered_map<OffsetT, OffsetT> new_offset_dict;
+        validate_merger_entries(
+            unique_offsets, batch_entry_sizes, batch_ids, batch_counts
+        );
+        validate_update_entry_indices(offsets, n_entries);
+        std::vector<OffsetT> new_offsets(n_entries);
 
         for (std::size_t entry = 0; entry < n_entries; ++entry) {
-            const OffsetT off = unique_offsets.data[entry];
-            const OffsetT size = batch_entry_sizes.data[entry];
+            const auto off = static_cast<std::size_t>(unique_offsets.data[entry]);
+            const auto size = static_cast<std::size_t>(batch_entry_sizes.data[entry]);
 
             const IdT *ids_begin = batch_ids.data + off;
             const IdT *ids_end = ids_begin + size;
@@ -84,7 +90,7 @@ public:
                     }
                     if (match) {
                         new_entry = false;
-                        new_offset_dict[static_cast<OffsetT>(entry)] = static_cast<OffsetT>(c_offset);
+                        new_offsets[entry] = static_cast<OffsetT>(c_offset);
                         break;
                     }
                 }
@@ -95,7 +101,7 @@ public:
                 const std::size_t this_offset = ids_.size();
                 offsets_.emplace_back(static_cast<OffsetT>(this_offset));
                 entry_sizes_.emplace_back(static_cast<OffsetT>(this_size));
-                new_offset_dict[static_cast<OffsetT>(entry)] = static_cast<OffsetT>(this_offset);
+                new_offsets[entry] = static_cast<OffsetT>(this_offset);
                 ids_.insert(ids_.end(), ids_begin, ids_end);
                 counts_.insert(counts_.end(), counts_begin, counts_end);
                 const std::size_t this_id = offsets_.size() - 1;
@@ -110,11 +116,23 @@ public:
 
         const std::size_t n_off = static_cast<std::size_t>(offsets.shape[0]);
         for (std::size_t i = 0; i < n_off; ++i) {
-            offsets.data[i] = new_offset_dict[offsets.data[i]];
+            offsets.data[i] = new_offsets[static_cast<std::size_t>(offsets.data[i])];
         }
     }
 
 private:
+    template <class T>
+    static void copy_view(
+        const ConstArrayView<T> &view,
+        std::vector<T> &output
+    ) {
+        const auto size = static_cast<std::size_t>(view.shape[0]);
+        output.resize(size);
+        if (size != 0) {
+            std::copy_n(view.data, size, output.data());
+        }
+    }
+
     void init_hashed() {
         const std::size_t n_entries = offsets_.size();
         for (std::size_t entry = 0; entry < n_entries; ++entry) {

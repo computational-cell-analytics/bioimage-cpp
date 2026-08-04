@@ -12,16 +12,10 @@ namespace bioimage_cpp::graph::lifted_multicut {
 
 // Reusable scratch state for `lifted_greedy_additive`.
 struct GreedyAdditiveWorkspace {
-    detail::DynamicGraph dynamic_graph;
-    bioimage_cpp::util::UnionFind union_find{0};
-    detail::EdgeHeap heap;
+    detail::ContractionState state;
 
     void reset(const UndirectedGraph &lifted_graph) {
-        dynamic_graph.reset(lifted_graph);
-        union_find.reset(static_cast<std::size_t>(lifted_graph.number_of_nodes()));
-        // The heap is sized by detail::initialize_dynamic_graph, which every
-        // caller runs immediately after reset(); resizing it here too would
-        // wipe the locator vector twice.
+        state.reset(lifted_graph);
     }
 };
 
@@ -49,35 +43,39 @@ inline std::vector<std::uint64_t> greedy_additive(
         BIOIMAGE_PROFILE_SCOPE(profile, "workspace_reset");
         workspace.reset(lifted_graph);
     }
-    auto &dynamic_graph = workspace.dynamic_graph;
-    auto &sets = workspace.union_find;
-    auto &heap = workspace.heap;
+    auto &state = workspace.state;
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "initialize");
-        detail::initialize_dynamic_graph(
-            lifted_graph, weights, n_base_edges, dynamic_graph, heap, add_noise, seed, sigma
+        detail::initialize_contraction_state(
+            lifted_graph,
+            weights,
+            n_base_edges,
+            state,
+            add_noise,
+            seed,
+            sigma
         );
     }
 
-    {
-        BIOIMAGE_PROFILE_SCOPE(profile, "contraction_loop");
-        while (!heap.empty() && dynamic_graph.alive_count > 1) {
-            const auto top = heap.top();
-            if (top.priority <= weight_stop) {
-                break;
-            }
-            if (node_num_stop > 0.0
-                && dynamic_graph.alive_count <= detail::stop_node_count(lifted_graph, node_num_stop)) {
-                break;
-            }
-            const auto &edge = dynamic_graph.edges[top.key];
-            detail::merge_dynamic_nodes(dynamic_graph, sets, heap, edge.u, edge.v);
+    while (!state.heap.empty() && state.topology.number_of_nodes() > 1) {
+        const auto top = state.heap.top();
+        if (top.priority <= weight_stop) {
+            break;
         }
+        if (node_num_stop > 0.0
+            && state.topology.number_of_nodes()
+                <= detail::stop_node_count(
+                    lifted_graph,
+                    node_num_stop
+                )) {
+            break;
+        }
+        detail::contract_edge(state, top.key, profile);
     }
     std::vector<std::uint64_t> labels;
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "labels_from_sets");
-        labels = detail::labels_from_sets(sets, lifted_graph);
+        labels = detail::labels_from_sets(state.union_find, lifted_graph);
     }
     BIOIMAGE_PROFILE_REPORT(profile);
     return labels;

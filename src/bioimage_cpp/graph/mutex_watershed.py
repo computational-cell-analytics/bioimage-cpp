@@ -16,6 +16,7 @@ from .. import _core
 from ._shared import (
     _as_1d_array,
     _as_uv_array,
+    _require_finite_weights,
     _resolve_weight_dtype,
 )
 
@@ -67,13 +68,13 @@ def mutex_watershed_clustering(
     edge_costs:
         1D array of length ``graph.number_of_edges``. Supported dtypes are
         ``float32`` and ``float64``; other floating dtypes are cast to
-        ``float32``. Higher values are more attractive.
+        ``float32``. Values must be finite. Higher values are more attractive.
     mutex_uvs:
         ``(n_mutex, 2)`` uint64 array of (u, v) pairs for the mutex edges.
     mutex_costs:
         1D array of length ``n_mutex``. Same dtype rules as ``edge_costs``;
-        if the two dtypes differ both are promoted to ``float64``. Higher
-        values are stronger repulsions.
+        if the two dtypes differ both are promoted to ``float64``. Values must
+        be finite. Higher values are stronger repulsions.
 
     Returns
     -------
@@ -103,6 +104,8 @@ def mutex_watershed_clustering(
         "mutex_costs",
         int(mutex_uv_array.shape[0]),
     )
+    _require_finite_weights(edge_cost_array, "edge_costs")
+    _require_finite_weights(mutex_cost_array, "mutex_costs")
     run = _MUTEX_WATERSHED_CLUSTERING_BY_DTYPE[edge_cost_array.dtype]
     return run(graph, edge_cost_array, mutex_uv_array, mutex_cost_array)
 
@@ -148,7 +151,8 @@ def semantic_mutex_watershed_clustering(
     semantic_costs:
         1D array of length ``n_semantic``. Same dtype rules as
         ``edge_costs``; if the floating dtypes of the three weight arrays
-        do not all agree, all three are promoted to ``float64``.
+        do not all agree, all three are promoted to ``float64``. Values must
+        be finite.
 
     Returns
     -------
@@ -193,6 +197,9 @@ def semantic_mutex_watershed_clustering(
         "semantic_costs",
         int(semantic_uv_array.shape[0]),
     )
+    _require_finite_weights(edge_cost_array, "edge_costs")
+    _require_finite_weights(mutex_cost_array, "mutex_costs")
+    _require_finite_weights(semantic_cost_array, "semantic_costs")
 
     run = _SEMANTIC_MUTEX_WATERSHED_CLUSTERING_BY_DTYPE[edge_cost_array.dtype]
     return run(

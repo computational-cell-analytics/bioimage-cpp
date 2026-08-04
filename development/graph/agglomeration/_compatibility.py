@@ -108,26 +108,39 @@ def time_call(function: Callable[[], np.ndarray], repeats: int):
 
 
 def variation_of_information(labels_a: np.ndarray, labels_b: np.ndarray) -> float:
-    labels_a = np.asarray(labels_a).astype(np.int64)
-    labels_b = np.asarray(labels_b).astype(np.int64)
+    labels_a = np.asarray(labels_a).reshape(-1)
+    labels_b = np.asarray(labels_b).reshape(-1)
+    if labels_a.size != labels_b.size:
+        raise ValueError(
+            "labels_a and labels_b must have the same number of elements, got "
+            f"{labels_a.size} and {labels_b.size}"
+        )
     n = labels_a.size
     if n == 0:
         return 0.0
     _, a_inv, a_counts = np.unique(labels_a, return_inverse=True, return_counts=True)
     _, b_inv, b_counts = np.unique(labels_b, return_inverse=True, return_counts=True)
-    pa = a_counts / n
-    pb = b_counts / n
-    contingency = np.zeros((a_counts.size, b_counts.size), dtype=np.float64)
-    np.add.at(contingency, (a_inv, b_inv), 1.0)
-    contingency /= n
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ha = -np.sum(pa * np.log(pa, where=pa > 0))
-        hb = -np.sum(pb * np.log(pb, where=pb > 0))
-        joint = -np.sum(
-            contingency * np.log(contingency, where=contingency > 0)
+    pairs = np.stack([a_inv, b_inv], axis=1)
+    _, joint_counts = np.unique(pairs, axis=0, return_counts=True)
+
+    def entropy(counts: np.ndarray) -> float:
+        probabilities = counts.astype(np.float64) / float(n)
+        return float(-np.sum(probabilities * np.log(probabilities)))
+
+    ha = entropy(a_counts)
+    hb = entropy(b_counts)
+    joint = entropy(joint_counts)
+    result = 2.0 * joint - ha - hb
+    tolerance = (
+        64.0
+        * np.finfo(np.float64).eps
+        * max(1.0, abs(ha), abs(hb), abs(joint))
+    )
+    if result < -tolerance:
+        raise RuntimeError(
+            "variation of information is negative beyond floating-point round-off"
         )
-    mutual_info = ha + hb - joint
-    return float(2.0 * joint - ha - hb - 2.0 * mutual_info + ha + hb)
+    return max(0.0, float(result))
 
 
 def adjusted_rand(labels_a: np.ndarray, labels_b: np.ndarray) -> float:

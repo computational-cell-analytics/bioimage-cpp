@@ -3,9 +3,11 @@
 #include "bioimage_cpp/array_view.hxx"
 #include "bioimage_cpp/blocking.hxx"
 #include "bioimage_cpp/label_multiset/multiset.hxx"
+#include "bioimage_cpp/label_multiset/validation.hxx"
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -21,13 +23,15 @@ inline void read_subset(
     std::vector<CountT> &counts_out,
     const bool argsort = true
 ) {
+    validate_read_subset(offsets, sizes, ids, counts);
     std::unordered_map<IdT, CountT> count_dict;
 
     const std::size_t n_offsets = static_cast<std::size_t>(offsets.shape[0]);
     for (std::size_t off_id = 0; off_id < n_offsets; ++off_id) {
         const std::size_t offset = static_cast<std::size_t>(offsets.data[off_id]);
         const std::size_t size = static_cast<std::size_t>(sizes.data[off_id]);
-        for (std::size_t pos = offset; pos < offset + size; ++pos) {
+        for (std::size_t relative = 0; relative < size; ++relative) {
+            const auto pos = offset + relative;
             const IdT id = ids.data[pos];
             const CountT count = counts.data[pos];
             auto it = count_dict.find(id);
@@ -52,11 +56,10 @@ inline void read_subset(
     }
 }
 
-// Block-aware variant: collect (offset, size) pairs for every spatial position
-// in the block, then call the flat overload. C-order strides over the *full*
-// spatial domain.
+namespace detail {
+
 template <class OffsetT, class IdT, class CountT>
-inline void read_subset_block(
+inline void read_subset_block_unchecked(
     const Block &block,
     const std::vector<std::size_t> &strides,
     const ConstArrayView<OffsetT> &offsets,
@@ -66,8 +69,13 @@ inline void read_subset_block(
     const ConstArrayView<CountT> &counts,
     std::vector<IdT> &ids_out,
     std::vector<CountT> &counts_out,
-    const bool argsort = true
+    const bool argsort
 ) {
+    if (strides.size() != block.begin().size()) {
+        throw std::invalid_argument(
+            "strides length must match block dimensionality"
+        );
+    }
     std::unordered_map<IdT, CountT> count_dict;
     const auto &begin = block.begin();
     const auto &end = block.end();
@@ -80,10 +88,16 @@ inline void read_subset_block(
         for (std::size_t d = 0; d < ndim; ++d) {
             index += static_cast<std::size_t>(coord[d]) * strides[d];
         }
+        if (index >= static_cast<std::size_t>(offsets.shape[0])) {
+            throw std::invalid_argument(
+                "block coordinates exceed the flat multiset spatial extent"
+            );
+        }
         const std::size_t off = static_cast<std::size_t>(offsets.data[index]);
         const std::size_t entry_idx = static_cast<std::size_t>(entry_offsets.data[index]);
         const std::size_t size = static_cast<std::size_t>(entry_sizes.data[entry_idx]);
-        for (std::size_t pos = off; pos < off + size; ++pos) {
+        for (std::size_t relative = 0; relative < size; ++relative) {
+            const auto pos = off + relative;
             const IdT id = ids.data[pos];
             const CountT count = counts.data[pos];
             auto it = count_dict.find(id);
@@ -119,6 +133,37 @@ inline void read_subset_block(
     if (argsort) {
         argsort_by_first(ids_out, counts_out);
     }
+}
+
+} // namespace detail
+
+// Block-aware variant. C-order strides cover the full spatial domain.
+template <class OffsetT, class IdT, class CountT>
+inline void read_subset_block(
+    const Block &block,
+    const std::vector<std::size_t> &strides,
+    const ConstArrayView<OffsetT> &offsets,
+    const ConstArrayView<OffsetT> &entry_sizes,
+    const ConstArrayView<OffsetT> &entry_offsets,
+    const ConstArrayView<IdT> &ids,
+    const ConstArrayView<CountT> &counts,
+    std::vector<IdT> &ids_out,
+    std::vector<CountT> &counts_out,
+    const bool argsort = true
+) {
+    validate_flat_multiset(offsets, entry_sizes, entry_offsets, ids, counts);
+    detail::read_subset_block_unchecked(
+        block,
+        strides,
+        offsets,
+        entry_sizes,
+        entry_offsets,
+        ids,
+        counts,
+        ids_out,
+        counts_out,
+        argsort
+    );
 }
 
 inline std::vector<std::size_t> c_order_strides_for_shape(const CoordinateVector &shape) {

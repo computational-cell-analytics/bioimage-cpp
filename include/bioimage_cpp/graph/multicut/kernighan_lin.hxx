@@ -2,12 +2,16 @@
 
 #include "bioimage_cpp/detail/edge_hash.hxx"
 #include "bioimage_cpp/detail/indexed_heap.hxx"
-#include "bioimage_cpp/util/union_find.hxx"
+#include "bioimage_cpp/detail/profile.hxx"
+#include "bioimage_cpp/detail/relabel.hxx"
+#include "bioimage_cpp/graph/multicut/greedy_additive.hxx"
 #include "bioimage_cpp/graph/multicut/objective.hxx"
+#include "bioimage_cpp/util/union_find.hxx"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -69,9 +73,7 @@ inline std::vector<std::vector<std::uint64_t>> build_cluster_to_nodes(
 // Per-node scratch reused across chains.
 //
 // - `in_pair`     : 1 while the node sits in (A ∪ B) for the current chain.
-// - `moved`       : 1 once the node has been popped (tentatively moved this
-//                   chain). Pairs with `in_pair` to distinguish "moved" from
-//                   "non-bordered, never pushed".
+// - `moved`       : 1 once the node has been popped.
 // - `cross_count` : number of cross-side bipartition neighbors. Matches
 //                   nifty's `referenced_by`: a node is only allowed in the
 //                   heap once this is positive, which restricts the chain to
@@ -97,11 +99,22 @@ struct ChainBuffers {
           stash_gain(n_nodes, 0.0) {}
 };
 
+struct FilteredAdjacency {
+    std::uint64_t node;
+    double weight;
+};
+
 struct ChainScratch {
     std::vector<std::uint64_t> queue_nodes;
     bioimage_cpp::detail::DenseIndexedHeap<double> heap;
+    std::vector<std::uint64_t> filtered_offset;
+    std::vector<std::uint32_t> filtered_count;
+    std::vector<FilteredAdjacency> filtered_entries;
 
-    explicit ChainScratch(const std::size_t n_nodes) : heap(n_nodes) {}
+    explicit ChainScratch(const std::size_t n_nodes)
+        : heap(n_nodes),
+          filtered_offset(n_nodes, 0),
+          filtered_count(n_nodes, 0) {}
 };
 
 // Run a Kernighan-Lin move-chain on the bipartition (cluster_a, cluster_b).
@@ -115,6 +128,7 @@ struct ChainScratch {
 // Also handles single-cluster splits: pass `cluster_b` as a fresh label
 // (no live members) and the chain will try to peel off a subset of `cluster_a`
 // into the new label.
+template <class ProfilerT>
 inline double run_chain(
     const UndirectedGraph &graph,
     const std::vector<double> &costs,
@@ -124,7 +138,8 @@ inline double run_chain(
     ChainScratch &scratch,
     const std::uint64_t cluster_a,
     const std::uint64_t cluster_b,
-    const double epsilon
+    const double epsilon,
+    [[maybe_unused]] ProfilerT &profile
 ) {
     if (cluster_a == cluster_b) {
         return 0.0;
@@ -132,27 +147,32 @@ inline double run_chain(
 
     auto &queue_nodes = scratch.queue_nodes;
     auto &heap = scratch.heap;
+    auto &filtered_entries = scratch.filtered_entries;
     queue_nodes.clear();
     heap.clear();
-
-    const auto &stale_a = cluster_to_nodes[static_cast<std::size_t>(cluster_a)];
-    const auto &stale_b = cluster_to_nodes[static_cast<std::size_t>(cluster_b)];
-    queue_nodes.reserve(stale_a.size() + stale_b.size());
+    filtered_entries.clear();
 
     std::size_t live_a = 0;
     std::size_t live_b = 0;
-    for (const auto v : stale_a) {
-        if (labels[static_cast<std::size_t>(v)] == cluster_a) {
-            queue_nodes.push_back(v);
-            bufs.in_pair[static_cast<std::size_t>(v)] = 1;
-            ++live_a;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "chain_init");
+        const auto &stale_a = cluster_to_nodes[static_cast<std::size_t>(cluster_a)];
+        const auto &stale_b = cluster_to_nodes[static_cast<std::size_t>(cluster_b)];
+        queue_nodes.reserve(stale_a.size() + stale_b.size());
+
+        for (const auto v : stale_a) {
+            if (labels[static_cast<std::size_t>(v)] == cluster_a) {
+                queue_nodes.push_back(v);
+                bufs.in_pair[static_cast<std::size_t>(v)] = 1;
+                ++live_a;
+            }
         }
-    }
-    for (const auto v : stale_b) {
-        if (labels[static_cast<std::size_t>(v)] == cluster_b) {
-            queue_nodes.push_back(v);
-            bufs.in_pair[static_cast<std::size_t>(v)] = 1;
-            ++live_b;
+        for (const auto v : stale_b) {
+            if (labels[static_cast<std::size_t>(v)] == cluster_b) {
+                queue_nodes.push_back(v);
+                bufs.in_pair[static_cast<std::size_t>(v)] = 1;
+                ++live_b;
+            }
         }
     }
     // Skip if no non-trivial move exists: the cluster_b == fresh-label split
@@ -169,33 +189,45 @@ inline double run_chain(
     // A node is eligible because there is no border yet — the first move has
     // to peel off the weakest-attached interior node.
     const bool is_split = (live_b == 0);
-    for (const auto v : queue_nodes) {
-        double w_to_a = 0.0;
-        double w_to_b = 0.0;
-        std::uint32_t cross = 0;
-        const auto v_label = labels[static_cast<std::size_t>(v)];
-        for (const auto adj : graph.node_adjacency(v)) {
-            const auto u_key = static_cast<std::size_t>(adj.node);
-            if (!bufs.in_pair[u_key]) {
-                continue;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "chain_gain_init");
+        for (const auto v : queue_nodes) {
+            double w_to_a = 0.0;
+            double w_to_b = 0.0;
+            std::uint32_t cross = 0;
+            const auto v_label = labels[static_cast<std::size_t>(v)];
+            const auto v_key = static_cast<std::size_t>(v);
+            const auto filter_start = filtered_entries.size();
+            for (const auto adj : graph.node_adjacency(v)) {
+                const auto u_key = static_cast<std::size_t>(adj.node);
+                if (!bufs.in_pair[u_key]) {
+                    continue;
+                }
+                const auto c = costs[static_cast<std::size_t>(adj.edge)];
+                const auto u_label = labels[u_key];
+                filtered_entries.push_back({adj.node, c});
+                if (u_label == cluster_a) {
+                    w_to_a += c;
+                } else {
+                    w_to_b += c;
+                }
+                if (u_label != v_label) {
+                    ++cross;
+                }
             }
-            const auto c = costs[static_cast<std::size_t>(adj.edge)];
-            const auto u_label = labels[u_key];
-            if (u_label == cluster_a) {
-                w_to_a += c;
-            } else {
-                w_to_b += c;
+            scratch.filtered_offset[v_key] =
+                static_cast<std::uint64_t>(filter_start);
+            scratch.filtered_count[v_key] =
+                static_cast<std::uint32_t>(
+                    filtered_entries.size() - filter_start
+                );
+            const double gain_v =
+                (v_label == cluster_a) ? (w_to_b - w_to_a) : (w_to_a - w_to_b);
+            bufs.stash_gain[v_key] = gain_v;
+            bufs.cross_count[v_key] = cross;
+            if (is_split || cross > 0) {
+                heap.push(v_key, gain_v);
             }
-            if (u_label != v_label) {
-                ++cross;
-            }
-        }
-        const double gain_v = (v_label == cluster_a) ? (w_to_b - w_to_a) : (w_to_a - w_to_b);
-        const auto v_key = static_cast<std::size_t>(v);
-        bufs.stash_gain[v_key] = gain_v;
-        bufs.cross_count[v_key] = cross;
-        if (is_split || cross > 0) {
-            heap.push(v_key, gain_v);
         }
     }
 
@@ -210,61 +242,75 @@ inline double run_chain(
     double best_cumulative = 0.0;
     std::size_t best_prefix = 0;
 
-    while (!heap.empty()) {
-        const auto top = heap.pop();
-        const auto v = static_cast<std::uint64_t>(top.key);
-        const auto gain_v = top.priority;
-        const auto v_key = static_cast<std::size_t>(v);
-        const auto old_label = labels[v_key];
-        const auto new_label = (old_label == cluster_a) ? cluster_b : cluster_a;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "chain_loop");
+        while (!heap.empty()) {
+            const auto top = heap.pop();
+            const auto v = static_cast<std::uint64_t>(top.key);
+            const auto gain_v = top.priority;
+            const auto v_key = static_cast<std::size_t>(v);
+            const auto old_label = labels[v_key];
+            const auto new_label = (old_label == cluster_a) ? cluster_b : cluster_a;
 
-        bufs.moved[v_key] = 1;
-        cumulative += gain_v;
-        chain.push_back({v, new_label});
+            bufs.moved[v_key] = 1;
+            cumulative += gain_v;
+            chain.push_back({v, new_label});
 
-        if (cumulative > best_cumulative + epsilon) {
-            best_cumulative = cumulative;
-            best_prefix = chain.size();
-        }
-
-        for (const auto adj : graph.node_adjacency(v)) {
-            const auto u_key = static_cast<std::size_t>(adj.node);
-            if (!bufs.in_pair[u_key] || bufs.moved[u_key]) {
-                continue;
+            if (cumulative > best_cumulative + epsilon) {
+                best_cumulative = cumulative;
+                best_prefix = chain.size();
             }
-            const auto c = costs[static_cast<std::size_t>(adj.edge)];
-            const auto u_label = labels[u_key];
-            const double delta = (u_label == old_label) ? 2.0 * c : -2.0 * c;
-            bufs.stash_gain[u_key] += delta;
-            if (heap.contains(u_key)) {
-                heap.change(u_key, bufs.stash_gain[u_key]);
-            }
-            // Border maintenance. For pair-chains, only nodes that are
-            // currently bordered may be popped. A node becomes bordered when
-            // it gains its first cross-side neighbor (cross_count 0 -> 1) and
-            // un-borders when it loses its last (cross_count -> 0).
-            if (u_label == old_label) {
-                ++bufs.cross_count[u_key];
-                if (!is_split && !heap.contains(u_key)) {
-                    heap.push(u_key, bufs.stash_gain[u_key]);
+
+            const auto offset = scratch.filtered_offset[v_key];
+            const auto count = scratch.filtered_count[v_key];
+            for (std::uint32_t index = 0; index < count; ++index) {
+                const auto &adjacency = filtered_entries[offset + index];
+                const auto u_key =
+                    static_cast<std::size_t>(adjacency.node);
+                if (bufs.moved[u_key]) {
+                    continue;
                 }
-            } else {
-                if (bufs.cross_count[u_key] > 0) {
-                    --bufs.cross_count[u_key];
+                const auto u_label = labels[u_key];
+                const double delta = (u_label == old_label)
+                    ? 2.0 * adjacency.weight
+                    : -2.0 * adjacency.weight;
+                bufs.stash_gain[u_key] += delta;
+                // Each unmoved split node stays in the heap. An unmoved pair
+                // node is in the heap exactly when it has a cross-side edge.
+                const bool was_in_heap =
+                    is_split || bufs.cross_count[u_key] > 0;
+                if (was_in_heap) {
+                    heap.change(u_key, bufs.stash_gain[u_key]);
                 }
-                if (!is_split && bufs.cross_count[u_key] == 0
-                    && heap.contains(u_key)) {
-                    heap.erase(u_key);
+                // Border maintenance. For pair-chains, only nodes that are
+                // currently bordered may be popped.
+                if (u_label == old_label) {
+                    ++bufs.cross_count[u_key];
+                    if (!is_split && !was_in_heap) {
+                        heap.push(u_key, bufs.stash_gain[u_key]);
+                    }
+                } else {
+                    if (bufs.cross_count[u_key] > 0) {
+                        --bufs.cross_count[u_key];
+                    }
+                    if (!is_split && bufs.cross_count[u_key] == 0
+                        && was_in_heap) {
+                        heap.erase(u_key);
+                    }
                 }
             }
         }
     }
 
-    for (const auto v : queue_nodes) {
-        const auto v_key = static_cast<std::size_t>(v);
-        bufs.in_pair[v_key] = 0;
-        bufs.moved[v_key] = 0;
-        bufs.cross_count[v_key] = 0;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "chain_cleanup");
+        for (const auto v : queue_nodes) {
+            const auto v_key = static_cast<std::size_t>(v);
+            bufs.in_pair[v_key] = 0;
+        }
+        for (const auto &move : chain) {
+            bufs.moved[static_cast<std::size_t>(move.node)] = 0;
+        }
     }
 
     if (best_cumulative > epsilon) {
@@ -374,29 +420,68 @@ inline std::vector<std::uint64_t> kernighan_lin(
     const std::uint64_t number_of_outer_iterations,
     const double epsilon
 ) {
+    BIOIMAGE_PROFILE_INIT(profile);
     validate_costs(graph, costs);
     validate_labels(graph, labels);
-    labels = dense_relabel(labels);
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "initial_relabel");
+        labels = dense_relabel(labels);
+    }
 
     const auto n_nodes = static_cast<std::size_t>(graph.number_of_nodes());
     detail_kl::ChainBuffers bufs(n_nodes);
     detail_kl::ChainScratch scratch(n_nodes);
 
+    std::vector<std::uint8_t> changed;
+    auto previous_labels = labels;
+
     for (std::uint64_t iteration = 0; iteration < number_of_outer_iterations; ++iteration) {
         bool improved = false;
+        // Disable the gate in the last configured iteration. This preserves
+        // the fixed output when an unchanged cluster becomes splittable.
+        const bool use_changed_gate =
+            iteration + 1 < number_of_outer_iterations;
 
-        const auto pairs_for_chain = detail_kl::compute_cluster_pairs(graph, costs, labels);
-        const auto number_of_clusters = labels.empty()
-            ? std::uint64_t{0}
-            : (*std::max_element(labels.begin(), labels.end()) + 1);
-        auto cluster_to_nodes = detail_kl::build_cluster_to_nodes(labels, number_of_clusters);
-
+        std::vector<detail_kl::ClusterPair> pairs_for_chain;
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "compute_pairs_chain");
+            pairs_for_chain = detail_kl::compute_cluster_pairs(graph, costs, labels);
+        }
+        std::uint64_t number_of_clusters = 0;
+        std::vector<std::vector<std::uint64_t>> cluster_to_nodes;
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "build_cluster_index");
+            number_of_clusters = labels.empty()
+                ? std::uint64_t{0}
+                : (*std::max_element(labels.begin(), labels.end()) + 1);
+            cluster_to_nodes =
+                detail_kl::build_cluster_to_nodes(labels, number_of_clusters);
+        }
+        if (iteration == 0) {
+            changed.assign(static_cast<std::size_t>(number_of_clusters), 1);
+        }
         for (const auto &pair : pairs_for_chain) {
+            if (use_changed_gate
+                && !changed[static_cast<std::size_t>(pair.a)]
+                && !changed[static_cast<std::size_t>(pair.b)]) {
+                continue;
+            }
             const auto delta = detail_kl::run_chain(
-                graph, costs, labels, cluster_to_nodes, bufs, scratch, pair.a, pair.b, epsilon
+                graph,
+                costs,
+                labels,
+                cluster_to_nodes,
+                bufs,
+                scratch,
+                pair.a,
+                pair.b,
+                epsilon,
+                profile
             );
             if (delta > epsilon) {
                 improved = true;
+                changed[static_cast<std::size_t>(pair.a)] = 1;
+                changed[static_cast<std::size_t>(pair.b)] = 1;
             }
         }
 
@@ -409,12 +494,25 @@ inline std::vector<std::uint64_t> kernighan_lin(
         // nodes.
         std::uint64_t next_label = number_of_clusters;
         for (std::uint64_t cluster = 0; cluster < number_of_clusters; ++cluster) {
+            if (use_changed_gate
+                && !changed[static_cast<std::size_t>(cluster)]) {
+                continue;
+            }
             while (true) {
                 if (next_label >= cluster_to_nodes.size()) {
                     cluster_to_nodes.resize(static_cast<std::size_t>(next_label) + 1);
                 }
                 const auto delta = detail_kl::run_chain(
-                    graph, costs, labels, cluster_to_nodes, bufs, scratch, cluster, next_label, epsilon
+                    graph,
+                    costs,
+                    labels,
+                    cluster_to_nodes,
+                    bufs,
+                    scratch,
+                    cluster,
+                    next_label,
+                    epsilon,
+                    profile
                 );
                 if (delta <= epsilon) {
                     break;
@@ -424,41 +522,81 @@ inline std::vector<std::uint64_t> kernighan_lin(
             }
         }
 
-        const auto pairs_for_join = detail_kl::compute_cluster_pairs(graph, costs, labels);
+        std::vector<detail_kl::ClusterPair> pairs_for_join;
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "compute_pairs_join");
+            pairs_for_join = detail_kl::compute_cluster_pairs(graph, costs, labels);
+        }
         const auto current_number_of_clusters = labels.empty()
             ? std::uint64_t{0}
             : (*std::max_element(labels.begin(), labels.end()) + 1);
-        if (detail_kl::apply_joins(labels, pairs_for_join, current_number_of_clusters, epsilon)) {
-            improved = true;
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "joins");
+            if (detail_kl::apply_joins(
+                    labels, pairs_for_join, current_number_of_clusters, epsilon
+                )) {
+                improved = true;
+            }
         }
 
-        if (detail_kl::single_node_polish(graph, costs, labels, epsilon)) {
-            improved = true;
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "polish");
+            if (detail_kl::single_node_polish(graph, costs, labels, epsilon)) {
+                improved = true;
+            }
         }
 
-        labels = dense_relabel(labels);
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "relabel");
+            labels = dense_relabel(labels);
+        }
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "compute_changed");
+            const auto new_number_of_clusters = labels.empty()
+                ? std::uint64_t{0}
+                : (*std::max_element(labels.begin(), labels.end()) + 1);
+            changed = bioimage_cpp::detail::changed_clusters(
+                labels, previous_labels, new_number_of_clusters
+            );
+            previous_labels = labels;
+        }
         if (!improved) {
             break;
         }
     }
+    BIOIMAGE_PROFILE_REPORT(profile);
     return labels;
 }
 
-class KernighanLinSolver final : public SolverBase {
+class KernighanLinSolver final : public CloneableSolverBase {
 public:
     KernighanLinSolver(
         const std::uint64_t number_of_outer_iterations = 100,
-        const double epsilon = 1.0e-6
+        const double epsilon = 1.0e-6,
+        const bool warm_start_greedy = false
     )
         : number_of_outer_iterations_(number_of_outer_iterations),
-          epsilon_(epsilon) {
+          epsilon_(epsilon),
+          warm_start_greedy_(warm_start_greedy) {
     }
 
     std::vector<std::uint64_t> optimize(Objective &objective) const override {
+        auto initial_labels = objective.labels();
+        if (warm_start_greedy_ && is_singleton_labeling(initial_labels)) {
+            initial_labels = greedy_additive(
+                objective.graph(),
+                objective.costs(),
+                0.0,
+                -1.0,
+                false,
+                42,
+                1.0
+            );
+        }
         auto labels = kernighan_lin(
             objective.graph(),
             objective.costs(),
-            objective.labels(),
+            std::move(initial_labels),
             number_of_outer_iterations_,
             epsilon_
         );
@@ -466,9 +604,23 @@ public:
         return labels;
     }
 
+    std::unique_ptr<CloneableSolverBase> clone() const override {
+        return std::make_unique<KernighanLinSolver>(*this);
+    }
+
 private:
+    static bool is_singleton_labeling(const std::vector<std::uint64_t> &labels) {
+        for (std::size_t index = 0; index < labels.size(); ++index) {
+            if (labels[index] != static_cast<std::uint64_t>(index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     std::uint64_t number_of_outer_iterations_;
     double epsilon_;
+    bool warm_start_greedy_;
 };
 
 } // namespace bioimage_cpp::graph::multicut

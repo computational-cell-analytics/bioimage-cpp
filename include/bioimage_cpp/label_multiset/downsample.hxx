@@ -4,6 +4,7 @@
 #include "bioimage_cpp/blocking.hxx"
 #include "bioimage_cpp/label_multiset/multiset.hxx"
 #include "bioimage_cpp/label_multiset/read_subset.hxx"
+#include "bioimage_cpp/label_multiset/validation.hxx"
 
 #include <algorithm>
 #include <cstddef>
@@ -41,6 +42,12 @@ inline void downsample_multiset(
     std::vector<IdT> &new_ids,
     std::vector<CountT> &new_counts
 ) {
+    validate_downsample_input(
+        blocking, offsets, entry_sizes, entry_offsets, ids, counts
+    );
+    validate_downsample_output(
+        blocking, new_argmax, new_offsets, new_entry_offsets
+    );
     using Key = HashKey<IdT, CountT>;
     std::unordered_map<Key, std::vector<std::size_t>, HashKeyHash> candidate_dict;
 
@@ -56,9 +63,10 @@ inline void downsample_multiset(
         std::vector<IdT> this_ids;
         std::vector<CountT> this_counts;
         const auto block = blocking.get_block(static_cast<std::uint64_t>(block_id));
-        read_subset_block(block, strides,
-                          offsets, entry_sizes, entry_offsets, ids, counts,
-                          this_ids, this_counts, /*argsort=*/true);
+        detail::read_subset_block_unchecked(
+            block, strides, offsets, entry_sizes, entry_offsets, ids, counts,
+            this_ids, this_counts, /*argsort=*/true
+        );
 
         IdT max_label{};
         CountT max_count{};

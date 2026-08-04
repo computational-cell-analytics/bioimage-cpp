@@ -1,7 +1,6 @@
 #pragma once
 
 #include "bioimage_cpp/graph/agglomeration/cluster_policy_base.hxx"
-#include "bioimage_cpp/graph/multicut/detail.hxx"
 #include "bioimage_cpp/graph/undirected_graph.hxx"
 
 #include <algorithm>
@@ -50,8 +49,8 @@ public:
           num_clusters_stop_(num_clusters_stop),
           num_edges_stop_(num_edges_stop),
           threshold_(threshold) {
-        if (num_bins_ == 0) {
-            throw std::invalid_argument("num_bins must be >= 1");
+        if (num_bins_ < 2) {
+            throw std::invalid_argument("num_bins must be >= 2");
         }
         if (!(bin_max_ > bin_min_)) {
             throw std::invalid_argument(
@@ -63,7 +62,6 @@ public:
 
     void initialize(
         const UndirectedGraph &graph,
-        DynamicGraph &dynamic_graph,
         EdgeHeap &heap
     ) override {
         const auto n_edges = static_cast<std::size_t>(graph.number_of_edges());
@@ -75,35 +73,26 @@ public:
             );
         }
         histograms_.assign(n_edges, std::vector<BinCount>(num_bins_, 0.0));
-        active_edges_ = n_edges;
 
         std::vector<EdgeHeap::Entry> entries;
         entries.reserve(n_edges);
         for (std::uint64_t edge_id = 0; edge_id < graph.number_of_edges(); ++edge_id) {
-            const auto uv = graph.uv(edge_id);
-            const auto u = static_cast<std::size_t>(uv.first);
-            const auto v = static_cast<std::size_t>(uv.second);
             const auto edge_index = static_cast<std::size_t>(edge_id);
             const double indicator = initial_indicators_[edge_index];
             insert_into(histograms_[edge_index], indicator, 1.0);
             const double priority = indicator;
-            auto &edge = dynamic_graph.edges[edge_index];
-            edge.u = u;
-            edge.v = v;
-            edge.weight = priority;
-            edge.is_constraint = 0;
-            dynamic_graph.adjacency[u].push_back({v, edge_index});
-            dynamic_graph.adjacency[v].push_back({u, edge_index});
             entries.push_back({edge_index, priority});
         }
         heap.build_heap(std::move(entries));
     }
 
-    bool is_done(const DynamicGraph &dynamic_graph) const override {
-        if (num_clusters_stop_ > 0 && dynamic_graph.alive_count <= num_clusters_stop_) {
+    bool is_done(const Topology &topology) const override {
+        if (num_clusters_stop_ > 0
+            && topology.number_of_nodes() <= num_clusters_stop_) {
             return true;
         }
-        if (num_edges_stop_ > 0 && active_edges_ <= num_edges_stop_) {
+        if (num_edges_stop_ > 0
+            && topology.number_of_edges() <= num_edges_stop_) {
             return true;
         }
         return false;
@@ -112,10 +101,10 @@ public:
     Action next_action(
         std::size_t edge_id,
         double priority,
-        const DynamicGraph &dynamic_graph
+        const Topology &topology
     ) override {
         (void)edge_id;
-        (void)dynamic_graph;
+        (void)topology;
         if (priority >= threshold_) {
             return Action::kStop;
         }
@@ -140,7 +129,6 @@ public:
         for (std::size_t bin = 0; bin < num_bins_; ++bin) {
             target[bin] += source[bin];
         }
-        --active_edges_;
         return median_of(target);
     }
 
@@ -235,7 +223,6 @@ private:
     std::size_t num_edges_stop_;
     double threshold_;
     std::vector<std::vector<BinCount>> histograms_;
-    std::size_t active_edges_ = 0;
 };
 
 } // namespace bioimage_cpp::graph::agglomeration

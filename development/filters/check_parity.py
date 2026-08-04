@@ -14,13 +14,12 @@ Exits non-zero on any tolerance failure.
 from __future__ import annotations
 
 import argparse
-import math
+import os
 import sys
 
 import numpy as np
 
 from _bench_utils import (
-    ADAPTERS,
     BenchConfig,
     FILTERS,
     LIBRARIES,
@@ -45,6 +44,11 @@ def parse_args() -> argparse.Namespace:
                         help="Override per-filter tolerance.")
     parser.add_argument("--no-3d", action="store_true")
     parser.add_argument("--no-2d", action="store_true")
+    parser.add_argument(
+        "--force-scalar",
+        action="store_true",
+        help="Disable the runtime AVX2 filter backend.",
+    )
     parser.add_argument(
         "--filters", default=",".join(FILTERS),
         help="Comma-separated subset of filters to check.",
@@ -99,6 +103,11 @@ def _run_one(filter_name: str, image: np.ndarray, cfg: BenchConfig, atol: float)
 
 def main() -> int:
     args = parse_args()
+    if args.force_scalar:
+        os.environ["BIOIMAGE_CPP_FILTERS_FORCE_SCALAR"] = "1"
+
+    from bioimage_cpp import _core
+
     cfg = BenchConfig(
         sigma=args.sigma,
         inner_sigma=args.inner_sigma,
@@ -118,6 +127,10 @@ def main() -> int:
         targets.append(("3D", load_3d()))
 
     any_failure = False
+    print(
+        f"convolution_backend={_core._filters_convolution_backend()}, "
+        f"eigenvalue_backend={_core._filters_eigenvalue_backend()}"
+    )
     for dim_label, image in targets:
         print(f"\n== {dim_label} parity (shape={image.shape}, dtype={image.dtype}) ==")
         for filter_name in requested:

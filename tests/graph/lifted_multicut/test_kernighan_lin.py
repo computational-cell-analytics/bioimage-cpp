@@ -97,3 +97,32 @@ def test_kl_warm_starts_from_singleton():
         number_of_outer_iterations=5
     ).optimize(objective)
     same_partition(labels, [0, 0, 0])
+
+
+def test_kl_is_deterministic_with_lifted_only_cross_neighbors():
+    base = bic.graph.UndirectedGraph.from_edges(
+        4, [[0, 1], [1, 2], [2, 3]]
+    )
+    base_costs = np.array([4.0, -1.0, 4.0], dtype=np.float64)
+    lifted_uvs = np.array([[0, 3]], dtype=np.uint64)
+    lifted_costs = np.array([-3.0], dtype=np.float64)
+    initial_labels = np.array([0, 0, 1, 1], dtype=np.uint64)
+
+    results = []
+    for _ in range(3):
+        objective = bic.graph.lifted_multicut.LiftedMulticutObjective(
+            base,
+            base_costs,
+            lifted_uvs=lifted_uvs,
+            lifted_costs=lifted_costs,
+            initial_labels=initial_labels,
+        )
+        results.append(
+            bic.graph.lifted_multicut.LiftedKernighanLinMulticut(
+                number_of_outer_iterations=10
+            ).optimize(objective)
+        )
+
+    same_partition(results[0], initial_labels)
+    for labels in results[1:]:
+        np.testing.assert_array_equal(labels, results[0])

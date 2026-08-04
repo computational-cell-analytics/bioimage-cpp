@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -468,9 +469,75 @@ Image structure_tensor_eigenvalues_3d(
     return out;
 }
 
+void ev3_symmetric_float32(ConstImage components, Image out) {
+    const char *fn = "_filters_ev3_symmetric_float32";
+    require_ndim(components, 2, fn);
+    if (components.shape(0) != 6) {
+        throw std::invalid_argument(
+            std::string(fn) + ": components must have shape (6, n), got first "
+            "dimension=" + std::to_string(components.shape(0))
+        );
+    }
+
+    if (out.ndim() != 2 || out.shape(0) != components.shape(1) ||
+        out.shape(1) != 3) {
+        throw std::invalid_argument(
+            std::string(fn) + ": out must have shape (n, 3), got ndim=" +
+            std::to_string(out.ndim()) +
+            (out.ndim() == 2
+                 ? ", shape=(" + std::to_string(out.shape(0)) + ", " +
+                       std::to_string(out.shape(1)) + ")"
+                 : "")
+        );
+    }
+
+    const std::size_t n = components.shape(1);
+    if (n > static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max())) {
+        throw std::invalid_argument(
+            std::string(fn) + ": n is too large"
+        );
+    }
+    const float *components_ptr = components.data();
+    for (std::size_t i = 0; i < 6 * n; ++i) {
+        if (!std::isfinite(components_ptr[i])) {
+            throw std::invalid_argument(
+                std::string(fn) + ": components must contain only finite values"
+            );
+        }
+    }
+
+    float *out_ptr = out.data();
+    {
+        nb::gil_scoped_release release;
+        filters::ev3_symmetric_descending_interleaved(
+            components_ptr,
+            components_ptr + n,
+            components_ptr + 2 * n,
+            components_ptr + 3 * n,
+            components_ptr + 4 * n,
+            components_ptr + 5 * n,
+            out_ptr,
+            static_cast<std::ptrdiff_t>(n)
+        );
+    }
+}
+
 } // namespace
 
 void bind_filters(nb::module_ &m) {
+    m.def(
+        "_filters_convolution_backend", &filters::convolution_backend,
+        "Return the selected internal filter convolution backend."
+    );
+    m.def(
+        "_filters_eigenvalue_backend", &filters::eigenvalue_backend,
+        "Return the selected internal filter eigenvalue backend."
+    );
+    m.def(
+        "_filters_ev3_symmetric_float32", &ev3_symmetric_float32,
+        nb::arg("components"), nb::arg("out"),
+        "Compute sorted eigenvalues for symmetric 3x3 float32 matrices."
+    );
     m.def(
         "_gaussian_smoothing_2d_float32", &gaussian_smoothing_2d,
         nb::arg("image"), nb::arg("sigma_y"), nb::arg("sigma_x"),

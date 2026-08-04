@@ -3,6 +3,7 @@
 #include "bioimage_cpp/detail/edge_hash.hxx"
 #include "bioimage_cpp/detail/indexed_heap.hxx"
 #include "bioimage_cpp/detail/profile.hxx"
+#include "bioimage_cpp/detail/relabel.hxx"
 #include "bioimage_cpp/util/union_find.hxx"
 #include "bioimage_cpp/graph/connected_components.hxx"
 #include "bioimage_cpp/graph/lifted_multicut/objective.hxx"
@@ -10,7 +11,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -86,28 +86,25 @@ struct ChainBuffers {
           stash_gain(n_nodes, 0.0) {}
 };
 
-// Per-edge entry of the per-node filtered adjacency built once during
-// `chain_gain_init` and consumed by `chain_loop`. Lifted-graph adjacency is
-// walked exactly once per chain (during init) and the few entries that
-// survive the in-pair filter are appended here, with their weight and base-
-// vs-lifted classification cached. The chain loop then iterates only these
-// surviving entries — for typical small pairs in a large graph that's a
-// >10× reduction in inner-loop iterations versus re-walking
-// ``lifted_graph.node_adjacency(v)`` from scratch on every move.
+// Cached neighbor data for one entry that survives the active-pair filter.
 struct FilteredAdj {
     std::uint64_t node;
     double weight;
     bool is_base;
 };
 
+struct ChainMove {
+    std::uint64_t node;
+    std::uint64_t new_label;
+};
+
 struct ChainScratch {
     std::vector<std::uint64_t> queue_nodes;
+    std::vector<ChainMove> chain;
     bioimage_cpp::detail::DenseIndexedHeap<double> heap;
 
-    // Per-node CSR-style range into ``filtered_entries``. ``filtered_count[v]``
-    // is set whenever v is part of the current chain's pair; readers must
-    // therefore index only into nodes known to be in-pair (i.e. nodes popped
-    // from the heap, all of which were pushed during init).
+    // Per-node ranges into `filtered_entries`. Only active pair nodes have
+    // valid ranges.
     std::vector<std::uint64_t> filtered_offset;
     std::vector<std::uint32_t> filtered_count;
     std::vector<FilteredAdj> filtered_entries;
@@ -150,9 +147,11 @@ inline double run_chain(
     }
 
     auto &queue_nodes = scratch.queue_nodes;
+    auto &chain = scratch.chain;
     auto &heap = scratch.heap;
     auto &filtered_entries = scratch.filtered_entries;
     queue_nodes.clear();
+    chain.clear();
     heap.clear();
     filtered_entries.clear();
 
@@ -235,11 +234,6 @@ inline double run_chain(
     } // end chain_gain_init scope
     const double gain_from_merging = is_split ? 0.0 : 0.5 * gain_from_merging_double;
 
-    struct Move {
-        std::uint64_t node;
-        std::uint64_t new_label;
-    };
-    std::vector<Move> chain;
     chain.reserve(queue_nodes.size());
 
     double cumulative = 0.0;
@@ -265,10 +259,8 @@ inline double run_chain(
             best_prefix = chain.size();
         }
 
-        // Walk the pre-built in-pair adjacency; each entry is guaranteed
-        // ``bufs.in_pair[u_key] == 1`` so we only need to filter on
-        // ``bufs.moved``. ``was_in_heap`` is cached so the three subsequent
-        // heap operations don't each re-query the locator.
+        // Walk the pre-built in-pair adjacency. Each entry is in the current
+        // pair, so the loop only needs to check whether the node moved.
         const auto offset = scratch.filtered_offset[v_key];
         const auto count = scratch.filtered_count[v_key];
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -311,8 +303,9 @@ inline double run_chain(
     for (const auto v : queue_nodes) {
         const auto v_key = static_cast<std::size_t>(v);
         bufs.in_pair[v_key] = 0;
-        bufs.moved[v_key] = 0;
-        bufs.cross_count[v_key] = 0;
+    }
+    for (const auto &move : chain) {
+        bufs.moved[static_cast<std::size_t>(move.node)] = 0;
     }
     } // end chain_cleanup scope
 
@@ -338,70 +331,6 @@ inline double run_chain(
         return best_cumulative;
     }
     return 0.0;
-}
-
-// Mark which clusters in ``labels`` differ in node-set from any cluster in
-// ``previous_labels``. A new cluster c is "unchanged" iff every node in c
-// shares the same previous label c_old AND ``|c| == |c_old|`` — i.e. the
-// partition was neither split nor merged during the last outer iter.
-//
-// Used to gate pair-chains and cluster-splits: a pair (A, B) whose inputs
-// are identical to the last iteration's must produce the same chain result
-// (which was "no improvement" — otherwise the partitions would have changed).
-// Skipping such pairs is the only major algorithmic optimization in nifty's
-// outer KL driver that we previously lacked.
-inline std::vector<std::uint8_t> compute_cluster_changed(
-    const std::vector<std::uint64_t> &labels,
-    const std::vector<std::uint64_t> &previous_labels,
-    const std::uint64_t number_of_clusters
-) {
-    std::vector<std::uint8_t> changed(static_cast<std::size_t>(number_of_clusters), 0);
-    if (number_of_clusters == 0) {
-        return changed;
-    }
-    if (previous_labels.size() != labels.size()) {
-        // First iter or shape change — treat everything as changed.
-        std::fill(changed.begin(), changed.end(), 1);
-        return changed;
-    }
-
-    const auto max_prev = *std::max_element(previous_labels.begin(), previous_labels.end());
-    std::vector<std::uint64_t> prev_size(static_cast<std::size_t>(max_prev) + 1, 0);
-    for (const auto p : previous_labels) {
-        ++prev_size[static_cast<std::size_t>(p)];
-    }
-
-    constexpr auto SENTINEL = std::numeric_limits<std::uint64_t>::max();
-    std::vector<std::uint64_t> map_new_to_old(
-        static_cast<std::size_t>(number_of_clusters), SENTINEL
-    );
-    std::vector<std::uint64_t> new_size(static_cast<std::size_t>(number_of_clusters), 0);
-
-    for (std::size_t v = 0; v < labels.size(); ++v) {
-        const auto c_new = static_cast<std::size_t>(labels[v]);
-        const auto c_old = previous_labels[v];
-        ++new_size[c_new];
-        if (changed[c_new]) {
-            continue;
-        }
-        if (map_new_to_old[c_new] == SENTINEL) {
-            map_new_to_old[c_new] = c_old;
-        } else if (map_new_to_old[c_new] != c_old) {
-            changed[c_new] = 1;
-        }
-    }
-
-    for (std::size_t c = 0; c < changed.size(); ++c) {
-        if (changed[c]) {
-            continue;
-        }
-        const auto c_old = map_new_to_old[c];
-        if (c_old == SENTINEL
-            || prev_size[static_cast<std::size_t>(c_old)] != new_size[c]) {
-            changed[c] = 1;
-        }
-    }
-    return changed;
 }
 
 // Re-split labels so that every cluster is connected in the base graph.
@@ -474,6 +403,9 @@ inline std::vector<std::uint64_t> kernighan_lin(
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "compute_pairs");
             pairs = detail_kl::compute_base_cluster_pairs(base_graph, labels);
+        }
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "build_cluster_index");
             number_of_clusters = labels.empty()
                 ? std::uint64_t{0}
                 : (*std::max_element(labels.begin(), labels.end()) + 1);
@@ -489,12 +421,38 @@ inline std::vector<std::uint64_t> kernighan_lin(
             changed.assign(static_cast<std::size_t>(number_of_clusters), 1);
         }
 
-        {
-            BIOIMAGE_PROFILE_SCOPE(profile, "pair_chains");
-            for (const auto &pair : pairs) {
-                if (!changed[static_cast<std::size_t>(pair.a)]
-                    && !changed[static_cast<std::size_t>(pair.b)]) {
-                    continue;
+        for (const auto &pair : pairs) {
+            if (!changed[static_cast<std::size_t>(pair.a)]
+                && !changed[static_cast<std::size_t>(pair.b)]) {
+                continue;
+            }
+            const auto delta = detail_kl::run_chain(
+                base_graph,
+                lifted_graph,
+                lifted_weights,
+                n_base_edges,
+                labels,
+                cluster_to_nodes,
+                bufs,
+                scratch,
+                pair.a,
+                pair.b,
+                epsilon,
+                profile
+            );
+            if (delta > epsilon) {
+                improved = true;
+            }
+        }
+
+        std::uint64_t next_label = number_of_clusters;
+        for (std::uint64_t cluster = 0; cluster < number_of_clusters; ++cluster) {
+            if (!changed[static_cast<std::size_t>(cluster)]) {
+                continue;
+            }
+            while (true) {
+                if (next_label >= cluster_to_nodes.size()) {
+                    cluster_to_nodes.resize(static_cast<std::size_t>(next_label) + 1);
                 }
                 const auto delta = detail_kl::run_chain(
                     base_graph,
@@ -505,48 +463,16 @@ inline std::vector<std::uint64_t> kernighan_lin(
                     cluster_to_nodes,
                     bufs,
                     scratch,
-                    pair.a,
-                    pair.b,
+                    cluster,
+                    next_label,
                     epsilon,
                     profile
                 );
-                if (delta > epsilon) {
-                    improved = true;
+                if (delta <= epsilon) {
+                    break;
                 }
-            }
-        }
-
-        {
-            BIOIMAGE_PROFILE_SCOPE(profile, "cluster_splits");
-            std::uint64_t next_label = number_of_clusters;
-            for (std::uint64_t cluster = 0; cluster < number_of_clusters; ++cluster) {
-                if (!changed[static_cast<std::size_t>(cluster)]) {
-                    continue;
-                }
-                while (true) {
-                    if (next_label >= cluster_to_nodes.size()) {
-                        cluster_to_nodes.resize(static_cast<std::size_t>(next_label) + 1);
-                    }
-                    const auto delta = detail_kl::run_chain(
-                        base_graph,
-                        lifted_graph,
-                        lifted_weights,
-                        n_base_edges,
-                        labels,
-                        cluster_to_nodes,
-                        bufs,
-                        scratch,
-                        cluster,
-                        next_label,
-                        epsilon,
-                        profile
-                    );
-                    if (delta <= epsilon) {
-                        break;
-                    }
-                    improved = true;
-                    ++next_label;
-                }
+                improved = true;
+                ++next_label;
             }
         }
 
@@ -564,7 +490,7 @@ inline std::vector<std::uint64_t> kernighan_lin(
             const auto new_n_clusters = labels.empty()
                 ? std::uint64_t{0}
                 : (*std::max_element(labels.begin(), labels.end()) + 1);
-            changed = detail_kl::compute_cluster_changed(
+            changed = bioimage_cpp::detail::changed_clusters(
                 labels, prev_iter_labels, new_n_clusters
             );
             prev_iter_labels = labels;

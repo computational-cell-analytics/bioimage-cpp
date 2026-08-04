@@ -7,6 +7,7 @@ contraction loop on the supplied graph and returns dense node labels.
 
 All policies operate on an :class:`bioimage_cpp.graph.UndirectedGraph` or a
 subclass (``RegionAdjacencyGraph``, ``GridGraph2D``/``GridGraph3D``).
+All floating inputs that affect heap priorities must contain finite values.
 """
 
 from __future__ import annotations
@@ -16,8 +17,10 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 from .. import _core
+from .._validation import strict_index
 from ._shared import (
     _as_1d_array,
+    _require_finite_weights,
     _resolve_weight_dtype,
 )
 
@@ -51,16 +54,27 @@ class ClusterPolicy(ABC):
         """Run the agglomeration on ``graph`` and return dense node labels."""
 
 
+def _finite_float(value, name: str) -> float:
+    result = float(value)
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
 def _ensure_edge_array(values, name, n_edges, dtype):
     if values is None:
         return np.ones(int(n_edges), dtype=dtype)
-    return _as_1d_array(values, dtype, name, int(n_edges))
+    return _require_finite_weights(
+        _as_1d_array(values, dtype, name, int(n_edges)), name
+    )
 
 
 def _ensure_node_array(values, name, n_nodes, dtype):
     if values is None:
         return np.ones(int(n_nodes), dtype=dtype)
-    return _as_1d_array(values, dtype, name, int(n_nodes))
+    return _require_finite_weights(
+        _as_1d_array(values, dtype, name, int(n_nodes)), name
+    )
 
 
 class EdgeWeightedClusterPolicy(ClusterPolicy):
@@ -84,7 +98,7 @@ class EdgeWeightedClusterPolicy(ClusterPolicy):
 
     def __init__(self, *, num_clusters_stop: int = 1, size_regularizer: float = 1.0):
         self.num_clusters_stop = int(num_clusters_stop)
-        self.size_regularizer = float(size_regularizer)
+        self.size_regularizer = _finite_float(size_regularizer, "size_regularizer")
 
     def optimize(
         self,
@@ -99,6 +113,7 @@ class EdgeWeightedClusterPolicy(ClusterPolicy):
         indicator_array = _as_1d_array(
             indicator_array, dtype, "edge_indicators", int(graph.number_of_edges)
         )
+        _require_finite_weights(indicator_array, "edge_indicators")
         edge_size_array = _ensure_edge_array(
             edge_sizes, "edge_sizes", graph.number_of_edges, dtype
         )
@@ -144,8 +159,8 @@ class NodeAndEdgeWeightedClusterPolicy(ClusterPolicy):
         beta: float = 0.5,
     ):
         self.num_clusters_stop = int(num_clusters_stop)
-        self.size_regularizer = float(size_regularizer)
-        self.beta = float(beta)
+        self.size_regularizer = _finite_float(size_regularizer, "size_regularizer")
+        self.beta = _finite_float(beta, "beta")
 
     def optimize(
         self,
@@ -165,6 +180,7 @@ class NodeAndEdgeWeightedClusterPolicy(ClusterPolicy):
         indicator_array = _as_1d_array(
             indicator_array, dtype, "edge_indicators", int(graph.number_of_edges)
         )
+        _require_finite_weights(indicator_array, "edge_indicators")
         edge_size_array = _ensure_edge_array(
             edge_sizes, "edge_sizes", graph.number_of_edges, dtype
         )
@@ -177,6 +193,7 @@ class NodeAndEdgeWeightedClusterPolicy(ClusterPolicy):
                 "node_features must have shape (number_of_nodes, n_channels), got "
                 f"shape={feature_array.shape}, number_of_nodes={int(graph.number_of_nodes)}"
             )
+        _require_finite_weights(feature_array, "node_features")
         run = _NODE_AND_EDGE_WEIGHTED_BY_DTYPE[dtype]
         return run(
             graph,
@@ -201,7 +218,8 @@ class MalaClusterPolicy(ClusterPolicy):
     Parameters
     ----------
     num_bins:
-        Number of histogram bins covering ``[bin_min, bin_max]``.
+        Number of histogram bins covering ``[bin_min, bin_max]``. Must be at
+        least ``2``.
     bin_min, bin_max:
         Range covered by the histogram. Values outside the range fall into
         the boundary bins.
@@ -226,12 +244,12 @@ class MalaClusterPolicy(ClusterPolicy):
         num_edges_stop: int = 0,
         threshold: float = 0.5,
     ):
-        self.num_bins = int(num_bins)
-        self.bin_min = float(bin_min)
-        self.bin_max = float(bin_max)
+        self.num_bins = strict_index(num_bins, "num_bins", minimum=2)
+        self.bin_min = _finite_float(bin_min, "bin_min")
+        self.bin_max = _finite_float(bin_max, "bin_max")
         self.num_clusters_stop = int(num_clusters_stop)
         self.num_edges_stop = int(num_edges_stop)
-        self.threshold = float(threshold)
+        self.threshold = _finite_float(threshold, "threshold")
 
     def optimize(self, graph, edge_indicators) -> np.ndarray:
         indicator_array = _resolve_weight_dtype(edge_indicators, "edge_indicators")
@@ -239,6 +257,7 @@ class MalaClusterPolicy(ClusterPolicy):
         indicator_array = _as_1d_array(
             indicator_array, dtype, "edge_indicators", int(graph.number_of_edges)
         )
+        _require_finite_weights(indicator_array, "edge_indicators")
         run = _MALA_BY_DTYPE[dtype]
         return run(
             graph,
@@ -308,6 +327,7 @@ class GaspClusterPolicy(ClusterPolicy):
         weight_array = _as_1d_array(
             weight_array, dtype, "edge_weights", int(graph.number_of_edges)
         )
+        _require_finite_weights(weight_array, "edge_weights")
         edge_size_array = _ensure_edge_array(
             edge_sizes, "edge_sizes", graph.number_of_edges, dtype
         )

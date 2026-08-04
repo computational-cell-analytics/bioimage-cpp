@@ -69,6 +69,46 @@ if(BIOIMAGE_FLOW_FMA_DISPATCH)
     endif()
 endif()
 
+option(
+    BIOIMAGE_FILTERS_AVX2_DISPATCH
+    "Build x86 AVX2/FMA filter kernels with runtime CPU dispatch"
+    ON
+)
+if(BIOIMAGE_FILTERS_AVX2_DISPATCH)
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _bioimage_filters_processor)
+    if(_bioimage_filters_processor MATCHES "^(x86_64|amd64|i[3-6]86)$")
+        if(MSVC)
+            target_sources(
+                _core PRIVATE
+                src/cpp/filters/dispatch.cxx
+                src/cpp/filters/convolve_avx2.cxx
+                src/cpp/filters/eigenvalues_avx2.cxx
+            )
+            set_property(
+                SOURCE
+                    src/cpp/filters/convolve_avx2.cxx
+                    src/cpp/filters/eigenvalues_avx2.cxx
+                APPEND PROPERTY COMPILE_OPTIONS /arch:AVX2
+            )
+            target_compile_definitions(_core PRIVATE BIOIMAGE_FILTERS_AVX2_DISPATCH=1)
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_sources(
+                _core PRIVATE
+                src/cpp/filters/dispatch.cxx
+                src/cpp/filters/convolve_avx2.cxx
+                src/cpp/filters/eigenvalues_avx2.cxx
+            )
+            set_property(
+                SOURCE
+                    src/cpp/filters/convolve_avx2.cxx
+                    src/cpp/filters/eigenvalues_avx2.cxx
+                APPEND PROPERTY COMPILE_OPTIONS -mavx2 -mfma
+            )
+            target_compile_definitions(_core PRIVATE BIOIMAGE_FILTERS_AVX2_DISPATCH=1)
+        endif()
+    endif()
+endif()
+
 option(BIOIMAGE_PROFILE "Enable per-phase profiling instrumentation (development only)" OFF)
 if(BIOIMAGE_PROFILE)
     target_compile_definitions(_core PRIVATE BIOIMAGE_PROFILE)

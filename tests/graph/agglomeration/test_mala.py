@@ -51,6 +51,35 @@ def test_num_clusters_stop_respected():
     assert len(np.unique(labels)) == 3
 
 
+def test_num_edges_stop_counts_contracted_edges_on_chain():
+    graph = chain_graph(5)
+    indicators = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float64)
+
+    labels = bic.graph.agglomeration.MalaClusterPolicy(
+        threshold=1.0,
+        num_clusters_stop=1,
+        num_edges_stop=3,
+    ).optimize(graph, indicators)
+
+    assert len(np.unique(labels)) == 4
+
+
+def test_num_edges_stop_counts_contracted_and_folded_edges():
+    graph = bic.graph.UndirectedGraph.from_edges(
+        3,
+        [[0, 1], [0, 2], [1, 2]],
+    )
+    indicators = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+
+    labels = bic.graph.agglomeration.MalaClusterPolicy(
+        threshold=1.0,
+        num_clusters_stop=1,
+        num_edges_stop=1,
+    ).optimize(graph, indicators)
+
+    assert len(np.unique(labels)) == 2
+
+
 def test_float32_and_float64_match():
     graph = two_clusters_graph()
     indicators_f32 = np.array(
@@ -74,12 +103,34 @@ def test_bad_bin_range_raises():
         ).optimize(graph, np.array([0.1, 0.1], dtype=np.float64))
 
 
-def test_zero_bins_raises():
+@pytest.mark.parametrize("num_bins", [0, 1, -1])
+def test_invalid_bin_count_raises(num_bins):
+    with pytest.raises(ValueError, match="num_bins must be >= 2"):
+        bic.graph.agglomeration.MalaClusterPolicy(num_bins=num_bins)
+
+
+@pytest.mark.parametrize("num_bins", [True, 1.5])
+def test_non_integral_bin_count_raises(num_bins):
+    with pytest.raises(TypeError, match="num_bins must be an integer"):
+        bic.graph.agglomeration.MalaClusterPolicy(num_bins=num_bins)
+
+
+@pytest.mark.parametrize(
+    ("threshold", "expected_clusters"),
+    [
+        (-0.1, 3),
+        (0.5, 2),
+        (1.1, 1),
+    ],
+)
+def test_two_bin_threshold_behavior(threshold, expected_clusters):
     graph = chain_graph(3)
-    with pytest.raises(Exception):
-        bic.graph.agglomeration.MalaClusterPolicy(num_bins=0).optimize(
-            graph, np.array([0.1, 0.1], dtype=np.float64)
-        )
+    labels = bic.graph.agglomeration.MalaClusterPolicy(
+        num_bins=2,
+        threshold=threshold,
+        num_clusters_stop=1,
+    ).optimize(graph, np.array([0.2, 0.8], dtype=np.float64))
+    assert np.unique(labels).size == expected_clusters
 
 
 def test_indicator_length_mismatch_raises():

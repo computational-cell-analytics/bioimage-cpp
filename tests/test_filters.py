@@ -6,10 +6,13 @@ The C++ kernels are validated against ``scipy.ndimage`` reference filters with
 trigonometric closed-form rounding.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pytest
 from scipy import ndimage
 
+from bioimage_cpp import _core
 import bioimage_cpp.filters as bf
 
 
@@ -197,14 +200,269 @@ def test_structure_tensor_eigenvalues_2d_matches_reference():
     np.testing.assert_allclose(got, ref, atol=2e-3)
 
 
-def test_structure_tensor_eigenvalues_3d_shape_and_order():
+def _structure_tensor_eigenvalues_reference_3d(vol, inner, outer):
+    gz = ndimage.gaussian_filter(vol, inner, order=[1, 0, 0], mode="mirror")
+    gy = ndimage.gaussian_filter(vol, inner, order=[0, 1, 0], mode="mirror")
+    gx = ndimage.gaussian_filter(vol, inner, order=[0, 0, 1], mode="mirror")
+    szz = ndimage.gaussian_filter(gz * gz, outer, mode="mirror")
+    szy = ndimage.gaussian_filter(gz * gy, outer, mode="mirror")
+    szx = ndimage.gaussian_filter(gz * gx, outer, mode="mirror")
+    syy = ndimage.gaussian_filter(gy * gy, outer, mode="mirror")
+    syx = ndimage.gaussian_filter(gy * gx, outer, mode="mirror")
+    sxx = ndimage.gaussian_filter(gx * gx, outer, mode="mirror")
+    mat = np.stack([
+        np.stack([szz, szy, szx], axis=-1),
+        np.stack([szy, syy, syx], axis=-1),
+        np.stack([szx, syx, sxx], axis=-1),
+    ], axis=-2)
+    return np.linalg.eigvalsh(mat)[..., ::-1].astype(np.float32)
+
+
+def _symmetric_components(matrices):
+    return np.ascontiguousarray(
+        np.stack(
+            [
+                matrices[:, 0, 0],
+                matrices[:, 0, 1],
+                matrices[:, 0, 2],
+                matrices[:, 1, 1],
+                matrices[:, 1, 2],
+                matrices[:, 2, 2],
+            ]
+        ),
+        dtype=np.float32,
+    )
+
+
+def _direct_ev3(components):
+    out = np.empty((components.shape[1], 3), dtype=np.float32)
+    _core._filters_ev3_symmetric_float32(components, out)
+    return out
+
+
+@pytest.mark.parametrize("n", [0, 1, 7, 8, 9, 15, 16, 17])
+def test_direct_ev3_handles_vector_boundaries(n):
+    rng = np.random.default_rng(42 + n)
+    matrices = rng.normal(size=(n, 3, 3)).astype(np.float32)
+    matrices += matrices.transpose(0, 2, 1)
+    got = _direct_ev3(_symmetric_components(matrices))
+    ref = np.linalg.eigvalsh(matrices)[..., ::-1].astype(np.float32)
+    np.testing.assert_allclose(got, ref, rtol=2e-5, atol=2e-6)
+
+
+def test_direct_ev3_matches_numpy_across_scales():
+    rng = np.random.default_rng(91)
+    n = 1003
+    components = rng.normal(size=(6, n)).astype(np.float32)
+    scales = np.power(10.0, rng.uniform(-15.0, 15.0, size=n)).astype(np.float32)
+    components *= scales
+
+    matrices = np.empty((n, 3, 3), dtype=np.float32)
+    matrices[:, 0, 0] = components[0]
+    matrices[:, 0, 1] = matrices[:, 1, 0] = components[1]
+    matrices[:, 0, 2] = matrices[:, 2, 0] = components[2]
+    matrices[:, 1, 1] = components[3]
+    matrices[:, 1, 2] = matrices[:, 2, 1] = components[4]
+    matrices[:, 2, 2] = components[5]
+
+    got = _direct_ev3(components)
+    ref = np.linalg.eigvalsh(matrices)[..., ::-1].astype(np.float32)
+    scale = np.maximum(
+        np.max(np.abs(ref), axis=1), np.finfo(np.float32).tiny
+    )
+    scaled_error = np.max(np.abs(got - ref), axis=1) / scale
+    assert np.max(scaled_error) < 2e-5
+    assert np.all(got[:, :-1] >= got[:, 1:])
+
+
+def test_direct_ev3_handles_repeated_and_near_repeated_roots():
+    rng = np.random.default_rng(23)
+    spectra = []
+    smallest_subnormal = float(
+        np.nextafter(np.float32(0.0), np.float32(1.0))
+    )
+    for scale in (
+        smallest_subnormal,
+        np.finfo(np.float32).tiny,
+        1e-20,
+        1e-8,
+        1.0,
+        1e8,
+        1e20,
+    ):
+        spectra.extend(
+            [
+                [0.0, 0.0, 0.0],
+                [scale, scale, scale],
+                [3.0 * scale, 3.0 * scale, -2.0 * scale],
+                [3.0 * scale, -2.0 * scale, -2.0 * scale],
+                [scale, scale * (1.0 + 2e-6), -0.5 * scale],
+                [scale, scale * (1.0 - 2e-6), -0.5 * scale],
+            ]
+        )
+
+    matrices = []
+    for eigenvalues in spectra:
+        q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        matrices.append(
+            (q @ np.diag(eigenvalues) @ q.T).astype(np.float32)
+        )
+    matrices = np.stack(matrices)
+
+    got = _direct_ev3(_symmetric_components(matrices))
+    ref = np.linalg.eigvalsh(matrices)[..., ::-1].astype(np.float32)
+    scale = np.maximum(
+        np.max(np.abs(ref), axis=1), np.finfo(np.float32).tiny
+    )
+    scaled_error = np.max(np.abs(got - ref), axis=1) / scale
+    assert np.isfinite(got).all()
+    assert np.max(scaled_error) < 3e-4
+    assert np.all(got[:, :-1] >= got[:, 1:])
+
+
+def test_direct_ev3_forced_scalar_matches_automatic(monkeypatch):
+    monkeypatch.delenv("BIOIMAGE_CPP_FILTERS_FORCE_SCALAR", raising=False)
+    if _core._filters_eigenvalue_backend() != "avx2":
+        pytest.skip("AVX2 eigenvalue backend is not available")
+
+    rng = np.random.default_rng(7)
+    components = rng.normal(size=(6, 1003)).astype(np.float32)
+    automatic = _direct_ev3(components)
+
+    monkeypatch.setenv("BIOIMAGE_CPP_FILTERS_FORCE_SCALAR", "1")
+    assert _core._filters_eigenvalue_backend() == "scalar"
+    scalar = _direct_ev3(components)
+    np.testing.assert_allclose(automatic, scalar, rtol=2e-5, atol=3e-5)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf])
+def test_direct_ev3_rejects_non_finite_components(value):
+    components = np.zeros((6, 8), dtype=np.float32)
+    components[2, 3] = value
+    with pytest.raises(ValueError, match="finite"):
+        _direct_ev3(components)
+
+
+def test_direct_ev3_validates_shapes_and_writability():
+    with pytest.raises(ValueError, match=r"shape \(6, n\)"):
+        _direct_ev3(np.zeros((5, 8), dtype=np.float32))
+
+    components = np.zeros((6, 8), dtype=np.float32)
+    with pytest.raises(ValueError, match=r"shape \(n, 3\)"):
+        _core._filters_ev3_symmetric_float32(
+            components, np.empty((8, 2), dtype=np.float32)
+        )
+
+    out = np.empty((8, 3), dtype=np.float32)
+    out.flags.writeable = False
+    with pytest.raises(TypeError):
+        _core._filters_ev3_symmetric_float32(components, out)
+
+
+def test_structure_tensor_eigenvalues_3d_matches_reference():
     vol = _random_image((8, 16, 16))
     got = bf.structure_tensor_eigenvalues(vol, 1.0, 2.0)
+    ref = _structure_tensor_eigenvalues_reference_3d(vol, 1.0, 2.0)
     assert got.shape == vol.shape + (3,)
+    np.testing.assert_allclose(got, ref, atol=5e-3)
     assert np.all(got[..., 0] >= got[..., 1])
     assert np.all(got[..., 1] >= got[..., 2])
-    # All eigenvalues of a positive-semidefinite tensor are >= 0.
     assert np.all(got >= -1e-6)
+
+
+@pytest.mark.parametrize("shape", [(1, 5, 7), (2, 3, 4)])
+def test_eigenvalue_filters_support_short_axes(shape):
+    vol = _random_image(shape)
+    got_hessian = bf.hessian_of_gaussian_eigenvalues(vol, 1.0)
+    ref_hessian = _hessian_eigenvalues_reference_3d(vol, 1.0)
+    np.testing.assert_allclose(got_hessian, ref_hessian, atol=5e-3)
+
+    got_structure = bf.structure_tensor_eigenvalues(vol, 1.0, 1.5)
+    ref_structure = _structure_tensor_eigenvalues_reference_3d(vol, 1.0, 1.5)
+    np.testing.assert_allclose(got_structure, ref_structure, atol=5e-3)
+
+
+def test_runtime_radius_fallback_matches_scipy():
+    img = _random_image((40, 48))
+    got = bf.gaussian_smoothing(img, 5.0, window_size=3.0)
+    ref = ndimage.gaussian_filter(img, 5.0, mode="mirror", truncate=3.0)
+    np.testing.assert_allclose(got, ref, atol=1e-3)
+
+
+def test_forced_scalar_matches_automatic_backend(monkeypatch):
+    monkeypatch.delenv("BIOIMAGE_CPP_FILTERS_FORCE_SCALAR", raising=False)
+    if _core._filters_convolution_backend() != "avx2":
+        pytest.skip("AVX2 filter backend is not available")
+    assert _core._filters_eigenvalue_backend() == "avx2"
+
+    vol = _random_image((7, 11, 17))
+    functions = [
+        lambda: bf.gaussian_smoothing(vol, 1.5),
+        lambda: bf.gaussian_derivative(vol, 1.5, [1, 0, 0]),
+        lambda: bf.gaussian_gradient_magnitude(vol, 1.5),
+        lambda: bf.laplacian_of_gaussian(vol, 1.5),
+        lambda: bf.hessian_of_gaussian_eigenvalues(vol, 1.5),
+        lambda: bf.structure_tensor_eigenvalues(vol, 1.0, 2.0),
+    ]
+    automatic = [function() for function in functions]
+
+    monkeypatch.setenv("BIOIMAGE_CPP_FILTERS_FORCE_SCALAR", "1")
+    assert _core._filters_convolution_backend() == "scalar"
+    assert _core._filters_eigenvalue_backend() == "scalar"
+    scalar = [function() for function in functions]
+
+    for got, expected in zip(automatic, scalar, strict=True):
+        np.testing.assert_allclose(got, expected, atol=1e-5)
+
+
+@pytest.mark.parametrize("radius", range(1, 13))
+def test_specialized_radii_match_scalar_backend(monkeypatch, radius):
+    monkeypatch.delenv("BIOIMAGE_CPP_FILTERS_FORCE_SCALAR", raising=False)
+    if _core._filters_convolution_backend() != "avx2":
+        pytest.skip("AVX2 filter backend is not available")
+
+    image = _random_image((25, 31))
+    automatic_smoothing = bf.gaussian_smoothing(
+        image, float(radius), window_size=1.0
+    )
+    automatic_derivative = bf.gaussian_derivative(
+        image, float(radius), [1, 0], window_size=1.0
+    )
+
+    monkeypatch.setenv("BIOIMAGE_CPP_FILTERS_FORCE_SCALAR", "1")
+    scalar_smoothing = bf.gaussian_smoothing(
+        image, float(radius), window_size=1.0
+    )
+    scalar_derivative = bf.gaussian_derivative(
+        image, float(radius), [1, 0], window_size=1.0
+    )
+    np.testing.assert_allclose(automatic_smoothing, scalar_smoothing, atol=1e-5)
+    np.testing.assert_allclose(automatic_derivative, scalar_derivative, atol=1e-5)
+
+
+def test_concurrent_filter_calls_are_deterministic():
+    vol = _random_image((8, 12, 16))
+    expected = bf.structure_tensor_eigenvalues(vol, 1.0, 2.0)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(
+                lambda _: bf.structure_tensor_eigenvalues(vol, 1.0, 2.0),
+                range(8),
+            )
+        )
+    for result in results:
+        np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("shape", [(0, 4), (2, 0, 3)])
+def test_filters_support_empty_inputs(shape):
+    image = np.empty(shape, dtype=np.float32)
+    assert bf.gaussian_smoothing(image, 1.0).shape == shape
+    assert bf.hessian_of_gaussian_eigenvalues(image, 1.0).shape == shape + (len(shape),)
+    assert (
+        bf.structure_tensor_eigenvalues(image, 1.0, 2.0).shape
+        == shape + (len(shape),)
+    )
 
 
 # ---------------------------------------------------------------------------

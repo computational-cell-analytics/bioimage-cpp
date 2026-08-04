@@ -268,12 +268,8 @@ def test_runs_on_graph_without_negative_edges(chain_problem):
 
 
 def test_greedy_proposals_parallel_is_deterministic_on_dirty_graph():
-    # Smoke-test the parallel greedy-additive-proposal path on a dirty graph
-    # with a non-singleton initial labeling (which skips the calling-thread
-    # warm-start that would otherwise freeze the graph). The lazy CSR rebuild
-    # is not thread-safe; the solver now freezes the graph before fan-out, so
-    # the multi-threaded result must equal the single-threaded reference on
-    # every run.
+    # Exercise parallel proposal generation on a dirty graph. The solver must
+    # freeze the lazy CSR state before the fan-out.
     #
     # Note: the multicut race is hard to trigger deterministically from Python
     # (the calling thread typically wins the rebuild before OS-spawned worker

@@ -36,14 +36,13 @@ from .._shared import (
     _as_edge_costs,
     _as_node_labels,
     _copy_graph,
-    _dense_labels,
     _normalize_number_of_threads,
-    _subproblem_from_edges,
+    _require_finite_weights,
 )
 
 
 class MulticutObjective:
-    """Multicut objective for an undirected graph and edge costs."""
+    """Multicut objective for an undirected graph and finite edge costs."""
 
     def __init__(
         self,
@@ -82,7 +81,8 @@ class MulticutObjective:
 
     def energy(self, labels=None) -> float:
         label_array = self._labels if labels is None else _as_node_labels(labels, self._graph)
-        return float(_core._multicut_energy(self._graph, self._edge_costs, label_array))
+        costs = _require_finite_weights(self._edge_costs, "edge_costs")
+        return float(_core._multicut_energy(self._graph, costs, label_array))
 
 
 class MulticutSolver(ABC):
@@ -116,9 +116,10 @@ class GreedyAdditiveMulticut(MulticutSolver):
         self.sigma = float(sigma)
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        costs = _require_finite_weights(objective.edge_costs, "edge_costs")
         labels = _core._multicut_greedy_additive(
             objective.graph,
-            objective.edge_costs,
+            costs,
             self.weight_stop,
             self.node_num_stop,
             self.add_noise,
@@ -137,6 +138,9 @@ class GreedyAdditiveMulticut(MulticutSolver):
             sigma=self.sigma,
         )
 
+    def _build_cpp_decomposer_solver(self):
+        return self._build_cpp_sub_solver()
+
 
 class GreedyFixationMulticut(MulticutSolver):
     """Greedy fixation multicut solver.
@@ -151,9 +155,10 @@ class GreedyFixationMulticut(MulticutSolver):
         self.node_num_stop = float(node_num_stop)
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        costs = _require_finite_weights(objective.edge_costs, "edge_costs")
         labels = _core._multicut_greedy_fixation(
             objective.graph,
-            objective.edge_costs,
+            costs,
             self.weight_stop,
             self.node_num_stop,
         )
@@ -165,6 +170,9 @@ class GreedyFixationMulticut(MulticutSolver):
             weight_stop=self.weight_stop,
             node_num_stop=self.node_num_stop,
         )
+
+    def _build_cpp_decomposer_solver(self):
+        return self._build_cpp_sub_solver()
 
 
 class KernighanLinMulticut(MulticutSolver):
@@ -190,6 +198,7 @@ class KernighanLinMulticut(MulticutSolver):
         self.epsilon = float(epsilon)
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        costs = _require_finite_weights(objective.edge_costs, "edge_costs")
         initial_labels = objective.labels
         if np.array_equal(
             initial_labels,
@@ -197,7 +206,7 @@ class KernighanLinMulticut(MulticutSolver):
         ):
             initial_labels = _core._multicut_greedy_additive(
                 objective.graph,
-                objective.edge_costs,
+                costs,
                 0.0,
                 -1.0,
                 False,
@@ -206,7 +215,7 @@ class KernighanLinMulticut(MulticutSolver):
             )
         labels = _core._multicut_kernighan_lin(
             objective.graph,
-            objective.edge_costs,
+            costs,
             initial_labels,
             self.number_of_outer_iterations,
             self.epsilon,
@@ -218,6 +227,14 @@ class KernighanLinMulticut(MulticutSolver):
         return _core._KernighanLinMulticutSubSolver(
             number_of_outer_iterations=self.number_of_outer_iterations,
             epsilon=self.epsilon,
+            warm_start_greedy=False,
+        )
+
+    def _build_cpp_decomposer_solver(self):
+        return _core._KernighanLinMulticutSubSolver(
+            number_of_outer_iterations=self.number_of_outer_iterations,
+            epsilon=self.epsilon,
+            warm_start_greedy=True,
         )
 
 
@@ -375,12 +392,13 @@ class FusionMoveMulticut(MulticutSolver):
             raise ValueError("stop_if_no_improvement must be >= 1")
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
+        costs = _require_finite_weights(objective.edge_costs, "edge_costs")
         # Build one C++ proposal generator per parallel slot, each with a
         # distinct seed offset, so parallel streams are independent and
         # reproducible.
         cpp_pgens = [
             self.proposal_generator._build_for_thread(
-                objective.graph, objective.edge_costs, slot
+                objective.graph, costs, slot
             )
             for slot in range(self.number_of_parallel_proposals)
         ]
@@ -389,7 +407,7 @@ class FusionMoveMulticut(MulticutSolver):
         )
         labels = _core._multicut_fusion_move(
             objective.graph,
-            objective.edge_costs,
+            costs,
             objective.labels,
             cpp_pgens,
             cpp_sub_solver,
@@ -403,6 +421,8 @@ class FusionMoveMulticut(MulticutSolver):
 
 
 class ChainedMulticutSolvers(MulticutSolver):
+    """Run a sequence of multicut solvers on one objective."""
+
     def __init__(self, solvers):
         self.solvers = list(solvers)
         if len(self.solvers) == 0:
@@ -416,6 +436,33 @@ class ChainedMulticutSolvers(MulticutSolver):
             labels = solver.optimize(objective)
         return labels
 
+    def _build_cpp_decomposer_solver(self):
+        return _core._ChainedMulticutSubSolver(
+            [
+                solver._build_cpp_decomposer_solver()
+                for solver in self.solvers
+            ]
+        )
+
+
+def _require_decomposer_solver(solver: MulticutSolver, name: str) -> None:
+    supported = (
+        GreedyAdditiveMulticut,
+        GreedyFixationMulticut,
+        KernighanLinMulticut,
+    )
+    if isinstance(solver, supported):
+        return
+    if isinstance(solver, ChainedMulticutSolvers):
+        for index, child in enumerate(solver.solvers):
+            _require_decomposer_solver(child, f"{name}.solvers[{index}]")
+        return
+    raise TypeError(
+        f"{name} must be GreedyAdditiveMulticut, "
+        "GreedyFixationMulticut, KernighanLinMulticut, or a "
+        "ChainedMulticutSolvers containing only these solvers"
+    )
+
 
 class MulticutDecomposer(MulticutSolver):
     """Decomposition-based multicut solver.
@@ -426,6 +473,13 @@ class MulticutDecomposer(MulticutSolver):
 
     Splits the multicut problem into connected components (based on positive
     edge costs) and solves each component independently with ``sub_solver``.
+
+    ``number_of_threads=0`` uses available hardware concurrency. Native
+    workers use independent C++ solver instances. Results are assembled in
+    component order, independent of worker scheduling.
+
+    Component and fallthrough solvers must be greedy additive, greedy
+    fixation, Kernighan-Lin, or a chain composed only from these solvers.
     """
 
     def __init__(
@@ -437,54 +491,38 @@ class MulticutDecomposer(MulticutSolver):
     ):
         if not isinstance(sub_solver, MulticutSolver):
             raise TypeError("sub_solver must inherit from MulticutSolver")
-        if fallthrough_solver is not None and not isinstance(fallthrough_solver, MulticutSolver):
+        if fallthrough_solver is not None and not isinstance(
+            fallthrough_solver, MulticutSolver
+        ):
             raise TypeError("fallthrough_solver must inherit from MulticutSolver")
+        _require_decomposer_solver(sub_solver, "sub_solver")
+        if fallthrough_solver is not None:
+            _require_decomposer_solver(
+                fallthrough_solver, "fallthrough_solver"
+            )
         self.sub_solver = sub_solver
         self.fallthrough_solver = fallthrough_solver
         self.number_of_threads = _normalize_number_of_threads(number_of_threads)
 
     def optimize(self, objective: MulticutObjective) -> np.ndarray:
-        # Local import to avoid a circular dependency at module-load time:
-        # ``connected_components`` lives in the top-level ``bioimage_cpp.graph``
-        # namespace, which itself imports this submodule.
-        from .. import connected_components
-
-        if self.fallthrough_solver is None and isinstance(self.sub_solver, GreedyAdditiveMulticut):
-            return self.sub_solver.optimize(objective)
-
-        component_labels = connected_components(
-            objective.graph,
-            edge_mask=objective.edge_costs > 0.0,
+        edge_costs = _require_finite_weights(
+            objective.edge_costs, "edge_costs"
         )
-        number_of_components = int(component_labels.max()) + 1 if component_labels.size else 0
-        if number_of_components <= 1:
-            solver = self.fallthrough_solver or self.sub_solver
-            return solver.optimize(objective)
-
-        global_labels = np.empty(objective.graph.number_of_nodes, dtype=np.uint64)
-        label_offset = 0
-        all_uvs = objective.graph.uv_ids()
-        for component in range(number_of_components):
-            nodes = np.flatnonzero(component_labels == component).astype(np.uint64)
-            if nodes.size == 1:
-                global_labels[int(nodes[0])] = label_offset
-                label_offset += 1
-                continue
-
-            edge_ids = objective.graph.edges_from_node_list(nodes)
-            sub_graph, sub_costs = _subproblem_from_edges(
-                objective.graph.number_of_nodes,
-                nodes,
-                all_uvs[edge_ids],
-                objective.edge_costs[edge_ids],
-            )
-            sub_objective = MulticutObjective(sub_graph, sub_costs)
-            sub_labels = self.sub_solver.optimize(sub_objective)
-            sub_labels = _dense_labels(sub_labels)
-            global_labels[nodes] = sub_labels + label_offset
-            label_offset += int(sub_labels.max()) + 1
-
-        objective.labels = _dense_labels(global_labels)
+        cpp_sub_solver = self.sub_solver._build_cpp_decomposer_solver()
+        cpp_fallthrough_solver = (
+            None
+            if self.fallthrough_solver is None
+            else self.fallthrough_solver._build_cpp_decomposer_solver()
+        )
+        labels = _core._multicut_decomposer(
+            objective.graph,
+            edge_costs,
+            objective.labels,
+            cpp_sub_solver,
+            cpp_fallthrough_solver,
+            self.number_of_threads,
+        )
+        objective.labels = labels
         return objective.labels
 
 

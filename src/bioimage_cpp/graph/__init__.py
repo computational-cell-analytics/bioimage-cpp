@@ -57,6 +57,7 @@ from ._shared import (
     _as_uv_array,
     _normalize_labels,
     _normalize_number_of_threads,
+    _require_finite_weights,
     _resolve_weight_dtype,
 )
 
@@ -774,7 +775,8 @@ def edge_weighted_watershed(
     edge_weights:
         1D array of length ``graph.number_of_edges``. Supported dtypes are
         ``float32`` and ``float64``. Other floating dtypes are cast to
-        ``float32`` (matches nifty); other dtypes raise ``TypeError``.
+        ``float32`` (matches nifty); other dtypes raise ``TypeError``. All
+        values must be finite.
     seeds:
         1D array of length ``graph.number_of_nodes``. Supported dtypes are
         ``uint32``, ``uint64``, ``int32``, ``int64``. ``0`` marks unlabeled
@@ -814,6 +816,7 @@ def edge_weighted_watershed(
     weight_array = _as_1d_array(
         weight_array, weight_array.dtype, "edge_weights", int(graph.number_of_edges)
     )
+    _require_finite_weights(weight_array, "edge_weights")
     seed_array = _as_1d_array(
         seed_array, seed_array.dtype, "seeds", int(graph.number_of_nodes)
     )
