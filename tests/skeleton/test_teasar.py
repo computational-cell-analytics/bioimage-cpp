@@ -6,7 +6,13 @@ from bioimage_cpp import _core
 
 
 def _teasar_backend(
-    mask, backend, *, spacing=(1.5, 1.0, 1.0), number_of_threads=1
+    mask,
+    backend,
+    *,
+    spacing=(1.5, 1.0, 1.0),
+    ball_invalidation=False,
+    fix_branching=True,
+    number_of_threads=1,
 ):
     return _core._teasar_uint8_backend(
         np.ascontiguousarray(mask, dtype=np.uint8),
@@ -15,6 +21,8 @@ def _teasar_backend(
         1.0,
         100000.0,
         4.0,
+        ball_invalidation,
+        fix_branching,
         backend,
         number_of_threads,
     )
@@ -192,25 +200,98 @@ def test_output_is_deterministic():
         np.testing.assert_array_equal(got, expected)
 
 
-def test_threaded_output_is_deterministic():
+def test_default_options_preserve_cube_invalidation_and_branch_fixing():
+    mask = np.zeros((9, 9, 9), dtype=np.uint8)
+    mask[2:7, 2:7, 2:7] = 1
+    default = bic.skeleton.teasar(mask, scale=0.0, constant=2.0)
+    explicit = bic.skeleton.teasar(
+        mask,
+        scale=0.0,
+        constant=2.0,
+        invalidation="cube",
+        fix_branching=True,
+    )
+    for got, expected in zip(default, explicit):
+        np.testing.assert_array_equal(got, expected)
+
+
+def test_ball_invalidation_uses_a_strict_physical_radius():
+    mask = np.zeros((9, 9, 9), dtype=np.uint8)
+    mask[2:7, 2:7, 2:7] = 1
+    cube = bic.skeleton.teasar(
+        mask, scale=0.0, constant=2.0, invalidation="cube"
+    )
+    ball = bic.skeleton.teasar(
+        mask, scale=0.0, constant=2.0, invalidation="ball"
+    )
+    _assert_valid_tree(mask, *cube)
+    _assert_valid_tree(mask, *ball)
+    assert len(cube[0]) == 5
+    assert len(ball[0]) == 23
+
+
+def test_fix_branching_false_uses_the_fixed_parental_field():
+    mask = np.zeros((15, 21, 25), dtype=np.uint8)
+    mask[7, 10, 2:20] = 1
+    mask[7, 3:18, 12] = 1
+    mask[3:12, 10, 12] = 1
+    fixed = bic.skeleton.teasar(mask, constant=1.0, fix_branching=True)
+    parental = bic.skeleton.teasar(mask, constant=1.0, fix_branching=False)
+    _assert_valid_tree(mask, *fixed)
+    _assert_valid_tree(mask, *parental)
+    fixed_degree = np.bincount(fixed[1].ravel(), minlength=len(fixed[0]))
+    parental_degree = np.bincount(
+        parental[1].ravel(), minlength=len(parental[0])
+    )
+    assert np.count_nonzero(fixed_degree > 2) == 2
+    assert np.count_nonzero(parental_degree > 2) == 1
+
+
+@pytest.mark.parametrize(
+    "invalidation, fix_branching",
+    [("cube", True), ("cube", False), ("ball", True), ("ball", False)],
+)
+def test_threaded_output_is_deterministic(invalidation, fix_branching):
     mask = np.zeros((17, 21, 25), dtype=bool)
     mask[8, 10, 2:18] = True
     mask[8, 4:17, 17] = True
-    first = bic.skeleton.teasar(mask, number_of_threads=2)
-    second = bic.skeleton.teasar(mask, number_of_threads=4)
+    options = {
+        "invalidation": invalidation,
+        "fix_branching": fix_branching,
+    }
+    first = bic.skeleton.teasar(mask, number_of_threads=2, **options)
+    second = bic.skeleton.teasar(mask, number_of_threads=4, **options)
     for got, expected in zip(first, second):
         np.testing.assert_array_equal(got, expected)
 
 
 @pytest.mark.parametrize("spacing", [(1.0, 1.0, 1.0), (2.5, 1.25, 0.75)])
-def test_compact_fp64_backends_have_exact_dense_parity(spacing):
+@pytest.mark.parametrize(
+    "ball_invalidation, fix_branching",
+    [(False, True), (False, False), (True, True), (True, False)],
+)
+def test_compact_fp64_backends_have_exact_dense_parity(
+    spacing, ball_invalidation, fix_branching
+):
     zz, yy, xx = np.indices((17, 21, 25))
     first = ((zz - 8) ** 2 + (yy - 7) ** 2 <= 3**2) & (xx >= 3) & (xx <= 16)
     second = ((zz - 8) ** 2 + (xx - 16) ** 2 <= 3**2) & (yy >= 7) & (yy <= 17)
     mask = first | second
-    dense = _teasar_backend(mask, "dense-fp64", spacing=spacing)
+    dense = _teasar_backend(
+        mask,
+        "dense-fp64",
+        spacing=spacing,
+        ball_invalidation=ball_invalidation,
+        fix_branching=fix_branching,
+    )
     for backend in ("compact-on-the-fly-fp64", "compact-csr-fp64"):
-        compact = _teasar_backend(mask, backend, spacing=spacing)
+        compact = _teasar_backend(
+            mask,
+            backend,
+            spacing=spacing,
+            ball_invalidation=ball_invalidation,
+            fix_branching=fix_branching,
+        )
         for got, expected in zip(compact, dense):
             np.testing.assert_array_equal(got, expected)
 
@@ -285,6 +366,8 @@ def test_many_rail_target_ordering_preserves_dense_parity():
                 1.0,
                 100000.0,
                 4.0,
+                False,
+                True,
                 backend,
                 1,
             )
@@ -309,7 +392,7 @@ def test_rejects_non_3d_input(shape):
 
 
 def test_direct_binding_validates_ndim_and_spacing_before_dispatch():
-    parameters = (1.5, 1.0, 100000.0, 4.0, 1)
+    parameters = (1.5, 1.0, 100000.0, 4.0, False, True, 1)
     with pytest.raises(ValueError, match="mask must have ndim 3, got ndim=2"):
         _core._teasar_uint8(
             np.ones((3, 4), dtype=np.uint8), [1.0, 1.0, 1.0], *parameters
@@ -329,6 +412,7 @@ def test_direct_binding_validates_ndim_and_spacing_before_dispatch():
         ({"constant": np.inf}, "constant"),
         ({"pdrf_scale": np.nan}, "pdrf_scale"),
         ({"pdrf_exponent": 0.0}, "pdrf_exponent"),
+        ({"invalidation": "sphere"}, "invalidation"),
         ({"number_of_threads": -1}, "number_of_threads"),
     ],
 )

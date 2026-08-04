@@ -8,6 +8,7 @@
 #include "bioimage_cpp/distance/grid_dijkstra.hxx"
 #include "bioimage_cpp/skeleton/detail/compact_grid_dijkstra.hxx"
 #include "bioimage_cpp/skeleton/detail/components.hxx"
+#include "bioimage_cpp/skeleton/detail/invalidation.hxx"
 #include "bioimage_cpp/skeleton/detail/row_interval_union.hxx"
 
 #include <algorithm>
@@ -30,6 +31,11 @@
 
 namespace bioimage_cpp::skeleton {
 
+enum class TeasarInvalidation {
+    Cube,
+    Ball,
+};
+
 struct TeasarOptions {
     std::array<double, 3> spacing{1.0, 1.0, 1.0};
     double scale = 1.5;
@@ -37,6 +43,8 @@ struct TeasarOptions {
     double pdrf_scale = 100000.0;
     double pdrf_exponent = 4.0;
     std::size_t number_of_threads = 1;
+    TeasarInvalidation invalidation = TeasarInvalidation::Cube;
+    bool fix_branching = true;
 };
 
 using VoxelCoordinate = std::array<std::int64_t, 3>;
@@ -101,6 +109,12 @@ inline void validate_options(
     }
     if (!(std::isfinite(options.pdrf_exponent) && options.pdrf_exponent > 0.0)) {
         throw std::invalid_argument("pdrf_exponent must be positive and finite");
+    }
+    if (
+        options.invalidation != TeasarInvalidation::Cube &&
+        options.invalidation != TeasarInvalidation::Ball
+    ) {
+        throw std::invalid_argument("invalid TEASAR invalidation mode");
     }
 }
 
@@ -344,23 +358,52 @@ inline LatticeSkeletonGraph teasar_dense_impl(
         graph.radii.push_back(dbf[voxel]);
         vertex_of_voxel[voxel] = static_cast<std::int64_t>(vertex_id);
         skeleton_voxels.push_back(voxel);
-        pdrf[voxel] = 0.0;
+        if (options.fix_branching) {
+            pdrf[voxel] = 0.0;
+        }
         return vertex_id;
     };
 
-    add_vertex(root);
     ConstArrayView<std::uint8_t> padded_view{padded_mask.data(), shape, {}};
     ConstArrayView<double> pdrf_view{pdrf.data(), shape, {}};
     const distance::DijkstraOptions node_options{
         3, {}, distance::DijkstraCostMode::Node, effective_threads
     };
+    std::vector<std::int64_t> fixed_predecessors;
+    if (!options.fix_branching) {
+        BIOIMAGE_PROFILE_SCOPE(profile, "parental_field")
+        auto field = distance::dijkstra_distance_field(
+            padded_view, {root}, node_options, &pdrf_view, true
+        );
+        fixed_predecessors = std::move(field.predecessors);
+    }
+
+    add_vertex(root);
     std::vector<std::size_t> path;
     const auto trace_target = [&](const std::size_t target) {
-        {
+        if (options.fix_branching) {
             BIOIMAGE_PROFILE_SCOPE(profile, "path_dijkstra")
             path = distance::dijkstra_path(
                 padded_view, target, skeleton_voxels, node_options, &pdrf_view
             );
+        } else {
+            BIOIMAGE_PROFILE_SCOPE(profile, "path_from_parents")
+            path.clear();
+            auto voxel = target;
+            while (vertex_of_voxel[voxel] < 0) {
+                path.push_back(voxel);
+                const auto predecessor = fixed_predecessors[voxel];
+                if (predecessor < 0) {
+                    throw std::runtime_error(
+                        "invalid fixed-parent predecessor chain"
+                    );
+                }
+                voxel = static_cast<std::size_t>(predecessor);
+                if (path.size() > n) {
+                    throw std::runtime_error("cycle in fixed-parent predecessor chain");
+                }
+            }
+            path.push_back(voxel);
         }
 
         std::uint64_t previous = static_cast<std::uint64_t>(
@@ -380,33 +423,61 @@ inline LatticeSkeletonGraph teasar_dense_impl(
 
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "invalidation")
-            for (const auto voxel : path) {
-                pdrf[voxel] = 0.0;
-                bioimage_cpp::detail::coords_from_index(
-                    static_cast<std::uint64_t>(voxel), strides, 3, coords.data()
-                );
-                const double radius =
-                    options.scale * static_cast<double>(dbf[voxel]) + options.constant;
-                if (!std::isfinite(radius)) {
-                    throw std::runtime_error("TEASAR invalidation radius overflowed");
+            if (options.invalidation == TeasarInvalidation::Ball) {
+                std::vector<double> radii;
+                radii.reserve(path.size());
+                for (const auto voxel : path) {
+                    const double radius =
+                        options.scale * static_cast<double>(dbf[voxel]) +
+                        options.constant;
+                    if (!std::isfinite(radius)) {
+                        throw std::runtime_error("TEASAR invalidation radius overflowed");
+                    }
+                    radii.push_back(radius);
                 }
-                std::array<std::ptrdiff_t, 3> lo{};
-                std::array<std::ptrdiff_t, 3> hi{};
-                detail_teasar::invalidation_bounds(
-                    coords, radius, options.spacing, shape, lo, hi
+                const auto invalidated = detail::invalidate_path_balls(
+                    active, path, radii, shape, options.spacing
                 );
-                for (std::ptrdiff_t z = lo[0]; z <= hi[0]; ++z) {
-                    for (std::ptrdiff_t y = lo[1]; y <= hi[1]; ++y) {
-                        for (std::ptrdiff_t x = lo[2]; x <= hi[2]; ++x) {
-                            const auto index = static_cast<std::size_t>(
-                                z * strides[0] + y * strides[1] + x
-                            );
-                            if (active[index] != 0) {
-                                active[index] = 0;
-                                --active_count;
+                if (invalidated > active_count) {
+                    throw std::runtime_error(
+                        "TEASAR ball invalidation count is inconsistent"
+                    );
+                }
+                active_count -= invalidated;
+            } else {
+                for (const auto voxel : path) {
+                    bioimage_cpp::detail::coords_from_index(
+                        static_cast<std::uint64_t>(voxel), strides, 3, coords.data()
+                    );
+                    const double radius =
+                        options.scale * static_cast<double>(dbf[voxel]) +
+                        options.constant;
+                    if (!std::isfinite(radius)) {
+                        throw std::runtime_error("TEASAR invalidation radius overflowed");
+                    }
+                    std::array<std::ptrdiff_t, 3> lo{};
+                    std::array<std::ptrdiff_t, 3> hi{};
+                    detail_teasar::invalidation_bounds(
+                        coords, radius, options.spacing, shape, lo, hi
+                    );
+                    for (std::ptrdiff_t z = lo[0]; z <= hi[0]; ++z) {
+                        for (std::ptrdiff_t y = lo[1]; y <= hi[1]; ++y) {
+                            for (std::ptrdiff_t x = lo[2]; x <= hi[2]; ++x) {
+                                const auto index = static_cast<std::size_t>(
+                                    z * strides[0] + y * strides[1] + x
+                                );
+                                if (active[index] != 0) {
+                                    active[index] = 0;
+                                    --active_count;
+                                }
                             }
                         }
                     }
+                }
+            }
+            if (options.fix_branching) {
+                for (const auto voxel : path) {
+                    pdrf[voxel] = 0.0;
                 }
             }
         }
@@ -708,9 +779,19 @@ inline LatticeSkeletonGraph teasar_compact_impl(
         graph.radii.push_back(compact_dbf[node]);
         vertex_of_node[node] = static_cast<std::int64_t>(vertex_id);
         skeleton_nodes.push_back(node);
-        pdrf[node] = Distance{0};
+        if (options.fix_branching) {
+            pdrf[node] = Distance{0};
+        }
         return vertex_id;
     };
+
+    std::vector<std::uint32_t> fixed_predecessors;
+    if (!options.fix_branching) {
+        BIOIMAGE_PROFILE_SCOPE(profile, "parental_field")
+        detail::compact_node_cost_parental_field<Adjacency>(
+            domain, root, pdrf, dijkstra_workspace, fixed_predecessors
+        );
+    }
 
     add_vertex(root);
     std::vector<std::uint32_t> path;
@@ -718,11 +799,23 @@ inline LatticeSkeletonGraph teasar_compact_impl(
         n / static_cast<std::size_t>(shape[2]), shape[2]
     );
     const auto trace_target = [&](const std::uint32_t target) {
-        {
+        if (options.fix_branching) {
             BIOIMAGE_PROFILE_SCOPE(profile, "path_dijkstra")
             detail::compact_node_cost_path<Adjacency>(
                 domain, target, skeleton_nodes, pdrf, dijkstra_workspace, path
             );
+        } else {
+            BIOIMAGE_PROFILE_SCOPE(profile, "path_from_parents")
+            path.clear();
+            auto node = target;
+            while (vertex_of_node[node] < 0) {
+                path.push_back(node);
+                node = fixed_predecessors[node];
+                if (path.size() > domain.size()) {
+                    throw std::runtime_error("cycle in fixed-parent predecessor chain");
+                }
+            }
+            path.push_back(node);
         }
 
         std::uint64_t previous = static_cast<std::uint64_t>(
@@ -742,47 +835,81 @@ inline LatticeSkeletonGraph teasar_compact_impl(
 
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "invalidation")
-            for (const auto node : path) {
-                pdrf[node] = Distance{0};
-                const auto voxel = static_cast<std::size_t>(domain.compact_to_full[node]);
-                bioimage_cpp::detail::coords_from_index(
-                    static_cast<std::uint64_t>(voxel), strides, 3, coords.data()
-                );
-                const double radius =
-                    options.scale * static_cast<double>(compact_dbf[node]) +
-                    options.constant;
-                if (!std::isfinite(radius)) {
-                    throw std::runtime_error("TEASAR invalidation radius overflowed");
+            if (options.invalidation == TeasarInvalidation::Ball) {
+                std::vector<std::size_t> full_path;
+                std::vector<double> radii;
+                full_path.reserve(path.size());
+                radii.reserve(path.size());
+                for (const auto node : path) {
+                    full_path.push_back(
+                        static_cast<std::size_t>(domain.compact_to_full[node])
+                    );
+                    const double radius =
+                        options.scale * static_cast<double>(compact_dbf[node]) +
+                        options.constant;
+                    if (!std::isfinite(radius)) {
+                        throw std::runtime_error("TEASAR invalidation radius overflowed");
+                    }
+                    radii.push_back(radius);
                 }
-                std::array<std::ptrdiff_t, 3> lo{};
-                std::array<std::ptrdiff_t, 3> hi{};
-                detail_teasar::invalidation_bounds(
-                    coords, radius, options.spacing, shape, lo, hi
+                const auto invalidated = detail::invalidate_path_balls(
+                    active, full_path, radii, shape, options.spacing
                 );
-                for (std::ptrdiff_t z = lo[0]; z <= hi[0]; ++z) {
-                    for (std::ptrdiff_t y = lo[1]; y <= hi[1]; ++y) {
-                        const auto row = static_cast<std::size_t>(
-                            z * shape[1] + y
-                        );
-                        const auto row_begin = static_cast<std::size_t>(
-                            z * strides[0] + y * strides[1]
-                        );
-                        invalidated_rows.insert(
-                            row,
-                            lo[2],
-                            hi[2],
-                            [&](const std::ptrdiff_t begin, const std::ptrdiff_t end) {
-                                for (auto x = begin; x <= end; ++x) {
-                                    const auto index = row_begin +
-                                        static_cast<std::size_t>(x);
-                                    if (active[index] != 0) {
-                                        active[index] = 0;
-                                        --active_count;
+                if (invalidated > active_count) {
+                    throw std::runtime_error(
+                        "TEASAR ball invalidation count is inconsistent"
+                    );
+                }
+                active_count -= invalidated;
+            } else {
+                for (const auto node : path) {
+                    const auto voxel = static_cast<std::size_t>(
+                        domain.compact_to_full[node]
+                    );
+                    bioimage_cpp::detail::coords_from_index(
+                        static_cast<std::uint64_t>(voxel), strides, 3, coords.data()
+                    );
+                    const double radius =
+                        options.scale * static_cast<double>(compact_dbf[node]) +
+                        options.constant;
+                    if (!std::isfinite(radius)) {
+                        throw std::runtime_error("TEASAR invalidation radius overflowed");
+                    }
+                    std::array<std::ptrdiff_t, 3> lo{};
+                    std::array<std::ptrdiff_t, 3> hi{};
+                    detail_teasar::invalidation_bounds(
+                        coords, radius, options.spacing, shape, lo, hi
+                    );
+                    for (std::ptrdiff_t z = lo[0]; z <= hi[0]; ++z) {
+                        for (std::ptrdiff_t y = lo[1]; y <= hi[1]; ++y) {
+                            const auto row = static_cast<std::size_t>(
+                                z * shape[1] + y
+                            );
+                            const auto row_begin = static_cast<std::size_t>(
+                                z * strides[0] + y * strides[1]
+                            );
+                            invalidated_rows.insert(
+                                row,
+                                lo[2],
+                                hi[2],
+                                [&](const std::ptrdiff_t begin, const std::ptrdiff_t end) {
+                                    for (auto x = begin; x <= end; ++x) {
+                                        const auto index = row_begin +
+                                            static_cast<std::size_t>(x);
+                                        if (active[index] != 0) {
+                                            active[index] = 0;
+                                            --active_count;
+                                        }
                                     }
                                 }
-                            }
-                        );
+                            );
+                        }
                     }
+                }
+            }
+            if (options.fix_branching) {
+                for (const auto node : path) {
+                    pdrf[node] = Distance{0};
                 }
             }
         }

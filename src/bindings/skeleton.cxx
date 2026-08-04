@@ -53,6 +53,8 @@ nb::tuple teasar_uint8_impl(
     const double constant,
     const double pdrf_scale,
     const double pdrf_exponent,
+    const bool ball_invalidation,
+    const bool fix_branching,
     const skeleton::TeasarBackend backend,
     const std::size_t n_threads
 ) {
@@ -82,6 +84,9 @@ nb::tuple teasar_uint8_impl(
             pdrf_scale,
             pdrf_exponent,
             n_threads,
+            ball_invalidation ? skeleton::TeasarInvalidation::Ball
+                              : skeleton::TeasarInvalidation::Cube,
+            fix_branching,
         };
         if (backend == skeleton::TeasarBackend::Auto) {
             result = skeleton::teasar(mask_view, options);
@@ -99,11 +104,14 @@ nb::tuple teasar_uint8(
     const double constant,
     const double pdrf_scale,
     const double pdrf_exponent,
+    const bool ball_invalidation,
+    const bool fix_branching,
     const std::size_t n_threads
 ) {
     return teasar_uint8_impl(
         mask, spacing, scale, constant, pdrf_scale, pdrf_exponent,
-        skeleton::TeasarBackend::Auto, n_threads
+        ball_invalidation, fix_branching, skeleton::TeasarBackend::Auto,
+        n_threads
     );
 }
 
@@ -114,6 +122,8 @@ nb::tuple teasar_uint8_backend(
     const double constant,
     const double pdrf_scale,
     const double pdrf_exponent,
+    const bool ball_invalidation,
+    const bool fix_branching,
     const std::string &backend,
     const std::size_t n_threads
 ) {
@@ -128,8 +138,8 @@ nb::tuple teasar_uint8_backend(
         throw std::invalid_argument("unknown TEASAR development backend: " + backend);
     }
     return teasar_uint8_impl(
-        mask, spacing, scale, constant, pdrf_scale, pdrf_exponent, selected,
-        n_threads
+        mask, spacing, scale, constant, pdrf_scale, pdrf_exponent,
+        ball_invalidation, fix_branching, selected, n_threads
     );
 }
 
@@ -142,6 +152,8 @@ nb::dict teasar_labels_impl(
     const double constant,
     const double pdrf_scale,
     const double pdrf_exponent,
+    const bool ball_invalidation,
+    const bool fix_branching,
     const std::size_t n_threads
 ) {
     if (labels.ndim() != 3) {
@@ -172,7 +184,10 @@ nb::dict teasar_labels_impl(
              constant,
              pdrf_scale,
              pdrf_exponent,
-             n_threads}
+             n_threads,
+             ball_invalidation ? skeleton::TeasarInvalidation::Ball
+                               : skeleton::TeasarInvalidation::Cube,
+             fix_branching}
         );
     }
 
@@ -201,6 +216,8 @@ void bind_skeleton(nb::module_ &m) {
         nb::arg("constant"),
         nb::arg("pdrf_scale"),
         nb::arg("pdrf_exponent"),
+        nb::arg("ball_invalidation"),
+        nb::arg("fix_branching"),
         nb::arg("n_threads"),
         "Core binary 3D TEASAR skeletonization."
     );
@@ -213,6 +230,8 @@ void bind_skeleton(nb::module_ &m) {
         nb::arg("constant"),
         nb::arg("pdrf_scale"),
         nb::arg("pdrf_exponent"),
+        nb::arg("ball_invalidation"),
+        nb::arg("fix_branching"),
         nb::arg("backend"),
         nb::arg("n_threads") = 1,
         "Development-only TEASAR backend selector."
@@ -229,6 +248,8 @@ void bind_skeleton(nb::module_ &m) {
         nb::arg("constant"),                                                    \
         nb::arg("pdrf_scale"),                                                  \
         nb::arg("pdrf_exponent"),                                               \
+        nb::arg("ball_invalidation"),                                           \
+        nb::arg("fix_branching"),                                               \
         nb::arg("n_threads"),                                                   \
         "Core multi-label 3D TEASAR skeletonization."                           \
     )

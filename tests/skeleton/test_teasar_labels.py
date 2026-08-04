@@ -159,6 +159,30 @@ def test_each_label_is_exactly_equal_to_binary_dispatch(threads):
 
 
 @pytest.mark.parametrize(
+    "invalidation, fix_branching",
+    [("cube", True), ("cube", False), ("ball", True), ("ball", False)],
+)
+def test_each_label_propagates_invalidation_and_branching_options(
+    invalidation, fix_branching
+):
+    labels = np.zeros((11, 11, 17), dtype=np.uint16)
+    labels[2:7, 2:7, 2:7] = 11
+    labels[6:11, 6:11, 10:15] = 29
+    options = {
+        "scale": 0.0,
+        "constant": 2.0,
+        "invalidation": invalidation,
+        "fix_branching": fix_branching,
+        "number_of_threads": 2,
+    }
+    result = bic.skeleton.teasar_labels(labels, **options)
+    for label in (11, 29):
+        expected = bic.skeleton.teasar(labels == label, **options)
+        for got, wanted in zip(result[label], expected):
+            np.testing.assert_array_equal(got, wanted)
+
+
+@pytest.mark.parametrize(
     "dtype, labels_values",
     [
         (np.uint8, (1, 251)),
@@ -258,7 +282,7 @@ def test_rejects_wrong_dimensionality(shape):
 
 
 def test_direct_binding_validates_ndim_and_spacing():
-    parameters = (1.5, 1.0, 100000.0, 4.0, 1)
+    parameters = (1.5, 1.0, 100000.0, 4.0, False, True, 1)
     with pytest.raises(ValueError, match="labels must have ndim 3"):
         _core._teasar_labels_uint32(
             np.zeros((3, 4), np.uint32), 0, [1.0, 1.0, 1.0], *parameters

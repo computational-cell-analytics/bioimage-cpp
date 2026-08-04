@@ -341,6 +341,63 @@ inline void compact_physical_distance_field(
 }
 
 template <CompactAdjacency Adjacency, class Distance>
+inline void compact_node_cost_parental_field(
+    const CompactGridDomain &domain,
+    const std::uint32_t source,
+    const std::vector<Distance> &costs,
+    CompactDijkstraWorkspace<Distance> &workspace,
+    std::vector<std::uint32_t> &predecessors,
+    CompactDijkstraStats *stats = nullptr
+) {
+    const auto n = domain.size();
+    if (source >= n || costs.size() != n) {
+        throw std::invalid_argument("invalid compact node-cost parental-field inputs");
+    }
+    if constexpr (Adjacency == CompactAdjacency::Csr) {
+        if (!domain.has_csr()) {
+            throw std::invalid_argument("compact CSR adjacency is not available");
+        }
+    } else if (!domain.has_full_lookup()) {
+        throw std::invalid_argument("compact full-index lookup is not available");
+    }
+
+    predecessors.resize(n);
+    workspace.state.assign(n, 0);
+    workspace.heap.clear();
+    if (stats != nullptr) {
+        stats->reset();
+    }
+    workspace.state[source] = kCompactDiscovered;
+    predecessors[source] = source;
+    compact_heap_push(workspace, {Distance{0}, source}, stats);
+
+    while (!workspace.heap.empty()) {
+        const auto entry = compact_heap_pop(workspace, stats);
+        const auto node = entry.node;
+        if ((workspace.state[node] & kCompactSettled) != 0) {
+            continue;
+        }
+        workspace.state[node] |= kCompactSettled;
+        for_each_compact_neighbor<Adjacency>(
+            domain, node,
+            [&](const std::uint32_t target, const double) {
+                if ((workspace.state[target] &
+                     (kCompactDiscovered | kCompactSettled)) != 0) {
+                    return;
+                }
+                workspace.state[target] |= kCompactDiscovered;
+                predecessors[target] = node;
+                compact_heap_push(
+                    workspace,
+                    {static_cast<Distance>(entry.distance + costs[target]), target},
+                    stats
+                );
+            }
+        );
+    }
+}
+
+template <CompactAdjacency Adjacency, class Distance>
 inline void compact_node_cost_path(
     const CompactGridDomain &domain,
     const std::uint32_t source,

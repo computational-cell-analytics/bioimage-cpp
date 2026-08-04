@@ -203,6 +203,8 @@ def block_teasar(
     constant: float = 0.0,
     pdrf_scale: float = 100000.0,
     pdrf_exponent: float = 4.0,
+    invalidation: str = "cube",
+    fix_branching: bool = True,
     number_of_threads: int = 1,
 ) -> SkeletonFragment:
     """Skeletonize a binary processing block into a global lattice fragment.
@@ -212,7 +214,8 @@ def block_teasar(
     confined to real input voxels. ``required_targets`` contains global
     coordinates and is normally the union of these faces' targets. One target
     on an open face becomes a deterministic component root and every other
-    target is forced onto a rail.
+    target is forced onto a rail. ``invalidation`` and ``fix_branching`` have
+    the same behavior as in :func:`bioimage_cpp.skeleton.teasar`.
     """
     function = "block_teasar"
     binary = _as_binary_input(mask, function)
@@ -225,7 +228,7 @@ def block_teasar(
     open_axes, open_high = _normalize_faces(open_faces)
     options = _normalize_teasar_options(
         function, spacing, scale, constant, pdrf_scale, pdrf_exponent,
-        number_of_threads,
+        invalidation, fix_branching, number_of_threads,
     )
     return _core._block_teasar_uint8(
         binary, targets, open_axes, open_high, _normalize_origin(origin), *options
@@ -244,6 +247,8 @@ def block_teasar_labels(
     constant: float = 0.0,
     pdrf_scale: float = 100000.0,
     pdrf_exponent: float = 4.0,
+    invalidation: str = "cube",
+    fix_branching: bool = True,
     number_of_threads: int = 1,
 ) -> dict[int, SkeletonFragment]:
     """Skeletonize a labeled processing block into global lattice fragments.
@@ -252,7 +257,9 @@ def block_teasar_labels(
     ``required_targets`` maps original labels to global coordinate arrays. A
     coordinate must contain exactly its mapping key in ``labels``. One open-face
     target roots each affected component. The result has one global lattice
-    forest per original non-background label.
+    forest per original non-background label. ``invalidation`` and
+    ``fix_branching`` have the same behavior as in
+    :func:`bioimage_cpp.skeleton.teasar_labels`.
     """
     function = "block_teasar_labels"
     array = _normalize_labels(labels, function)
@@ -274,7 +281,7 @@ def block_teasar_labels(
             )
     options = _normalize_teasar_options(
         function, spacing, scale, constant, pdrf_scale, pdrf_exponent,
-        number_of_threads,
+        invalidation, fix_branching, number_of_threads,
     )
     open_axes, open_high = _normalize_faces(open_faces)
     return _BLOCK_TEASAR_LABELS[array.dtype](

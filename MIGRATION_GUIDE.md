@@ -2635,6 +2635,8 @@ vertices, edges, radii = bic.skeleton.teasar(
     constant=0,
     pdrf_scale=100000,
     pdrf_exponent=4,
+    invalidation="ball",
+    fix_branching=True,
     number_of_threads=4,
 )
 
@@ -2646,6 +2648,8 @@ skeletons = bic.skeleton.teasar_labels(
     constant=0,
     pdrf_scale=100000,
     pdrf_exponent=4,
+    invalidation="ball",
+    fix_branching=True,
     number_of_threads=4,
 )
 # {original_label: (vertices, edges, radii), ...}
@@ -2689,14 +2693,20 @@ Important differences and current scope:
   distance-to-boundary field, a deterministic two-sweep root, a physical
   Dijkstra distance-from-root field, penalized repeated Dijkstra paths, and
   rolling invalidation with radius `scale * radius + constant`.
-- This correctness-oriented implementation uses a physical axis-aligned
-  invalidation cube. The ordinary in-core entry points do not automatically
-  perform block stitching or accept manual targets; the dedicated block APIs
-  below provide mandatory interface targets and exact consolidation. Soma
-  handling, hole filling, component dust filtering, cross-section metadata,
-  and kimimaro's other postprocessing heuristics are not implemented. These
-  differences can change branch positions and vertex counts, so output is not
-  expected to be vertex-for-vertex identical to kimimaro.
+- `invalidation="cube"` uses the existing physical axis-aligned invalidation
+  box and remains the default. `invalidation="ball"` uses an open physical
+  ball. It expands through active foreground with 26-connectivity, as in
+  kimimaro's component-aware ball invalidation.
+- `fix_branching=True` remains the default. It routes each new path to the
+  existing zero-cost skeleton. Set `fix_branching=False` to build one parental
+  field from the root and extract all paths from that fixed field.
+- The ordinary in-core entry points do not automatically perform block
+  stitching or accept manual targets. The dedicated block APIs below provide
+  mandatory interface targets and exact consolidation. Soma handling, hole
+  filling, component dust filtering, cross-section metadata, and kimimaro's
+  other postprocessing heuristics are not implemented. These differences can
+  change branch positions and vertex counts. Output is not expected to be
+  vertex-for-vertex identical to kimimaro.
 - The C++ core remains dependency-free. Component discovery uses x-runs and a
   union-find rather than dense component-label images. `number_of_threads=1`
   is the default and `0` uses hardware concurrency; one shared budget covers
@@ -2746,6 +2756,8 @@ left_fragment = dist.block_teasar(
     origin=left_origin,
     required_targets=targets,
     spacing=spacing,
+    invalidation="cube",
+    fix_branching=True,
 )
 
 # Repeat independently for every processing block. Neighboring calls select
@@ -2778,6 +2790,10 @@ after graph union, so exact consolidation keeps cycles and
 skeletons are connected through their anchors but are not expected to be
 vertex-for-vertex identical to whole-volume TEASAR because each block still has
 less path-selection context.
+
+`block_teasar` and `block_teasar_labels` accept the same `invalidation` and
+`fix_branching` options as the in-core entry points. Both defaults preserve the
+previous block behavior.
 
 Correctness tests are under `tests/skeleton/test_teasar.py`,
 `tests/skeleton/test_teasar_labels.py`, and

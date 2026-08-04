@@ -201,12 +201,17 @@ skeleton::TeasarOptions teasar_options(
     const double constant,
     const double pdrf_scale,
     const double pdrf_exponent,
+    const bool ball_invalidation,
+    const bool fix_branching,
     const std::size_t number_of_threads
 ) {
     const auto values = spacing_array(spacing);
     return {
         values, scale, constant, pdrf_scale, pdrf_exponent,
-        number_of_threads
+        number_of_threads,
+        ball_invalidation ? skeleton::TeasarInvalidation::Ball
+                          : skeleton::TeasarInvalidation::Cube,
+        fix_branching
     };
 }
 
@@ -285,6 +290,8 @@ nb::tuple block_teasar_uint8(
     const double constant,
     const double pdrf_scale,
     const double pdrf_exponent,
+    const bool ball_invalidation,
+    const bool fix_branching,
     const std::size_t number_of_threads
 ) {
     const auto shape = array_shape(mask);
@@ -301,7 +308,7 @@ nb::tuple block_teasar_uint8(
             open_face_policy(open_axes, open_high),
             teasar_options(
                 spacing, scale, constant, pdrf_scale, pdrf_exponent,
-                number_of_threads
+                ball_invalidation, fix_branching, number_of_threads
             )
         );
     }
@@ -321,6 +328,8 @@ nb::dict block_teasar_labels_t(
     const double constant,
     const double pdrf_scale,
     const double pdrf_exponent,
+    const bool ball_invalidation,
+    const bool fix_branching,
     const std::size_t number_of_threads
 ) {
     const auto shape = array_shape(labels);
@@ -345,7 +354,7 @@ nb::dict block_teasar_labels_t(
             open_face_policy(open_axes, open_high),
             teasar_options(
                 spacing, scale, constant, pdrf_scale, pdrf_exponent,
-                number_of_threads
+                ball_invalidation, fix_branching, number_of_threads
             )
         );
     }
@@ -489,7 +498,9 @@ void bind_skeleton_distributed(nb::module_ &m) {
         nb::arg("mask"), nb::arg("required_targets"),
         nb::arg("open_axes"), nb::arg("open_high"), nb::arg("origin"),
         nb::arg("spacing"), nb::arg("scale"), nb::arg("constant"),
-        nb::arg("pdrf_scale"), nb::arg("pdrf_exponent"), nb::arg("n_threads")
+        nb::arg("pdrf_scale"), nb::arg("pdrf_exponent"),
+        nb::arg("ball_invalidation"), nb::arg("fix_branching"),
+        nb::arg("n_threads")
     );
 
 #define BIC_BIND_BLOCK_LABELS(name, type)                                      \
@@ -508,6 +519,7 @@ void bind_skeleton_distributed(nb::module_ &m) {
         nb::arg("open_high"), nb::arg("origin"),                             \
         nb::arg("spacing"), nb::arg("scale"), nb::arg("constant"),         \
         nb::arg("pdrf_scale"), nb::arg("pdrf_exponent"),                    \
+        nb::arg("ball_invalidation"), nb::arg("fix_branching"),              \
         nb::arg("n_threads")                                                   \
     )
 

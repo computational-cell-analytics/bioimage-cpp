@@ -288,6 +288,8 @@ def bic_backend_call(mask, spacing, parameters, backend, number_of_threads=1):
         parameters["constant"],
         parameters["pdrf_scale"],
         parameters["pdrf_exponent"],
+        False,
+        True,
         backend,
         number_of_threads,
     )

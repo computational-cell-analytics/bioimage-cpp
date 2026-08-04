@@ -79,7 +79,13 @@ def test_border_target_edge_tiebreak_uses_physical_low_edge_distance():
     np.testing.assert_array_equal(targets, [[1, 1, 1], [2, 4, 1]])
 
 
-def test_block_teasar_required_target_and_existing_teasar_equivalence():
+@pytest.mark.parametrize(
+    "invalidation, fix_branching",
+    [("cube", True), ("cube", False), ("ball", True), ("ball", False)],
+)
+def test_block_teasar_required_target_and_existing_teasar_equivalence(
+    invalidation, fix_branching
+):
     mask = np.zeros((9, 9, 13), dtype=np.uint8)
     mask[2:7, 2:7, 1:12] = 1
     target = np.array([[106, 206, 310]], dtype=np.int64)
@@ -92,10 +98,20 @@ def test_block_teasar_required_target_and_existing_teasar_equivalence():
     assert block[0].dtype == np.int64
 
     unconstrained = dist.block_teasar(
-        mask, open_faces=(), origin=(0, 0, 0), spacing=(2, 1, 0.5)
+        mask,
+        open_faces=(),
+        origin=(0, 0, 0),
+        spacing=(2, 1, 0.5),
+        invalidation=invalidation,
+        fix_branching=fix_branching,
     )
     physical = dist.lattice_to_physical(unconstrained, spacing=(2, 1, 0.5))
-    ordinary = bic.skeleton.teasar(mask, spacing=(2, 1, 0.5))
+    ordinary = bic.skeleton.teasar(
+        mask,
+        spacing=(2, 1, 0.5),
+        invalidation=invalidation,
+        fix_branching=fix_branching,
+    )
     for actual, expected in zip(physical, ordinary):
         np.testing.assert_array_equal(actual, expected)
 
@@ -221,6 +237,30 @@ def test_labeled_open_face_uses_label_specific_distance_boundary():
     index = np.flatnonzero(np.all(graph[0] == target, axis=1))
     assert float(graph[2][index[0]]) > 2.0
     assert np.all(labels[tuple(graph[0].T)] == -5)
+
+
+@pytest.mark.parametrize(
+    "invalidation, fix_branching",
+    [("cube", True), ("cube", False), ("ball", True), ("ball", False)],
+)
+def test_block_labels_propagate_invalidation_and_branching_options(
+    invalidation, fix_branching
+):
+    labels = np.zeros((11, 11, 17), dtype=np.uint16)
+    labels[2:7, 2:7, 2:7] = 11
+    labels[6:11, 6:11, 10:15] = 29
+    options = {
+        "open_faces": (),
+        "scale": 0.0,
+        "constant": 2.0,
+        "invalidation": invalidation,
+        "fix_branching": fix_branching,
+    }
+    result = dist.block_teasar_labels(labels, **options)
+    for label in (11, 29):
+        expected = dist.block_teasar(labels == label, **options)
+        for got, wanted in zip(result[label], expected):
+            np.testing.assert_array_equal(got, wanted)
 
 
 @pytest.mark.parametrize(
