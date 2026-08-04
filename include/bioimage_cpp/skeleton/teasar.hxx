@@ -546,7 +546,9 @@ inline LatticeSkeletonGraph teasar_compact_impl(
     const ConstArrayView<std::uint8_t> &mask,
     detail::PreparedTeasarComponent *prepared,
     const TeasarOptions &options,
-    const bool report_profile
+    const bool report_profile,
+    detail::CompactBallInvalidationStats *ball_invalidation_stats = nullptr,
+    bioimage_cpp::detail::ActiveProfiler *component_profile = nullptr
 ) {
     if (prepared == nullptr) {
         detail_teasar::validate_options(mask, options);
@@ -562,6 +564,7 @@ inline LatticeSkeletonGraph teasar_compact_impl(
     std::size_t n = 0;
     std::vector<std::uint8_t> padded_mask;
     std::vector<std::uint8_t> distance_mask;
+    std::vector<float> compact_dbf;
     std::vector<std::size_t> required_targets;
     std::size_t required_root = std::numeric_limits<std::size_t>::max();
     if (prepared != nullptr) {
@@ -570,6 +573,7 @@ inline LatticeSkeletonGraph teasar_compact_impl(
         shape = std::move(prepared->padded_shape);
         padded_mask = std::move(prepared->padded_mask);
         distance_mask = std::move(prepared->distance_mask);
+        compact_dbf = std::move(prepared->compact_dbf);
         required_targets = std::move(prepared->required_target_voxels);
         required_root = prepared->required_root_voxel;
         n = padded_mask.size();
@@ -634,21 +638,24 @@ inline LatticeSkeletonGraph teasar_compact_impl(
         options.number_of_threads, foreground_count
     );
 
-    auto dbf = std::make_unique_for_overwrite<float[]>(n);
-    {
-        BIOIMAGE_PROFILE_SCOPE(profile, "distance_transform")
-        const auto &distance_input = distance_mask.empty()
-            ? padded_mask : distance_mask;
-        ConstArrayView<std::uint8_t> padded_view{
-            distance_input.data(), shape, {}
-        };
-        ArrayView<float> distances_view{dbf.get(), shape, {}};
-        distance::distance_transform(
-            padded_view,
-            {options.spacing[0], options.spacing[1], options.spacing[2]},
-            {distances_view, {}, {}},
-            effective_threads
-        );
+    std::unique_ptr<float[]> dbf;
+    if (compact_dbf.empty()) {
+        dbf = std::make_unique_for_overwrite<float[]>(n);
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "distance_transform")
+            const auto &distance_input = distance_mask.empty()
+                ? padded_mask : distance_mask;
+            ConstArrayView<std::uint8_t> padded_view{
+                distance_input.data(), shape, {}
+            };
+            ArrayView<float> distances_view{dbf.get(), shape, {}};
+            distance::distance_transform(
+                padded_view,
+                {options.spacing[0], options.spacing[1], options.spacing[2]},
+                {distances_view, {}, {}},
+                effective_threads
+            );
+        }
     }
 
     detail::CompactGridDomain domain;
@@ -678,16 +685,26 @@ inline LatticeSkeletonGraph teasar_compact_impl(
     }
 
     double dbf_max = 0.0;
-    std::vector<float> compact_dbf;
-    compact_dbf.reserve(domain.size());
-    {
-        BIOIMAGE_PROFILE_SCOPE(profile, "dbf_compaction")
-        for (std::uint32_t node = 0; node < domain.size(); ++node) {
-            const auto value = dbf[domain.compact_to_full[node]];
-            compact_dbf.push_back(value);
+    if (compact_dbf.empty()) {
+        compact_dbf.reserve(domain.size());
+        {
+            BIOIMAGE_PROFILE_SCOPE(profile, "dbf_compaction")
+            for (std::uint32_t node = 0; node < domain.size(); ++node) {
+                const auto value = dbf[domain.compact_to_full[node]];
+                compact_dbf.push_back(value);
+                dbf_max = std::max(dbf_max, static_cast<double>(value));
+            }
+            dbf.reset();
+        }
+    } else {
+        if (compact_dbf.size() != domain.size()) {
+            throw std::runtime_error(
+                "TEASAR precomputed distance count is inconsistent"
+            );
+        }
+        for (const auto value : compact_dbf) {
             dbf_max = std::max(dbf_max, static_cast<double>(value));
         }
-        dbf.reset();
     }
 
     detail::CompactDijkstraWorkspace<Distance> dijkstra_workspace;
@@ -759,7 +776,13 @@ inline LatticeSkeletonGraph teasar_compact_impl(
         }
     }
 
-    std::vector<std::uint8_t> active = std::move(padded_mask);
+    std::vector<std::uint8_t> active;
+    if (options.invalidation == TeasarInvalidation::Ball) {
+        active.assign(domain.size(), std::uint8_t{1});
+        std::vector<std::uint8_t>().swap(padded_mask);
+    } else {
+        active = std::move(padded_mask);
+    }
     std::size_t active_count = foreground_count;
     std::vector<std::int64_t> vertex_of_node(domain.size(), -1);
     std::vector<std::uint32_t> skeleton_nodes;
@@ -795,6 +818,8 @@ inline LatticeSkeletonGraph teasar_compact_impl(
 
     add_vertex(root);
     std::vector<std::uint32_t> path;
+    std::vector<double> ball_radii;
+    detail::CompactBallInvalidationWorkspace ball_invalidation_workspace;
     detail::RowIntervalUnion invalidated_rows(
         n / static_cast<std::size_t>(shape[2]), shape[2]
     );
@@ -836,24 +861,20 @@ inline LatticeSkeletonGraph teasar_compact_impl(
         {
             BIOIMAGE_PROFILE_SCOPE(profile, "invalidation")
             if (options.invalidation == TeasarInvalidation::Ball) {
-                std::vector<std::size_t> full_path;
-                std::vector<double> radii;
-                full_path.reserve(path.size());
-                radii.reserve(path.size());
+                ball_radii.clear();
+                ball_radii.reserve(path.size());
                 for (const auto node : path) {
-                    full_path.push_back(
-                        static_cast<std::size_t>(domain.compact_to_full[node])
-                    );
                     const double radius =
                         options.scale * static_cast<double>(compact_dbf[node]) +
                         options.constant;
                     if (!std::isfinite(radius)) {
                         throw std::runtime_error("TEASAR invalidation radius overflowed");
                     }
-                    radii.push_back(radius);
+                    ball_radii.push_back(radius);
                 }
-                const auto invalidated = detail::invalidate_path_balls(
-                    active, full_path, radii, shape, options.spacing
+                const auto invalidated = detail::invalidate_compact_path_balls<Adjacency>(
+                    active, path, ball_radii, domain, options.spacing,
+                    ball_invalidation_workspace, ball_invalidation_stats
                 );
                 if (invalidated > active_count) {
                     throw std::runtime_error(
@@ -963,8 +984,11 @@ inline LatticeSkeletonGraph teasar_compact_impl(
             ) {
                 Distance target_distance = Distance{-1};
                 for (std::uint32_t node = 0; node < domain.size(); ++node) {
-                    const auto full = domain.compact_to_full[node];
-                    if (active[full] != 0 && root_field[node] > target_distance) {
+                    const auto active_index = options.invalidation ==
+                            TeasarInvalidation::Ball
+                        ? static_cast<std::size_t>(node)
+                        : static_cast<std::size_t>(domain.compact_to_full[node]);
+                    if (active[active_index] != 0 && root_field[node] > target_distance) {
                         target = node;
                         target_distance = root_field[node];
                     }
@@ -974,7 +998,11 @@ inline LatticeSkeletonGraph teasar_compact_impl(
                 if (!targets_ordered) {
                     ordered_targets.reserve(active_count);
                     for (std::uint32_t node = 0; node < domain.size(); ++node) {
-                        if (active[domain.compact_to_full[node]] != 0) {
+                        const auto active_index = options.invalidation ==
+                                TeasarInvalidation::Ball
+                            ? static_cast<std::size_t>(node)
+                            : static_cast<std::size_t>(domain.compact_to_full[node]);
+                        if (active[active_index] != 0) {
                             ordered_targets.push_back(node);
                         }
                     }
@@ -992,7 +1020,13 @@ inline LatticeSkeletonGraph teasar_compact_impl(
                 while (
                     ordered_target_cursor < ordered_targets.size() &&
                     active[
-                        domain.compact_to_full[ordered_targets[ordered_target_cursor]]
+                        options.invalidation == TeasarInvalidation::Ball
+                            ? static_cast<std::size_t>(
+                                ordered_targets[ordered_target_cursor]
+                            )
+                            : static_cast<std::size_t>(domain.compact_to_full[
+                                ordered_targets[ordered_target_cursor]
+                            ])
                     ] == 0
                 ) {
                     ++ordered_target_cursor;
@@ -1011,6 +1045,9 @@ inline LatticeSkeletonGraph teasar_compact_impl(
     if (report_profile) {
         BIOIMAGE_PROFILE_REPORT(profile)
     }
+    if (component_profile != nullptr) {
+        component_profile->merge(profile);
+    }
     return graph;
 }
 
@@ -1027,11 +1064,14 @@ inline LatticeSkeletonGraph teasar_compact(
 template <detail::CompactAdjacency Adjacency, class Distance>
 inline LatticeSkeletonGraph teasar_compact_prepared(
     detail::PreparedTeasarComponent prepared,
-    const TeasarOptions &options
+    const TeasarOptions &options,
+    detail::CompactBallInvalidationStats *ball_invalidation_stats = nullptr,
+    bioimage_cpp::detail::ActiveProfiler *component_profile = nullptr
 ) {
     const ConstArrayView<std::uint8_t> unused{};
     return teasar_compact_impl<Adjacency, Distance>(
-        unused, &prepared, options, false
+        unused, &prepared, options, false, ball_invalidation_stats,
+        component_profile
     );
 }
 
@@ -1235,19 +1275,341 @@ std::vector<std::size_t> component_thread_budgets(
     return budgets;
 }
 
+enum class ComponentEdtStrategy {
+    Auto,
+    Local,
+    Shared,
+};
+
+enum class SharedEdtDecision {
+    Selected,
+    ForcedLocal,
+    FewerThanTwoComponents,
+    CompactRange,
+    VolumeRatio,
+    ScratchLimit,
+};
+
+inline constexpr std::size_t kSharedEdtScratchLimitBytes =
+    std::size_t{256} * 1024 * 1024;
+
+inline const char *shared_edt_decision_name(const SharedEdtDecision decision) {
+    switch (decision) {
+        case SharedEdtDecision::Selected:
+            return "shared";
+        case SharedEdtDecision::ForcedLocal:
+            return "forced-local";
+        case SharedEdtDecision::FewerThanTwoComponents:
+            return "fewer-than-two-components";
+        case SharedEdtDecision::CompactRange:
+            return "compact-range";
+        case SharedEdtDecision::VolumeRatio:
+            return "volume-ratio";
+        case SharedEdtDecision::ScratchLimit:
+            return "scratch-limit";
+    }
+    return "unknown";
+}
+
+struct SharedEdtPreparation {
+    std::vector<std::vector<float>> component_dbf;
+    SharedEdtDecision decision = SharedEdtDecision::ForcedLocal;
+    std::size_t estimated_scratch_bytes = 0;
+
+    [[nodiscard]] bool selected() const noexcept {
+        return decision == SharedEdtDecision::Selected;
+    }
+};
+
+struct SharedEdtGatherContext {
+    const detail::ComponentSet<std::uint8_t> *components = nullptr;
+    std::array<std::ptrdiff_t, 3> global_begin{};
+    const std::vector<std::ptrdiff_t> *shared_shape = nullptr;
+    std::vector<std::vector<float>> *component_dbf = nullptr;
+};
+
+inline void gather_shared_squared_distances(
+    const double *squared_distances,
+    const std::size_t number_of_values,
+    void *raw_context
+) {
+    auto &context = *static_cast<SharedEdtGatherContext *>(raw_context);
+    if (
+        context.components == nullptr || context.shared_shape == nullptr ||
+        context.component_dbf == nullptr
+    ) {
+        throw std::invalid_argument("shared EDT gather context is incomplete");
+    }
+    const auto expected_values = detail::checked_shape_size(
+        *context.shared_shape, "shared EDT gather shape overflows size_t"
+    );
+    if (number_of_values != expected_values) {
+        throw std::runtime_error("shared EDT gather volume is inconsistent");
+    }
+    const auto strides = bioimage_cpp::detail::c_order_strides(
+        *context.shared_shape
+    );
+    const auto &components = *context.components;
+    auto &component_dbf = *context.component_dbf;
+    for (std::size_t component_id = 0;
+         component_id < components.components.size(); ++component_id) {
+        const auto &component = components.components[component_id];
+        auto &values = component_dbf[component_id];
+        values.reserve(static_cast<std::size_t>(component.voxel_count));
+        for (std::size_t offset = 0; offset < component.number_of_runs; ++offset) {
+            const auto run_id = components.component_run_ids[
+                component.run_offset + offset
+            ];
+            const auto &run = components.runs[run_id];
+            const auto z = run.z - context.global_begin[0] + 1;
+            const auto y = run.y - context.global_begin[1] + 1;
+            const auto row_begin = static_cast<std::size_t>(
+                z * strides[0] + y * strides[1]
+            );
+            for (auto x = run.x_begin; x <= run.x_end; ++x) {
+                const auto local_x = static_cast<std::size_t>(
+                    x - context.global_begin[2] + 1
+                );
+                values.push_back(static_cast<float>(
+                    std::sqrt(squared_distances[row_begin + local_x])
+                ));
+            }
+        }
+        if (values.size() != static_cast<std::size_t>(component.voxel_count)) {
+            throw std::runtime_error(
+                "shared EDT component value count is inconsistent"
+            );
+        }
+    }
+}
+
+inline std::size_t shared_edt_scratch_estimate(
+    const std::size_t shared_volume,
+    const std::size_t foreground_count,
+    const std::size_t maximum_extent,
+    const std::size_t number_of_threads
+) {
+    const auto volume_edt_bytes = detail::checked_multiply_size(
+        shared_volume, sizeof(double),
+        "shared EDT volume scratch estimate overflows size_t"
+    );
+    const auto compact_output_bytes = detail::checked_multiply_size(
+        foreground_count, sizeof(float),
+        "shared EDT compact output estimate overflows size_t"
+    );
+    const auto workspace_line_bytes = detail::checked_add_size(
+        detail::checked_multiply_size(
+            maximum_extent, std::size_t{32},
+            "shared EDT line scratch estimate overflows size_t"
+        ),
+        std::size_t{8 + 6 * sizeof(std::vector<double>)},
+        "shared EDT line scratch estimate overflows size_t"
+    );
+    const auto workspace_bytes = detail::checked_multiply_size(
+        workspace_line_bytes, number_of_threads,
+        "shared EDT thread scratch estimate overflows size_t"
+    );
+    const auto edt_peak = detail::checked_add_size(
+        detail::checked_add_size(
+            volume_edt_bytes, compact_output_bytes,
+            "shared EDT peak estimate overflows size_t"
+        ),
+        workspace_bytes,
+        "shared EDT peak estimate overflows size_t"
+    );
+    const auto compact_dbf_bytes = detail::checked_multiply_size(
+        foreground_count, sizeof(float),
+        "shared EDT compact DBF estimate overflows size_t"
+    );
+    const auto gather_peak = detail::checked_multiply_size(
+        compact_dbf_bytes, std::size_t{1},
+        "shared EDT gather peak estimate overflows size_t"
+    );
+    const auto raw_peak = std::max(edt_peak, gather_peak);
+    const auto headroom = detail::checked_add_size(
+        raw_peak, std::size_t{9},
+        "shared EDT headroom estimate overflows size_t"
+    ) / 10;
+    return detail::checked_add_size(
+        raw_peak, headroom,
+        "shared EDT scratch estimate overflows size_t"
+    );
+}
+
+template <class Profiler>
+SharedEdtPreparation prepare_shared_binary_edt(
+    const detail::ComponentSet<std::uint8_t> &components,
+    const TeasarOptions &options,
+    const ComponentEdtStrategy strategy,
+    const std::size_t scratch_limit_bytes,
+    Profiler &profile
+) {
+    SharedEdtPreparation result;
+    const auto count = components.components.size();
+    if (strategy == ComponentEdtStrategy::Local) {
+        result.decision = SharedEdtDecision::ForcedLocal;
+        return result;
+    }
+    if (count == 0) {
+        result.decision = SharedEdtDecision::FewerThanTwoComponents;
+        return result;
+    }
+    if (strategy == ComponentEdtStrategy::Auto && count < 2) {
+        result.decision = SharedEdtDecision::FewerThanTwoComponents;
+        return result;
+    }
+
+    auto global_begin = components.components.front().begin;
+    auto global_end = components.components.front().end;
+    std::size_t local_volume_sum = 0;
+    for (const auto &component : components.components) {
+        const auto padded_volume = detail::padded_component_volume(component);
+        if (
+            padded_volume > static_cast<std::size_t>(detail::kNoCompactNode) ||
+            component.voxel_count > detail::kNoCompactNode
+        ) {
+            if (strategy == ComponentEdtStrategy::Shared) {
+                throw std::invalid_argument(
+                    "forced shared EDT requires uint32-compatible components"
+                );
+            }
+            result.decision = SharedEdtDecision::CompactRange;
+            return result;
+        }
+        local_volume_sum = detail::checked_add_size(
+            local_volume_sum, padded_volume,
+            "summed component EDT volume overflows size_t"
+        );
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            global_begin[axis] = std::min(global_begin[axis], component.begin[axis]);
+            global_end[axis] = std::max(global_end[axis], component.end[axis]);
+        }
+    }
+
+    std::vector<std::ptrdiff_t> shared_shape(3);
+    std::size_t maximum_extent = 0;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const auto extent = global_end[axis] - global_begin[axis];
+        if (extent > std::numeric_limits<std::ptrdiff_t>::max() - 2) {
+            throw std::overflow_error("shared EDT shape overflows ptrdiff_t");
+        }
+        shared_shape[axis] = extent + 2;
+        maximum_extent = std::max(
+            maximum_extent, static_cast<std::size_t>(shared_shape[axis])
+        );
+    }
+    const auto shared_volume = detail::checked_shape_size(
+        shared_shape, "shared EDT volume overflows size_t"
+    );
+    if (shared_volume > static_cast<std::size_t>(detail::kNoCompactNode)) {
+        if (strategy == ComponentEdtStrategy::Shared) {
+            throw std::invalid_argument(
+                "forced shared EDT volume exceeds uint32 index range"
+            );
+        }
+        result.decision = SharedEdtDecision::CompactRange;
+        return result;
+    }
+    if (
+        strategy == ComponentEdtStrategy::Auto &&
+        static_cast<long double>(shared_volume) >
+            0.75L * static_cast<long double>(local_volume_sum)
+    ) {
+        result.decision = SharedEdtDecision::VolumeRatio;
+        return result;
+    }
+
+    const auto effective_threads = bioimage_cpp::detail::normalize_thread_count(
+        options.number_of_threads, components.foreground_count
+    );
+    result.estimated_scratch_bytes = shared_edt_scratch_estimate(
+        shared_volume, components.foreground_count, maximum_extent,
+        effective_threads
+    );
+    if (
+        strategy == ComponentEdtStrategy::Auto &&
+        result.estimated_scratch_bytes > scratch_limit_bytes
+    ) {
+        result.decision = SharedEdtDecision::ScratchLimit;
+        return result;
+    }
+
+    std::unique_ptr<double[]> initialized_squared;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "shared_edt_setup")
+        initialized_squared = std::make_unique_for_overwrite<double[]>(
+            shared_volume
+        );
+        std::fill(
+            initialized_squared.get(),
+            initialized_squared.get() + shared_volume,
+            0.0
+        );
+        const auto strides = bioimage_cpp::detail::c_order_strides(shared_shape);
+        for (const auto &run : components.runs) {
+            const auto z = run.z - global_begin[0] + 1;
+            const auto y = run.y - global_begin[1] + 1;
+            const auto x_begin = run.x_begin - global_begin[2] + 1;
+            const auto x_end = run.x_end - global_begin[2] + 1;
+            const auto row_begin = static_cast<std::size_t>(
+                z * strides[0] + y * strides[1]
+            );
+            for (auto x = x_begin; x <= x_end; ++x) {
+                const auto index = row_begin + static_cast<std::size_t>(x);
+                initialized_squared[index] = distance::detail::kInfinity;
+            }
+        }
+    }
+
+    result.component_dbf.resize(count);
+    SharedEdtGatherContext gather_context{
+        &components, global_begin, &shared_shape, &result.component_dbf
+    };
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "shared_distance_transform")
+        distance::detail::distance_transform_from_squared(
+            shared_shape,
+            {options.spacing[0], options.spacing[1], options.spacing[2]},
+            std::move(initialized_squared),
+            &gather_shared_squared_distances, &gather_context,
+            effective_threads
+        );
+    }
+    result.decision = SharedEdtDecision::Selected;
+    return result;
+}
+
 template <class LabelT>
 std::vector<LatticeSkeletonGraph> skeletonize_components(
     const detail::ComponentSet<LabelT> &components,
     const TeasarOptions &options,
     const bool include_label_in_errors,
     const std::vector<std::vector<std::array<std::ptrdiff_t, 3>>> *required_targets = nullptr,
-    const detail::OpenBlockFaces *open_faces = nullptr
+    const detail::OpenBlockFaces *open_faces = nullptr,
+    std::vector<std::vector<float>> *precomputed_component_dbf = nullptr,
+    std::vector<detail::CompactBallInvalidationStats> *ball_invalidation_stats = nullptr,
+    bioimage_cpp::detail::ActiveProfiler *component_profile = nullptr
 ) {
     const auto count = components.components.size();
     std::vector<LatticeSkeletonGraph> results(count);
     if (count == 0) {
         return results;
     }
+    if (ball_invalidation_stats != nullptr) {
+        ball_invalidation_stats->assign(count, {});
+    }
+    std::vector<bioimage_cpp::detail::ActiveProfiler> component_profiles;
+    if (component_profile != nullptr) {
+        component_profiles.resize(count);
+    }
+    const auto merge_component_profiles = [&] {
+        if (component_profile == nullptr) {
+            return;
+        }
+        for (const auto &local_profile : component_profiles) {
+            component_profile->merge(local_profile);
+        }
+    };
     const auto total_budget = bioimage_cpp::detail::normalize_thread_count(
         options.number_of_threads, components.foreground_count
     );
@@ -1281,11 +1643,22 @@ std::vector<LatticeSkeletonGraph> skeletonize_components(
                     components, component_id, required_targets->at(component_id),
                     open_faces
                 );
+            if (precomputed_component_dbf != nullptr) {
+                prepared.compact_dbf = std::move(
+                    precomputed_component_dbf->at(component_id)
+                );
+            }
             auto local_options = options;
             local_options.number_of_threads = local_budget;
             results[component_id] = teasar_compact_prepared<
                 detail::CompactAdjacency::OnTheFly, double
-            >(std::move(prepared), local_options);
+            >(
+                std::move(prepared), local_options,
+                ball_invalidation_stats == nullptr
+                    ? nullptr : &ball_invalidation_stats->at(component_id),
+                component_profile == nullptr
+                    ? nullptr : &component_profiles[component_id]
+            );
         } catch (const std::exception &error) {
             throw std::runtime_error(
                 component_context(
@@ -1297,6 +1670,7 @@ std::vector<LatticeSkeletonGraph> skeletonize_components(
 
     if (count == 1) {
         run_component(0, total_budget);
+        merge_component_profiles();
         return results;
     }
     if (count >= total_budget) {
@@ -1313,6 +1687,7 @@ std::vector<LatticeSkeletonGraph> skeletonize_components(
                 }
             }
         );
+        merge_component_profiles();
         return results;
     }
 
@@ -1326,6 +1701,7 @@ std::vector<LatticeSkeletonGraph> skeletonize_components(
             }
         }
     );
+    merge_component_profiles();
     return results;
 }
 
@@ -1360,18 +1736,44 @@ inline SkeletonGraph teasar_with_backend(
     );
 }
 
-inline SkeletonGraph teasar(
+inline SkeletonGraph teasar_with_component_edt(
     const ConstArrayView<std::uint8_t> &mask,
-    const TeasarOptions &options = {}
+    const TeasarOptions &options,
+    const detail_teasar::ComponentEdtStrategy edt_strategy,
+    const std::size_t shared_edt_scratch_limit,
+    detail_teasar::SharedEdtDecision *used_decision = nullptr,
+    std::size_t *estimated_scratch_bytes = nullptr
 ) {
     detail_teasar::validate_options(mask, options);
     BIOIMAGE_PROFILE_INIT(profile)
     auto components = detail::extract_binary_components(mask, profile);
+    auto shared_edt = detail_teasar::prepare_shared_binary_edt(
+        components, options, edt_strategy, shared_edt_scratch_limit, profile
+    );
+    if (used_decision != nullptr) {
+        *used_decision = shared_edt.decision;
+    }
+    if (estimated_scratch_bytes != nullptr) {
+        *estimated_scratch_bytes = shared_edt.estimated_scratch_bytes;
+    }
     std::vector<LatticeSkeletonGraph> results;
+    std::vector<detail::CompactBallInvalidationStats> ball_stats;
+    bioimage_cpp::detail::ActiveProfiler component_profile;
+#ifdef BIOIMAGE_PROFILE
+    auto *ball_stats_output = &ball_stats;
+    auto *component_profile_output = &component_profile;
+#else
+    auto *ball_stats_output =
+        static_cast<std::vector<detail::CompactBallInvalidationStats> *>(nullptr);
+    auto *component_profile_output =
+        static_cast<bioimage_cpp::detail::ActiveProfiler *>(nullptr);
+#endif
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "component_teasar")
         results = detail_teasar::skeletonize_components(
-            components, options, false
+            components, options, false, nullptr, nullptr,
+            shared_edt.selected() ? &shared_edt.component_dbf : nullptr,
+            ball_stats_output, component_profile_output
         );
     }
     std::vector<std::size_t> component_ids(results.size());
@@ -1382,8 +1784,47 @@ inline SkeletonGraph teasar(
         output = detail_teasar::assemble_skeleton_graphs(results, component_ids);
     }
     BIOIMAGE_PROFILE_REPORT(profile)
+    BIOIMAGE_PROFILE_REPORT_NAMED(
+        component_profile, "[bioimage TEASAR component profile]"
+    )
+#ifdef BIOIMAGE_PROFILE
+    detail::CompactBallInvalidationStats combined_ball_stats;
+    for (const auto &stats : ball_stats) {
+        combined_ball_stats.merge(stats);
+    }
+    std::fprintf(
+        stderr,
+        "[bioimage TEASAR diagnostics]\n"
+        "  shared_edt            %s\n"
+        "  shared_scratch        %zu bytes\n"
+        "  ball_offers           %zu\n"
+        "  ball_accepted         %zu\n"
+        "  ball_pops             %zu\n"
+        "  ball_stale_pops       %zu\n"
+        "  ball_invalidated      %zu\n"
+        "  ball_peak_heap        %zu\n",
+        detail_teasar::shared_edt_decision_name(shared_edt.decision),
+        shared_edt.estimated_scratch_bytes,
+        combined_ball_stats.offers,
+        combined_ball_stats.accepted,
+        combined_ball_stats.pops,
+        combined_ball_stats.stale_pops,
+        combined_ball_stats.invalidated,
+        combined_ball_stats.peak_heap
+    );
+#endif
     return detail_teasar::lattice_to_physical(
         std::move(output), options.spacing
+    );
+}
+
+inline SkeletonGraph teasar(
+    const ConstArrayView<std::uint8_t> &mask,
+    const TeasarOptions &options = {}
+) {
+    return teasar_with_component_edt(
+        mask, options, detail_teasar::ComponentEdtStrategy::Auto,
+        detail_teasar::kSharedEdtScratchLimitBytes
     );
 }
 

@@ -143,6 +143,77 @@ nb::tuple teasar_uint8_backend(
     );
 }
 
+nb::tuple teasar_uint8_edt_backend(
+    UInt8Input mask,
+    const std::vector<double> &spacing,
+    const double scale,
+    const double constant,
+    const double pdrf_scale,
+    const double pdrf_exponent,
+    const bool ball_invalidation,
+    const bool fix_branching,
+    const std::string &edt_strategy,
+    const std::size_t scratch_limit_bytes,
+    const std::size_t n_threads
+) {
+    if (mask.ndim() != 3) {
+        throw std::invalid_argument(
+            "mask must have ndim 3, got ndim=" + std::to_string(mask.ndim())
+        );
+    }
+    if (spacing.size() != 3) {
+        throw std::invalid_argument(
+            "spacing must contain exactly three values, got " +
+            std::to_string(spacing.size())
+        );
+    }
+    skeleton::detail_teasar::ComponentEdtStrategy selected;
+    if (edt_strategy == "auto") {
+        selected = skeleton::detail_teasar::ComponentEdtStrategy::Auto;
+    } else if (edt_strategy == "local") {
+        selected = skeleton::detail_teasar::ComponentEdtStrategy::Local;
+    } else if (edt_strategy == "shared") {
+        selected = skeleton::detail_teasar::ComponentEdtStrategy::Shared;
+    } else {
+        throw std::invalid_argument(
+            "unknown TEASAR EDT development strategy: " + edt_strategy
+        );
+    }
+
+    std::vector<std::ptrdiff_t> shape(mask.ndim());
+    for (std::size_t axis = 0; axis < mask.ndim(); ++axis) {
+        shape[axis] = static_cast<std::ptrdiff_t>(mask.shape(axis));
+    }
+    ConstArrayView<std::uint8_t> mask_view{mask.data(), shape, {}};
+    skeleton::SkeletonGraph result;
+    skeleton::detail_teasar::SharedEdtDecision decision;
+    std::size_t estimated_scratch_bytes = 0;
+    {
+        nb::gil_scoped_release release;
+        const skeleton::TeasarOptions options{
+            {spacing[0], spacing[1], spacing[2]},
+            scale,
+            constant,
+            pdrf_scale,
+            pdrf_exponent,
+            n_threads,
+            ball_invalidation ? skeleton::TeasarInvalidation::Ball
+                              : skeleton::TeasarInvalidation::Cube,
+            fix_branching,
+        };
+        result = skeleton::teasar_with_component_edt(
+            mask_view, options, selected, scratch_limit_bytes,
+            &decision, &estimated_scratch_bytes
+        );
+    }
+    auto arrays = skeleton_graph_to_tuple(result);
+    return nb::make_tuple(
+        arrays[0], arrays[1], arrays[2],
+        skeleton::detail_teasar::shared_edt_decision_name(decision),
+        estimated_scratch_bytes
+    );
+}
+
 template <class LabelT>
 nb::dict teasar_labels_impl(
     nb::ndarray<nb::numpy, const LabelT, nb::c_contig> labels,
@@ -235,6 +306,23 @@ void bind_skeleton(nb::module_ &m) {
         nb::arg("backend"),
         nb::arg("n_threads") = 1,
         "Development-only TEASAR backend selector."
+    );
+    m.def(
+        "_teasar_uint8_edt_backend",
+        &teasar_uint8_edt_backend,
+        nb::arg("mask"),
+        nb::arg("spacing"),
+        nb::arg("scale"),
+        nb::arg("constant"),
+        nb::arg("pdrf_scale"),
+        nb::arg("pdrf_exponent"),
+        nb::arg("ball_invalidation"),
+        nb::arg("fix_branching"),
+        nb::arg("edt_strategy"),
+        nb::arg("scratch_limit_bytes") =
+            skeleton::detail_teasar::kSharedEdtScratchLimitBytes,
+        nb::arg("n_threads") = 1,
+        "Development-only TEASAR component EDT selector."
     );
 
 #define BIC_BIND_TEASAR_LABELS(name, type)                                      \

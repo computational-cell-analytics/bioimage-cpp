@@ -20,6 +20,10 @@ namespace detail {
 
 constexpr double kInfinity = std::numeric_limits<double>::infinity();
 
+using SquaredDistanceConsumer = void (*)(
+    const double *, std::size_t, void *
+);
+
 inline std::ptrdiff_t number_of_elements(const std::vector<std::ptrdiff_t> &shape) {
     std::ptrdiff_t n = 1;
     for (const auto axis_size : shape) {
@@ -186,11 +190,14 @@ struct DistanceTransformOutputs {
 // >=1 = explicit thread count. Threading splits the orthogonal lines of each
 // axis sweep across threads via detail::parallel_for_chunks; the per-axis sweep
 // is a barrier (the next axis depends on the current axis result).
-inline void distance_transform(
+inline void detail_distance_transform_impl(
     const ConstArrayView<std::uint8_t> &input,
     const std::vector<double> &sampling,
     const DistanceTransformOutputs &outputs,
-    std::size_t n_threads = 1
+    const std::size_t n_threads,
+    std::unique_ptr<double[]> initialized_squared_distance,
+    const detail::SquaredDistanceConsumer squared_distance_consumer,
+    void *squared_distance_consumer_context
 ) {
     const auto ndim = input.ndim();
     if (ndim < 1) {
@@ -220,6 +227,8 @@ inline void distance_transform(
     const bool want_distances = outputs.distances.data != nullptr;
     const bool want_indices = outputs.indices.data != nullptr;
     const bool want_vectors = outputs.vectors.data != nullptr;
+    const bool use_initialized_squared =
+        initialized_squared_distance != nullptr;
     const bool track_feature = want_indices || want_vectors;
     bool is_isotropic = true;
     for (std::size_t axis = 0; axis < sampling.size(); ++axis) {
@@ -235,8 +244,8 @@ inline void distance_transform(
     // and indices against a virtual background row at axis-0 coordinate -1; we
     // mirror that convention so callers can switch between SciPy and us
     // without surprises.
-    bool has_background = false;
-    {
+    bool has_background = use_initialized_squared;
+    if (!use_initialized_squared) {
         BIOIMAGE_PROFILE_SCOPE(profiler, "scan_for_bg")
         for (std::ptrdiff_t i = 0; i < n; ++i) {
             if (input.data[i] == 0) {
@@ -277,9 +286,9 @@ inline void distance_transform(
     // Squared sampled distance buffer. ndim per-axis feature-coord buffers
     // (int32) replace the previous flat int64 feature index — this lets the
     // output pass materialize indices/vectors without re-unraveling per pixel.
-    auto squared_distance = std::make_unique_for_overwrite<double[]>(
-        static_cast<std::size_t>(n)
-    );
+    auto squared_distance = use_initialized_squared
+        ? std::move(initialized_squared_distance)
+        : std::make_unique_for_overwrite<double[]>(static_cast<std::size_t>(n));
     std::vector<std::vector<std::int32_t>> feature_coord;
     if (track_feature) {
         feature_coord.resize(static_cast<std::size_t>(ndim));
@@ -315,7 +324,7 @@ inline void distance_transform(
             // The first-axis gather initializes the uninitialized squared-
             // distance buffer directly from the input. Later axes gather the
             // preceding sweep, avoiding a redundant full-volume init pass.
-            if (ax == 0) {
+            if (ax == 0 && !use_initialized_squared) {
                 for (std::ptrdiff_t i = 0; i < line_length; ++i) {
                     const auto index = static_cast<std::size_t>(base + i * stride);
                     ws.f[static_cast<std::size_t>(i)] =
@@ -462,7 +471,49 @@ inline void distance_transform(
             }
         }
     }
+    if (squared_distance_consumer != nullptr) {
+        BIOIMAGE_PROFILE_SCOPE(profiler, "squared_distance_consumer")
+        squared_distance_consumer(
+            squared_distance.get(), static_cast<std::size_t>(n),
+            squared_distance_consumer_context
+        );
+    }
     BIOIMAGE_PROFILE_REPORT(profiler)
 }
+
+inline void distance_transform(
+    const ConstArrayView<std::uint8_t> &input,
+    const std::vector<double> &sampling,
+    const DistanceTransformOutputs &outputs,
+    const std::size_t n_threads = 1
+) {
+    detail_distance_transform_impl(
+        input, sampling, outputs, n_threads, nullptr, nullptr, nullptr
+    );
+}
+
+namespace detail {
+
+inline void distance_transform_from_squared(
+    const std::vector<std::ptrdiff_t> &shape,
+    const std::vector<double> &sampling,
+    std::unique_ptr<double[]> initialized_squared_distance,
+    const SquaredDistanceConsumer consumer,
+    void *consumer_context,
+    const std::size_t n_threads
+) {
+    if (initialized_squared_distance == nullptr) {
+        throw std::invalid_argument(
+            "initialized squared-distance buffer must not be null"
+        );
+    }
+    ConstArrayView<std::uint8_t> shape_only_input{nullptr, shape, {}};
+    detail_distance_transform_impl(
+        shape_only_input, sampling, {}, n_threads,
+        std::move(initialized_squared_distance), consumer, consumer_context
+    );
+}
+
+} // namespace detail
 
 } // namespace bioimage_cpp::distance

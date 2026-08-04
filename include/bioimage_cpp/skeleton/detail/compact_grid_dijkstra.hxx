@@ -26,6 +26,7 @@ enum class CompactAdjacency {
 struct CompactNeighbor {
     std::ptrdiff_t delta = 0;
     double physical_length = 0.0;
+    std::array<std::int8_t, 3> coordinate_delta{};
 };
 
 // A deterministic foreground-only view of a zero-padded 3D mask. Compact IDs
@@ -94,6 +95,11 @@ inline void build_compact_neighbors(
                     static_cast<std::ptrdiff_t>(dz) * domain.strides[0] +
                         static_cast<std::ptrdiff_t>(dy) * domain.strides[1] + dx,
                     std::sqrt(pz * pz + py * py + px * px),
+                    {
+                        static_cast<std::int8_t>(dz),
+                        static_cast<std::int8_t>(dy),
+                        static_cast<std::int8_t>(dx),
+                    },
                 };
             }
         }
@@ -276,6 +282,31 @@ inline void for_each_compact_neighbor(
             const auto target = domain.full_to_compact[target_full];
             if (target != kNoCompactNode) {
                 body(target, neighbor.physical_length);
+            }
+        }
+    }
+}
+
+template <CompactAdjacency Adjacency, class Body>
+inline void for_each_compact_neighbor_with_metadata(
+    const CompactGridDomain &domain,
+    const std::uint32_t node,
+    const Body &body
+) {
+    if constexpr (Adjacency == CompactAdjacency::Csr) {
+        for (auto edge = domain.offsets[node]; edge < domain.offsets[node + 1]; ++edge) {
+            body(
+                domain.targets[edge],
+                domain.neighbors[domain.neighbor_codes[edge]]
+            );
+        }
+    } else {
+        const auto full = static_cast<std::ptrdiff_t>(domain.compact_to_full[node]);
+        for (const auto &neighbor : domain.neighbors) {
+            const auto target_full = static_cast<std::size_t>(full + neighbor.delta);
+            const auto target = domain.full_to_compact[target_full];
+            if (target != kNoCompactNode) {
+                body(target, neighbor);
             }
         }
     }

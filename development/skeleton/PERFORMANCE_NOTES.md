@@ -609,6 +609,11 @@ semantic keys, paired binary/label parity, and raw samples before writing JSON.
 
 ## Real filament MRC target-selection follow-up
 
+The current comparison of cube/ball invalidation and both branching modes is
+in `development/skeleton/TEASAR_OPTIONS_COMPARISON.md`. It includes matched
+Kimimaro quality metrics and one-worker/eight-worker timings on the centered
+200-voxel crop.
+
 The synthetic branching tubes used above require only a small number of rails,
 so their repeated full-domain target scan was negligible. A real binary mask
 with many long, closely packed filaments exposed a different scaling regime.
@@ -629,8 +634,8 @@ python development/skeleton/benchmark_teasar_mrc.py \
 
 The harness memory-maps the MRC, takes centered nested crops, copies each crop
 to `uint8` outside the timed region, and reports shape, foreground count,
-component count (`V - E`), graph size, raw samples, median, and minimum. It
-compares vertices, edges, and radii array-exactly when several worker counts
+topology metrics, graph size, raw samples, median, and minimum. It compares
+bioimage-cpp vertices, edges, and radii array-exactly when several worker counts
 are requested. The default is one no-warmup measurement at eight workers for
 12.5%, 25%, and 50% crops; the full volume is opt-in because it was initially
 more than a three-minute call.
@@ -791,3 +796,165 @@ On the final `128^3` calls, the last measured phase breakdowns were:
 Merge and cycle removal remain negligible. More blocks mainly increase face
 analysis and Python orchestration. The comparison intentionally does not apply
 Kimimaro's heuristic nearest-component joining, dust removal, or tick pruning.
+
+## Ball-invalidation optimization pass (2026-08-04)
+
+This pass optimized the optional ball invalidation mode without changing its
+results. It also reduced repeated distance-transform work in ordinary binary
+TEASAR. Cube invalidation and `fix_branching=True` remain the public defaults.
+
+### Implemented changes
+
+The compact ball invalidator now stores one best pending entry per compact
+foreground voxel. Generation stamps avoid clearing this state between paths.
+The queue retains the original `(distance, source, node)` order, and stale heap
+entries are rejected when removed. Neighbor metadata and source coordinates
+are reused across paths.
+
+Ordinary binary TEASAR can now compute one shared distance transform before
+component dispatch. The automatic strategy selects the shared transform only
+when all of these conditions hold:
+
+- the input has at least two components;
+- the shared volume is at most 75% of the sum of the component crop volumes;
+- the estimated scratch memory, including a 10% allowance, is at most 256 MiB.
+
+Label and block APIs retain local component transforms. The distance-transform
+public API is unchanged. A private development binding can force local or
+shared execution for exactness and benchmark checks.
+
+The profile utility now separates top-level wall time from summed component
+work. It also aggregates queue counters across component workers. These
+diagnostics compile to no-ops unless `BIOIMAGE_PROFILE` is enabled.
+
+### Real-mask result
+
+The headline input is the centered `200 x 200 x 200` crop from
+`examples/skeleton/00004_gt_mask.mrc`. It contains 585,875 foreground voxels
+in 72 bioimage-cpp components. See `TEASAR_OPTIONS_COMPARISON.md` for the full
+topology comparison and reproduction command.
+
+The table separates the invalidation-queue change from the shared-transform
+change. Each final value is the median of seven calls after two warmups.
+
+| ball setting | workers | baseline | queue only | final | final change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fix | 1 | 1.985 s | 1.121 s | 0.944 s | -52.4% |
+| fix | 8 | 0.518 s | 0.306 s | 0.272 s | -47.5% |
+| parental | 1 | 1.945 s | 1.096 s | 0.911 s | -53.1% |
+| parental | 8 | 0.516 s | 0.311 s | 0.276 s | -46.6% |
+
+The queue change reduced baseline time by 39.8--43.7%. The shared transform
+then reduced queue-only time by a further 11.2--16.8%. The final one-worker
+ball modes are 1.94--1.99x faster than matched Kimimaro 5.8.1 modes. The final
+eight-worker ball modes are approximately 3.5x faster.
+
+Cube modes also benefit from the shared transform. Cube/fix fell from 0.975 s
+to 0.713 s with one worker and from 0.283 s to 0.219 s with eight workers.
+Cube/parental fell from 0.933 s to 0.692 s and from 0.266 s to 0.210 s.
+
+### Profile result
+
+A one-worker profile-build call for ball/fix reported 980.9 ms at the top
+level. The main component phase totals were:
+
+| phase | time |
+| --- | ---: |
+| shared transform setup | 21.8 ms |
+| shared distance transform | 151.4 ms |
+| compact-domain construction | 27.0 ms |
+| root Dijkstra | 283.6 ms |
+| PDRF construction | 15.0 ms |
+| target selection | 10.6 ms |
+| rail-path Dijkstra | 167.4 ms |
+| ball invalidation | 273.8 ms |
+
+The invalidator received 5,976,824 queue offers. It accepted 693,630 offers,
+removed 107,755 stale entries, invalidated 585,875 voxels, and reached a peak
+heap size of 18,059. Coalescing rejected 88.4% of offers before heap insertion.
+The invalidation phase fell from approximately 1.074 s to 273.8 ms. The shared
+transform replaced approximately 423 ms of local component transforms with
+151 ms of transform work.
+
+Root Dijkstra, invalidation, and rail-path Dijkstra are now the three largest
+one-worker phases. Further work should start with these measured phases after
+this fifth optimization step.
+
+### Memory result
+
+Fresh worker processes sampled aggregate RSS for each worker and its children.
+The table reports the median incremental peak from three processes after
+imports and input allocation.
+
+| implementation and setting | one worker | eight workers |
+| --- | ---: | ---: |
+| bioimage-cpp ball/fix | 52.7 MiB | 77.1 MiB |
+| bioimage-cpp ball/parental | 52.7 MiB | 77.1 MiB |
+| Kimimaro ball/fix | 89.8 MiB | 1,575 MiB |
+| Kimimaro ball/parental | 89.8 MiB | 1,555 MiB |
+
+The previous ball/fix implementation used 42.5 MiB with one worker and
+129.8 MiB with eight workers. The shared transform adds approximately 10 MiB
+to this one-worker process measurement. It saves approximately 53 MiB with
+eight workers by avoiding concurrent local transforms. The selected shared
+transform estimated 53.9 MB of scratch memory before execution.
+
+### Synthetic option matrix
+
+The development benchmark now accepts `cube-fix`, `cube-parental`, `ball-fix`,
+and `ball-parental`. This command runs all settings across binary and label
+dispatch cases:
+
+```bash
+python development/skeleton/benchmark_teasar.py \
+    --large --suite all \
+    --settings cube-fix cube-parental ball-fix ball-parental \
+    --threads 1 8 --repeats 5 --warmup 1 \
+    --json /tmp/teasar_all_settings.json
+```
+
+The branching-tube medians from the final normal build were:
+
+| volume | setting | one worker | eight workers |
+| --- | --- | ---: | ---: |
+| `128^3` | cube/fix | 44.60 ms | 28.52 ms |
+| `128^3` | cube/parental | 41.80 ms | 30.06 ms |
+| `128^3` | ball/fix | 52.67 ms | 36.87 ms |
+| `128^3` | ball/parental | 50.44 ms | 40.26 ms |
+| `192^3` | cube/fix | 125.03 ms | 91.96 ms |
+| `192^3` | cube/parental | 128.22 ms | 88.85 ms |
+| `192^3` | ball/fix | 149.21 ms | 105.67 ms |
+| `192^3` | ball/parental | 153.78 ms | 113.57 ms |
+| `256^3` | cube/fix | 338.90 ms | 224.21 ms |
+| `256^3` | cube/parental | 363.90 ms | 236.88 ms |
+| `256^3` | ball/fix | 397.00 ms | 277.87 ms |
+| `256^3` | ball/parental | 417.51 ms | 274.86 ms |
+
+The packed binary and packed semantic-label inputs contain the same foreground
+geometry. They produced array-exact forests for every setting. The 27-label
+native medians ranged from 54.06 to 71.92 ms with one worker and from 18.70 to
+21.03 ms with eight workers. The imbalanced 65-label case did not scale because
+one component dominates its small tasks. This result confirms the existing
+component-dispatch limitation across all settings.
+
+The MRC size sweep also measured both ball modes. The 12.5% crop contains
+152,662 foreground voxels; ball/fix took 218 ms with one worker and 101 ms with
+eight workers. Ball/parental took 213 ms and 96 ms. The 25% crop contains
+972,194 foreground voxels; the corresponding medians were 2.015 s and 1.603 s
+for ball/fix, and 1.896 s and 1.491 s for ball/parental. The automatic strategy
+selected the shared transform for the 25% crop and estimated 76.3 MB of
+scratch memory. The more expensive 50% option matrix was not rerun in this
+pass.
+
+### Correctness gates
+
+Randomized tests compare dense and compact ball invalidation across seeds,
+anisotropic spacing, and both branching modes. Forced local and shared distance
+transforms must produce array-exact vertices, edges, and radii. Additional
+tests cover automatic selection, the scratch-memory fallback, and the
+shared-volume fallback.
+
+The example MRC skeleton statistics remained unchanged through both
+optimization stages. Worker-count checks also remained array-exact. Final
+verification used the normal build with profile-only instrumentation disabled:
+`1421 passed`.

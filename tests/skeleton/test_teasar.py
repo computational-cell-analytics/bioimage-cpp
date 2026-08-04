@@ -28,6 +28,31 @@ def _teasar_backend(
     )
 
 
+def _teasar_edt_backend(
+    mask,
+    strategy,
+    *,
+    spacing=(1.5, 1.0, 1.0),
+    ball_invalidation=True,
+    fix_branching=True,
+    scratch_limit_bytes=256 * 1024 * 1024,
+    number_of_threads=1,
+):
+    return _core._teasar_uint8_edt_backend(
+        np.ascontiguousarray(mask, dtype=np.uint8),
+        spacing,
+        1.5,
+        1.0,
+        100000.0,
+        4.0,
+        ball_invalidation,
+        fix_branching,
+        strategy,
+        scratch_limit_bytes,
+        number_of_threads,
+    )
+
+
 def _assert_valid_tree(mask, vertices, edges, radii, spacing=(1.0, 1.0, 1.0)):
     mask = np.asarray(mask) != 0
     spacing = np.asarray(spacing, dtype=np.float64)
@@ -294,6 +319,92 @@ def test_compact_fp64_backends_have_exact_dense_parity(
         )
         for got, expected in zip(compact, dense):
             np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("seed", [7, 19, 41])
+@pytest.mark.parametrize("spacing", [(1.0, 1.0, 1.0), (2.5, 1.25, 0.75)])
+@pytest.mark.parametrize("fix_branching", [True, False])
+def test_coalesced_ball_queue_preserves_randomized_dense_parity(
+    seed, spacing, fix_branching
+):
+    rng = np.random.default_rng(seed)
+    mask = np.zeros((17, 19, 21), dtype=np.uint8)
+    coordinate = np.array([8, 9, 0], dtype=np.int64)
+    for _ in range(180):
+        lo = np.maximum(coordinate - 1, 0)
+        hi = np.minimum(coordinate + 2, mask.shape)
+        mask[tuple(slice(int(a), int(b)) for a, b in zip(lo, hi))] = 1
+        coordinate += rng.integers(-1, 2, size=3)
+        coordinate = np.clip(coordinate, 0, np.asarray(mask.shape) - 1)
+
+    dense = _teasar_backend(
+        mask,
+        "dense-fp64",
+        spacing=spacing,
+        ball_invalidation=True,
+        fix_branching=fix_branching,
+    )
+    for backend in ("compact-on-the-fly-fp64", "compact-csr-fp64"):
+        compact = _teasar_backend(
+            mask,
+            backend,
+            spacing=spacing,
+            ball_invalidation=True,
+            fix_branching=fix_branching,
+        )
+        for got, expected in zip(compact, dense):
+            np.testing.assert_array_equal(got, expected)
+
+
+def _clustered_components_mask():
+    mask = np.zeros((37, 37, 37), dtype=np.uint8)
+    for lo, hi in ((1, 35), (6, 30), (11, 25), (16, 20)):
+        mask[lo, lo:hi + 1, lo:hi + 1] = 1
+        mask[hi, lo:hi + 1, lo:hi + 1] = 1
+        mask[lo:hi + 1, lo, lo:hi + 1] = 1
+        mask[lo:hi + 1, hi, lo:hi + 1] = 1
+        mask[lo:hi + 1, lo:hi + 1, lo] = 1
+        mask[lo:hi + 1, lo:hi + 1, hi] = 1
+    return mask
+
+
+@pytest.mark.parametrize("spacing", [(1.0, 1.0, 1.0), (2.5, 1.25, 0.75)])
+@pytest.mark.parametrize("fix_branching", [True, False])
+def test_shared_component_edt_preserves_local_result_exactly(
+    spacing, fix_branching
+):
+    mask = _clustered_components_mask()
+    local = _teasar_edt_backend(
+        mask, "local", spacing=spacing, fix_branching=fix_branching
+    )
+    shared = _teasar_edt_backend(
+        mask, "shared", spacing=spacing, fix_branching=fix_branching,
+        number_of_threads=4,
+    )
+    assert local[3] == "forced-local"
+    assert shared[3] == "shared"
+    assert shared[4] > 0
+    for got, expected in zip(shared[:3], local[:3]):
+        np.testing.assert_array_equal(got, expected)
+
+
+def test_shared_component_edt_auto_selection_and_memory_fallback():
+    mask = _clustered_components_mask()
+    shared = _teasar_edt_backend(mask, "auto")
+    limited = _teasar_edt_backend(mask, "auto", scratch_limit_bytes=1)
+    assert shared[3] == "shared"
+    assert limited[3] == "scratch-limit"
+    assert limited[4] == shared[4]
+    for got, expected in zip(limited[:3], shared[:3]):
+        np.testing.assert_array_equal(got, expected)
+
+
+def test_shared_component_edt_rejects_unprofitable_union_volume():
+    mask = np.zeros((35, 35, 35), dtype=np.uint8)
+    mask[1, 1, 1:5] = 1
+    mask[-2, -2, -5:-1] = 1
+    result = _teasar_edt_backend(mask, "auto")
+    assert result[3] == "volume-ratio"
 
 
 @pytest.mark.parametrize("spacing", [(1.0, 1.0, 1.0), (2.5, 1.25, 0.75)])
