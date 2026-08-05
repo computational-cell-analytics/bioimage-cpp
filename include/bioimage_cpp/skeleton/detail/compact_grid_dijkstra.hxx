@@ -206,14 +206,32 @@ struct CompactHeapGreater {
 };
 
 struct CompactDijkstraStats {
+    std::size_t calls = 0;
+    std::size_t initialized_nodes = 0;
+    std::size_t settled_nodes = 0;
+    std::size_t neighbor_probes = 0;
+    std::size_t successful_relaxations = 0;
+    std::size_t target_marks = 0;
     std::size_t pushes = 0;
     std::size_t pops = 0;
+    std::size_t stale_pops = 0;
     std::size_t peak_heap = 0;
 
     void reset() noexcept {
-        pushes = 0;
-        pops = 0;
-        peak_heap = 0;
+        *this = {};
+    }
+
+    void merge(const CompactDijkstraStats &other) noexcept {
+        calls += other.calls;
+        initialized_nodes += other.initialized_nodes;
+        settled_nodes += other.settled_nodes;
+        neighbor_probes += other.neighbor_probes;
+        successful_relaxations += other.successful_relaxations;
+        target_marks += other.target_marks;
+        pushes += other.pushes;
+        pops += other.pops;
+        stale_pops += other.stale_pops;
+        peak_heap = std::max(peak_heap, other.peak_heap);
     }
 };
 
@@ -336,7 +354,8 @@ inline void compact_physical_distance_field(
     workspace.state.assign(n, 0);
     workspace.heap.clear();
     if (stats != nullptr) {
-        stats->reset();
+        ++stats->calls;
+        stats->initialized_nodes += n;
     }
     distances[source] = Distance{0};
     workspace.state[source] = kCompactDiscovered;
@@ -346,12 +365,21 @@ inline void compact_physical_distance_field(
         const auto entry = compact_heap_pop(workspace, stats);
         const auto node = entry.node;
         if ((workspace.state[node] & kCompactSettled) != 0) {
+            if (stats != nullptr) {
+                ++stats->stale_pops;
+            }
             continue;
         }
         workspace.state[node] |= kCompactSettled;
+        if (stats != nullptr) {
+            ++stats->settled_nodes;
+        }
         for_each_compact_neighbor<Adjacency>(
             domain, node,
             [&](const std::uint32_t target, const double physical_length) {
+                if (stats != nullptr) {
+                    ++stats->neighbor_probes;
+                }
                 if ((workspace.state[target] & kCompactSettled) != 0) {
                     return;
                 }
@@ -365,6 +393,9 @@ inline void compact_physical_distance_field(
                 }
                 workspace.state[target] |= kCompactDiscovered;
                 distances[target] = candidate;
+                if (stats != nullptr) {
+                    ++stats->successful_relaxations;
+                }
                 compact_heap_push(workspace, {candidate, target}, stats);
             }
         );
@@ -396,7 +427,8 @@ inline void compact_node_cost_parental_field(
     workspace.state.assign(n, 0);
     workspace.heap.clear();
     if (stats != nullptr) {
-        stats->reset();
+        ++stats->calls;
+        stats->initialized_nodes += n;
     }
     workspace.state[source] = kCompactDiscovered;
     predecessors[source] = source;
@@ -406,18 +438,30 @@ inline void compact_node_cost_parental_field(
         const auto entry = compact_heap_pop(workspace, stats);
         const auto node = entry.node;
         if ((workspace.state[node] & kCompactSettled) != 0) {
+            if (stats != nullptr) {
+                ++stats->stale_pops;
+            }
             continue;
         }
         workspace.state[node] |= kCompactSettled;
+        if (stats != nullptr) {
+            ++stats->settled_nodes;
+        }
         for_each_compact_neighbor<Adjacency>(
             domain, node,
             [&](const std::uint32_t target, const double) {
+                if (stats != nullptr) {
+                    ++stats->neighbor_probes;
+                }
                 if ((workspace.state[target] &
                      (kCompactDiscovered | kCompactSettled)) != 0) {
                     return;
                 }
                 workspace.state[target] |= kCompactDiscovered;
                 predecessors[target] = node;
+                if (stats != nullptr) {
+                    ++stats->successful_relaxations;
+                }
                 compact_heap_push(
                     workspace,
                     {static_cast<Distance>(entry.distance + costs[target]), target},
@@ -459,7 +503,9 @@ inline void compact_node_cost_path(
     workspace.predecessors.resize(n);
     workspace.heap.clear();
     if (stats != nullptr) {
-        stats->reset();
+        ++stats->calls;
+        stats->initialized_nodes += n;
+        stats->target_marks += targets.size();
     }
     for (const auto target : targets) {
         workspace.state[target] |= kCompactTarget;
@@ -473,9 +519,15 @@ inline void compact_node_cost_path(
         const auto entry = compact_heap_pop(workspace, stats);
         const auto node = entry.node;
         if ((workspace.state[node] & kCompactSettled) != 0) {
+            if (stats != nullptr) {
+                ++stats->stale_pops;
+            }
             continue;
         }
         workspace.state[node] |= kCompactSettled;
+        if (stats != nullptr) {
+            ++stats->settled_nodes;
+        }
         if ((workspace.state[node] & kCompactTarget) != 0) {
             reached = node;
             break;
@@ -483,6 +535,9 @@ inline void compact_node_cost_path(
         for_each_compact_neighbor<Adjacency>(
             domain, node,
             [&](const std::uint32_t target, const double) {
+                if (stats != nullptr) {
+                    ++stats->neighbor_probes;
+                }
                 if ((workspace.state[target] &
                      (kCompactDiscovered | kCompactSettled)) != 0) {
                     return;
@@ -492,6 +547,9 @@ inline void compact_node_cost_path(
                 );
                 workspace.state[target] |= kCompactDiscovered;
                 workspace.predecessors[target] = node;
+                if (stats != nullptr) {
+                    ++stats->successful_relaxations;
+                }
                 compact_heap_push(workspace, {candidate, target}, stats);
             }
         );

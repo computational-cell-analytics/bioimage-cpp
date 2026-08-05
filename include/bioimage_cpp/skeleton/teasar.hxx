@@ -548,6 +548,7 @@ inline LatticeSkeletonGraph teasar_compact_impl(
     const TeasarOptions &options,
     const bool report_profile,
     detail::CompactBallInvalidationStats *ball_invalidation_stats = nullptr,
+    detail::CompactDijkstraStats *dijkstra_stats = nullptr,
     bioimage_cpp::detail::ActiveProfiler *component_profile = nullptr
 ) {
     if (prepared == nullptr) {
@@ -722,7 +723,7 @@ inline LatticeSkeletonGraph teasar_compact_impl(
         } else {
             std::vector<Distance> first_field;
             detail::compact_physical_distance_field<Adjacency>(
-                domain, 0, dijkstra_workspace, first_field
+                domain, 0, dijkstra_workspace, first_field, dijkstra_stats
             );
             Distance farthest_distance = Distance{-1};
             for (std::uint32_t node = 0; node < domain.size(); ++node) {
@@ -738,7 +739,7 @@ inline LatticeSkeletonGraph teasar_compact_impl(
             }
         }
         detail::compact_physical_distance_field<Adjacency>(
-            domain, root, dijkstra_workspace, root_field
+            domain, root, dijkstra_workspace, root_field, dijkstra_stats
         );
         for (const auto distance : root_field) {
             if (!std::isfinite(distance)) {
@@ -812,7 +813,8 @@ inline LatticeSkeletonGraph teasar_compact_impl(
     if (!options.fix_branching) {
         BIOIMAGE_PROFILE_SCOPE(profile, "parental_field")
         detail::compact_node_cost_parental_field<Adjacency>(
-            domain, root, pdrf, dijkstra_workspace, fixed_predecessors
+            domain, root, pdrf, dijkstra_workspace, fixed_predecessors,
+            dijkstra_stats
         );
     }
 
@@ -827,7 +829,8 @@ inline LatticeSkeletonGraph teasar_compact_impl(
         if (options.fix_branching) {
             BIOIMAGE_PROFILE_SCOPE(profile, "path_dijkstra")
             detail::compact_node_cost_path<Adjacency>(
-                domain, target, skeleton_nodes, pdrf, dijkstra_workspace, path
+                domain, target, skeleton_nodes, pdrf, dijkstra_workspace, path,
+                dijkstra_stats
             );
         } else {
             BIOIMAGE_PROFILE_SCOPE(profile, "path_from_parents")
@@ -1066,12 +1069,13 @@ inline LatticeSkeletonGraph teasar_compact_prepared(
     detail::PreparedTeasarComponent prepared,
     const TeasarOptions &options,
     detail::CompactBallInvalidationStats *ball_invalidation_stats = nullptr,
+    detail::CompactDijkstraStats *dijkstra_stats = nullptr,
     bioimage_cpp::detail::ActiveProfiler *component_profile = nullptr
 ) {
     const ConstArrayView<std::uint8_t> unused{};
     return teasar_compact_impl<Adjacency, Distance>(
         unused, &prepared, options, false, ball_invalidation_stats,
-        component_profile
+        dijkstra_stats, component_profile
     );
 }
 
@@ -1588,6 +1592,7 @@ std::vector<LatticeSkeletonGraph> skeletonize_components(
     const detail::OpenBlockFaces *open_faces = nullptr,
     std::vector<std::vector<float>> *precomputed_component_dbf = nullptr,
     std::vector<detail::CompactBallInvalidationStats> *ball_invalidation_stats = nullptr,
+    std::vector<detail::CompactDijkstraStats> *dijkstra_stats = nullptr,
     bioimage_cpp::detail::ActiveProfiler *component_profile = nullptr
 ) {
     const auto count = components.components.size();
@@ -1597,6 +1602,9 @@ std::vector<LatticeSkeletonGraph> skeletonize_components(
     }
     if (ball_invalidation_stats != nullptr) {
         ball_invalidation_stats->assign(count, {});
+    }
+    if (dijkstra_stats != nullptr) {
+        dijkstra_stats->assign(count, {});
     }
     std::vector<bioimage_cpp::detail::ActiveProfiler> component_profiles;
     if (component_profile != nullptr) {
@@ -1656,6 +1664,8 @@ std::vector<LatticeSkeletonGraph> skeletonize_components(
                 std::move(prepared), local_options,
                 ball_invalidation_stats == nullptr
                     ? nullptr : &ball_invalidation_stats->at(component_id),
+                dijkstra_stats == nullptr
+                    ? nullptr : &dijkstra_stats->at(component_id),
                 component_profile == nullptr
                     ? nullptr : &component_profiles[component_id]
             );
@@ -1758,13 +1768,17 @@ inline SkeletonGraph teasar_with_component_edt(
     }
     std::vector<LatticeSkeletonGraph> results;
     std::vector<detail::CompactBallInvalidationStats> ball_stats;
+    std::vector<detail::CompactDijkstraStats> dijkstra_stats;
     bioimage_cpp::detail::ActiveProfiler component_profile;
 #ifdef BIOIMAGE_PROFILE
     auto *ball_stats_output = &ball_stats;
+    auto *dijkstra_stats_output = &dijkstra_stats;
     auto *component_profile_output = &component_profile;
 #else
     auto *ball_stats_output =
         static_cast<std::vector<detail::CompactBallInvalidationStats> *>(nullptr);
+    auto *dijkstra_stats_output =
+        static_cast<std::vector<detail::CompactDijkstraStats> *>(nullptr);
     auto *component_profile_output =
         static_cast<bioimage_cpp::detail::ActiveProfiler *>(nullptr);
 #endif
@@ -1773,7 +1787,7 @@ inline SkeletonGraph teasar_with_component_edt(
         results = detail_teasar::skeletonize_components(
             components, options, false, nullptr, nullptr,
             shared_edt.selected() ? &shared_edt.component_dbf : nullptr,
-            ball_stats_output, component_profile_output
+            ball_stats_output, dijkstra_stats_output, component_profile_output
         );
     }
     std::vector<std::size_t> component_ids(results.size());
@@ -1792,6 +1806,10 @@ inline SkeletonGraph teasar_with_component_edt(
     for (const auto &stats : ball_stats) {
         combined_ball_stats.merge(stats);
     }
+    detail::CompactDijkstraStats combined_dijkstra_stats;
+    for (const auto &stats : dijkstra_stats) {
+        combined_dijkstra_stats.merge(stats);
+    }
     std::fprintf(
         stderr,
         "[bioimage TEASAR diagnostics]\n"
@@ -1802,7 +1820,17 @@ inline SkeletonGraph teasar_with_component_edt(
         "  ball_pops             %zu\n"
         "  ball_stale_pops       %zu\n"
         "  ball_invalidated      %zu\n"
-        "  ball_peak_heap        %zu\n",
+        "  ball_peak_heap        %zu\n"
+        "  dijkstra_calls        %zu\n"
+        "  dijkstra_initialized  %zu\n"
+        "  dijkstra_settled      %zu\n"
+        "  dijkstra_probes       %zu\n"
+        "  dijkstra_relaxations  %zu\n"
+        "  dijkstra_target_marks %zu\n"
+        "  dijkstra_pushes       %zu\n"
+        "  dijkstra_pops         %zu\n"
+        "  dijkstra_stale_pops   %zu\n"
+        "  dijkstra_peak_heap    %zu\n",
         detail_teasar::shared_edt_decision_name(shared_edt.decision),
         shared_edt.estimated_scratch_bytes,
         combined_ball_stats.offers,
@@ -1810,7 +1838,17 @@ inline SkeletonGraph teasar_with_component_edt(
         combined_ball_stats.pops,
         combined_ball_stats.stale_pops,
         combined_ball_stats.invalidated,
-        combined_ball_stats.peak_heap
+        combined_ball_stats.peak_heap,
+        combined_dijkstra_stats.calls,
+        combined_dijkstra_stats.initialized_nodes,
+        combined_dijkstra_stats.settled_nodes,
+        combined_dijkstra_stats.neighbor_probes,
+        combined_dijkstra_stats.successful_relaxations,
+        combined_dijkstra_stats.target_marks,
+        combined_dijkstra_stats.pushes,
+        combined_dijkstra_stats.pops,
+        combined_dijkstra_stats.stale_pops,
+        combined_dijkstra_stats.peak_heap
     );
 #endif
     return detail_teasar::lattice_to_physical(

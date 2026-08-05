@@ -958,3 +958,72 @@ The example MRC skeleton statistics remained unchanged through both
 optimization stages. Worker-count checks also remained array-exact. Final
 verification used the normal build with profile-only instrumentation disabled:
 `1421 passed`.
+
+## Priority-queue follow-up (2026-08-04)
+
+This pass evaluated the next two optimization targets. Neither candidate met
+its retention gate, so the production queues remain unchanged.
+
+### Compact Dijkstra queues
+
+A standalone C++ probe used the largest component from the centered `200^3`
+MRC crop. The padded component shape was `(62, 190, 202)`, with 102,427
+foreground voxels. Each value is the median of nine runs after one warmup.
+All candidates produced exact distance and predecessor arrays.
+
+| queue | physical field | change | parental field | change |
+| --- | ---: | ---: | ---: | ---: |
+| binary heap | 27.31 ms | reference | 21.76 ms | reference |
+| 4-ary heap | 27.02 ms | -1.1% | 22.35 ms | +2.7% |
+| radix heap | 26.79 ms | -1.9% | 23.61 ms | +8.5% |
+
+The 10% primitive-speed gate rejected both candidates before integration.
+The physical field settled 102,427 nodes from 109,115 queue entries. Only
+6.1% of its entries were stale. The parental field had no stale entries.
+
+Profile builds now report aggregate compact Dijkstra counters. On ball/fix,
+the MRC crop used 344 Dijkstra calls. The calls removed 1,950,359 entries and
+rejected 115,819 stale entries. This 5.9% stale-pop rate confirms that queue
+replacement has limited headroom in the full workload.
+
+### Indexed ball-invalidation queue
+
+The second candidate replaced lazy invalidation entries with
+`DenseIndexedHeap`. The candidate kept one entry per active node and updated
+its priority in place. It preserved the `(distance, source, node)` order and
+passed the focused 101-test TEASAR suite.
+
+On ball/fix, the indexed queue reduced queue removals from 693,630 to 585,875
+and reduced the peak queue size from 18,059 to 15,022. It replaced 107,755
+stale removals with in-place priority updates. The extra locator writes during
+heap swaps offset this reduction.
+
+The real-mask table compares separate normal builds. Each value is the median
+of seven calls after two warmups.
+
+| setting | workers | lazy queue | indexed queue | change |
+| --- | ---: | ---: | ---: | ---: |
+| ball/fix | 1 | 974.9 ms | 982.0 ms | +0.7% |
+| ball/fix | 8 | 302.3 ms | 289.7 ms | -4.2% |
+| ball/parental | 1 | 956.6 ms | 975.8 ms | +2.0% |
+| ball/parental | 8 | 285.0 ms | 297.5 ms | +4.4% |
+
+The one-worker result fails the required 10% improvement for both branching
+modes. The eight-worker parental result also regresses by more than 3%.
+
+The synthetic matrix showed workload-dependent gains. At `256^3`, ball/fix
+changed by -2.7% with one worker and -12.5% with eight workers.
+Ball/parental changed by -9.1% and -2.0%. The `192^3` ball/parental result
+regressed by 4.6% with eight workers. These mixed results do not justify the
+additional indexed-heap state.
+
+Median incremental peak RSS stayed at 52.7 MiB with one worker. The indexed
+candidate used 76.3 MiB for ball/fix and 73.9 MiB for ball/parental with eight
+workers. These values satisfy the memory gate but do not change the timing
+decision.
+
+The final code retains only the profile-only Dijkstra counters. It removes the
+4-ary, radix, and indexed invalidation candidates. The distance-transform
+implementation remains outside this optimization pass. Final verification
+used the normal build and passed all 1,421 tests. The MRC vertices, edges,
+radii, and worker-count comparisons remained array-exact.
