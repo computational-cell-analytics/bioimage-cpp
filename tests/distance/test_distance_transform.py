@@ -15,6 +15,20 @@ def test_distance_transform_1d_matches_scipy():
     np.testing.assert_allclose(got, ref)
 
 
+def test_dense_binary_first_sweep_preserves_feature_ties():
+    data = np.array([0, 1, 0, 0, 1, 1, 0, 1], dtype=np.uint8)
+
+    got_dist, got_idx, got_vec = bic.distance.distance_transform(
+        data, return_indices=True, return_vectors=True
+    )
+    ref_dist, ref_idx = ndimage.distance_transform_edt(data, return_indices=True)
+
+    np.testing.assert_array_equal(got_dist, ref_dist.astype(np.float32))
+    np.testing.assert_array_equal(got_idx, ref_idx)
+    expected_vec = (ref_idx[0] - np.arange(data.size)).astype(np.float32)
+    np.testing.assert_array_equal(got_vec[:, 0], expected_vec)
+
+
 @pytest.mark.parametrize("shape", [(7, 11), (4, 5, 6)])
 def test_distance_transform_matches_scipy(shape):
     data = np.ones(shape, dtype=np.uint8)
@@ -38,6 +52,18 @@ def test_anisotropic_sampling_matches_scipy():
     ref = ndimage.distance_transform_edt(data, sampling=sampling).astype(np.float32)
 
     np.testing.assert_allclose(got, ref, atol=1e-6)
+
+
+@pytest.mark.parametrize("length", [4097, 4098])
+def test_isotropic_squared_buffer_exactness_boundary(length):
+    data = np.ones(length, dtype=np.uint8)
+    data[0] = 0
+
+    got_dist, got_idx = bic.distance.distance_transform(data, return_indices=True)
+    ref_dist, ref_idx = ndimage.distance_transform_edt(data, return_indices=True)
+
+    np.testing.assert_array_equal(got_dist, ref_dist.astype(np.float32))
+    np.testing.assert_array_equal(got_idx, ref_idx)
 
 
 def test_return_indices_matches_scipy_for_unique_nearest_background():
@@ -173,6 +199,50 @@ def test_threaded_outputs_are_exact(sampling):
     assert result is None
     for got, expected in zip(preallocated, sequential):
         np.testing.assert_array_equal(got, expected)
+
+
+def test_dense_isotropic_fast_paths_match_scipy_and_threads():
+    zz, yy, xx = np.indices((9, 11, 13))
+    data = ((3 * zz + 5 * yy + 7 * xx) % 2 != 0).astype(np.uint8)
+
+    sequential = bic.distance.distance_transform(
+        data,
+        return_indices=True,
+        return_vectors=True,
+        number_of_threads=1,
+    )
+    threaded = bic.distance.distance_transform(
+        data,
+        return_indices=True,
+        return_vectors=True,
+        number_of_threads=4,
+    )
+    ref_dist, ref_idx = ndimage.distance_transform_edt(data, return_indices=True)
+
+    for got, expected in zip(threaded, sequential):
+        np.testing.assert_array_equal(got, expected)
+    np.testing.assert_array_equal(sequential[0], ref_dist.astype(np.float32))
+    np.testing.assert_array_equal(sequential[1], ref_idx)
+    np.testing.assert_array_equal(
+        np.linalg.norm(sequential[2], axis=-1), sequential[0]
+    )
+
+
+def test_dense_vector_only_fast_path_uses_owned_feature_storage():
+    yy, xx = np.indices((11, 13))
+    data = ((3 * yy + 5 * xx) % 2 != 0).astype(np.uint8)
+
+    vector_only = bic.distance.distance_transform(
+        data,
+        return_distances=False,
+        return_vectors=True,
+    )
+    _, expected = bic.distance.distance_transform(
+        data,
+        return_vectors=True,
+    )
+
+    np.testing.assert_array_equal(vector_only, expected)
 
 
 def test_vector_difference_transform_unique_target():

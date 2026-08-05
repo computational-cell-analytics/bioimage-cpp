@@ -5,6 +5,7 @@
 #include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/detail/threading.hxx"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -159,6 +160,106 @@ inline void edt_1d_squared_iso(Edt1DWorkspace &ws, std::ptrdiff_t n) {
     edt_1d_squared_impl<true>(ws, n, 1.0);
 }
 
+// Exact first-axis transform for binary isotropic input. Equal-distance ties
+// stay with the lower feature coordinate, as in edt_1d_squared_iso.
+inline void binary_edt_1d_squared_iso(
+    Edt1DWorkspace &ws,
+    const std::uint8_t *input,
+    const std::ptrdiff_t base,
+    const std::ptrdiff_t stride,
+    const std::ptrdiff_t n
+) {
+    std::ptrdiff_t number_of_features = 0;
+    for (std::ptrdiff_t i = 0; i < n; ++i) {
+        if (input[base + i * stride] == 0) {
+            ws.envelope_v[static_cast<std::size_t>(number_of_features++)] =
+                static_cast<std::int32_t>(i);
+        }
+    }
+
+    if (number_of_features == 0) {
+        for (std::ptrdiff_t i = 0; i < n; ++i) {
+            ws.distance[static_cast<std::size_t>(i)] = kInfinity;
+            ws.source[static_cast<std::size_t>(i)] = -1;
+        }
+        return;
+    }
+    if (number_of_features == n) {
+        for (std::ptrdiff_t i = 0; i < n; ++i) {
+            ws.distance[static_cast<std::size_t>(i)] = 0.0;
+            ws.source[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(i);
+        }
+        return;
+    }
+
+    if (number_of_features < 1 + (n - 1) / 8) {
+        std::ptrdiff_t feature = 0;
+        for (std::ptrdiff_t i = 0; i < n; ++i) {
+            while (
+                feature + 1 < number_of_features &&
+                2 * static_cast<std::int64_t>(i) >
+                    static_cast<std::int64_t>(
+                        ws.envelope_v[static_cast<std::size_t>(feature)]
+                    ) +
+                    static_cast<std::int64_t>(
+                        ws.envelope_v[static_cast<std::size_t>(feature + 1)]
+                    )
+            ) {
+                ++feature;
+            }
+            const auto nearest = ws.envelope_v[static_cast<std::size_t>(feature)];
+            const double diff = static_cast<double>(i - nearest);
+            ws.distance[static_cast<std::size_t>(i)] = diff * diff;
+            ws.source[static_cast<std::size_t>(i)] = nearest;
+        }
+        return;
+    }
+
+    std::ptrdiff_t begin = 0;
+    for (std::ptrdiff_t feature = 0; feature < number_of_features; ++feature) {
+        const auto nearest = ws.envelope_v[static_cast<std::size_t>(feature)];
+        std::ptrdiff_t end = n;
+        if (feature + 1 < number_of_features) {
+            const auto next = ws.envelope_v[static_cast<std::size_t>(feature + 1)];
+            end = static_cast<std::ptrdiff_t>(
+                (static_cast<std::int64_t>(nearest) + static_cast<std::int64_t>(next)) /
+                    2 +
+                1
+            );
+        }
+        for (auto i = begin; i < end; ++i) {
+            const double diff = static_cast<double>(i - nearest);
+            ws.distance[static_cast<std::size_t>(i)] = diff * diff;
+            ws.source[static_cast<std::size_t>(i)] = nearest;
+        }
+        begin = end;
+    }
+}
+
+inline bool squared_distances_fit_exact_float(
+    const std::vector<std::ptrdiff_t> &shape
+) {
+    constexpr std::uint64_t max_exact_integer =
+        std::uint64_t{1} << std::numeric_limits<float>::digits;
+    constexpr std::uint64_t max_exact_delta = 4096;
+    std::uint64_t remaining = max_exact_integer;
+    for (const auto axis_size : shape) {
+        if (axis_size <= 0) {
+            return false;
+        }
+        const auto delta = static_cast<std::uint64_t>(axis_size - 1);
+        if (delta > max_exact_delta) {
+            return false;
+        }
+        const auto squared = delta * delta;
+        if (squared > remaining) {
+            return false;
+        }
+        remaining -= squared;
+    }
+    return true;
+}
+
 inline void unravel(
     std::ptrdiff_t flat,
     const std::vector<std::ptrdiff_t> &strides,
@@ -240,17 +341,28 @@ inline void detail_distance_transform_impl(
 
     BIOIMAGE_PROFILE_INIT(profiler)
 
-    // Detect the all-foreground (no background) case. SciPy reports distances
-    // and indices against a virtual background row at axis-0 coordinate -1; we
-    // mirror that convention so callers can switch between SciPy and us
-    // without surprises.
+    // Detect the all-foreground case and sample the binary fast-path density.
+    // SciPy reports all-foreground results against a virtual background row at
+    // axis-0 coordinate -1; we mirror that convention.
+    constexpr std::ptrdiff_t binary_sample_limit = 4096;
     bool has_background = use_initialized_squared;
+    std::ptrdiff_t sampled_background = 0;
+    std::ptrdiff_t sample_size = 0;
     if (!use_initialized_squared) {
         BIOIMAGE_PROFILE_SCOPE(profiler, "scan_for_bg")
-        for (std::ptrdiff_t i = 0; i < n; ++i) {
+        sample_size = std::min(n, binary_sample_limit);
+        for (std::ptrdiff_t i = 0; i < sample_size; ++i) {
             if (input.data[i] == 0) {
+                ++sampled_background;
                 has_background = true;
-                break;
+            }
+        }
+        if (!has_background) {
+            for (std::ptrdiff_t i = sample_size; i < n; ++i) {
+                if (input.data[i] == 0) {
+                    has_background = true;
+                    break;
+                }
             }
         }
     }
@@ -283,198 +395,237 @@ inline void detail_distance_transform_impl(
         return;
     }
 
-    // Squared sampled distance buffer. ndim per-axis feature-coord buffers
-    // (int32) replace the previous flat int64 feature index — this lets the
-    // output pass materialize indices/vectors without re-unraveling per pixel.
-    auto squared_distance = use_initialized_squared
+    const bool use_binary_first_sweep =
+        !use_initialized_squared && is_isotropic &&
+        sampled_background >= (sample_size + 7) / 8;
+    const bool use_float_squared =
+        !use_initialized_squared && squared_distance_consumer == nullptr &&
+        is_isotropic && detail::squared_distances_fit_exact_float(input.shape);
+
+    std::unique_ptr<double[]> squared_distance_double = use_initialized_squared
         ? std::move(initialized_squared_distance)
-        : std::make_unique_for_overwrite<double[]>(static_cast<std::size_t>(n));
-    std::vector<std::vector<std::int32_t>> feature_coord;
-    if (track_feature) {
-        feature_coord.resize(static_cast<std::size_t>(ndim));
-        for (auto &arr : feature_coord) {
-            arr.assign(static_cast<std::size_t>(n), 0);
-        }
-    }
-    for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
-        BIOIMAGE_PROFILE_SCOPE(profiler, "sweep_axis")
-        const std::ptrdiff_t line_length = input.shape[static_cast<std::size_t>(ax)];
-        if (line_length <= 0) {
-            continue;
-        }
-        const std::ptrdiff_t stride = strides[static_cast<std::size_t>(ax)];
-        const std::ptrdiff_t inner_count = stride;
-        const std::ptrdiff_t axis_block = line_length * stride;
-        const std::ptrdiff_t outer_count = (axis_block == 0) ? 0 : n / axis_block;
-        const std::size_t n_lines =
-            static_cast<std::size_t>(outer_count) * static_cast<std::size_t>(inner_count);
-        if (n_lines == 0) {
-            continue;
-        }
-        const double sampling_ax = sampling[static_cast<std::size_t>(ax)];
-        const double squared_spacing = sampling_ax * sampling_ax;
-        const std::ptrdiff_t feature_axes_in = track_feature ? ax : 0;
-
-        const auto process_line = [&](std::size_t line_id, detail::Edt1DWorkspace &ws) {
-            const auto outer_idx = static_cast<std::ptrdiff_t>(line_id) / inner_count;
-            const auto inner_idx = static_cast<std::ptrdiff_t>(line_id) % inner_count;
-            const std::ptrdiff_t base = outer_idx * axis_block + inner_idx;
-            ws.ensure(line_length, feature_axes_in);
-
-            // The first-axis gather initializes the uninitialized squared-
-            // distance buffer directly from the input. Later axes gather the
-            // preceding sweep, avoiding a redundant full-volume init pass.
-            if (ax == 0 && !use_initialized_squared) {
-                for (std::ptrdiff_t i = 0; i < line_length; ++i) {
-                    const auto index = static_cast<std::size_t>(base + i * stride);
-                    ws.f[static_cast<std::size_t>(i)] =
-                        input.data[index] == 0 ? 0.0 : detail::kInfinity;
-                }
-            } else {
-                for (std::ptrdiff_t i = 0; i < line_length; ++i) {
-                    const auto index = static_cast<std::size_t>(base + i * stride);
-                    ws.f[static_cast<std::size_t>(i)] = squared_distance[index];
-                }
-            }
-            // Gather already-tracked feature coords (axes < ax).
-            for (std::ptrdiff_t a = 0; a < feature_axes_in; ++a) {
-                const auto *src = feature_coord[static_cast<std::size_t>(a)].data();
-                auto *dst = ws.old_feature_coord.data() + a * line_length;
-                for (std::ptrdiff_t i = 0; i < line_length; ++i) {
-                    dst[i] = src[base + i * stride];
-                }
-            }
-
-            if (is_isotropic) {
-                detail::edt_1d_squared_iso(ws, line_length);
-            } else {
-                detail::edt_1d_squared(ws, line_length, squared_spacing);
-            }
-
-            // Scatter squared distances back.
-            for (std::ptrdiff_t i = 0; i < line_length; ++i) {
-                squared_distance[static_cast<std::size_t>(base + i * stride)] =
-                    ws.distance[static_cast<std::size_t>(i)];
-            }
-            if (!track_feature) {
-                return;
-            }
-            // Scatter feature coords for axes < ax via source[i].
-            for (std::ptrdiff_t a = 0; a < ax; ++a) {
-                auto *dst = feature_coord[static_cast<std::size_t>(a)].data();
-                const auto *src = ws.old_feature_coord.data() + a * line_length;
-                for (std::ptrdiff_t i = 0; i < line_length; ++i) {
-                    const auto s = ws.source[static_cast<std::size_t>(i)];
-                    if (s >= 0) {
-                        dst[base + i * stride] = src[s];
-                    }
-                }
-            }
-            // Axis ax's feature coord is the parabola minimizer position itself.
-            {
-                auto *dst = feature_coord[static_cast<std::size_t>(ax)].data();
-                for (std::ptrdiff_t i = 0; i < line_length; ++i) {
-                    const auto s = ws.source[static_cast<std::size_t>(i)];
-                    if (s >= 0) {
-                        dst[base + i * stride] = s;
-                    }
-                }
-            }
-        };
-
-        const auto resolved_threads =
-            bioimage_cpp::detail::normalize_thread_count(n_threads, n_lines);
-        if (resolved_threads <= 1) {
-            detail::Edt1DWorkspace ws;
-            for (std::size_t line_id = 0; line_id < n_lines; ++line_id) {
-                process_line(line_id, ws);
-            }
-        } else {
-            std::vector<detail::Edt1DWorkspace> per_thread(resolved_threads);
-            bioimage_cpp::detail::parallel_for_chunks(
-                resolved_threads,
-                n_lines,
-                [&](std::size_t thread_id, std::size_t begin, std::size_t end) {
-                    auto &ws = per_thread[thread_id];
-                    for (std::size_t line_id = begin; line_id < end; ++line_id) {
-                        process_line(line_id, ws);
-                    }
-                }
-            );
-        }
-    }
-
-    // Output materialization. All three branches stream over flat indices in
-    // C-order with no integer divisions per pixel: indices come straight from
-    // per-axis feature buffers, vectors use an incremental coord counter.
-    if (want_distances) {
-        BIOIMAGE_PROFILE_SCOPE(profiler, "output_distances")
-        const auto output_threads = bioimage_cpp::detail::normalize_thread_count(
-            n_threads, static_cast<std::size_t>(n)
+        : nullptr;
+    std::unique_ptr<float[]> squared_distance_float;
+    if (use_float_squared) {
+        squared_distance_float = std::make_unique_for_overwrite<float[]>(
+            static_cast<std::size_t>(n)
         );
-        const auto write_distances = [&](const std::size_t begin, const std::size_t end) {
-            for (std::size_t i = begin; i < end; ++i) {
-                outputs.distances.data[i] =
-                    static_cast<float>(std::sqrt(squared_distance[i]));
-            }
-        };
-        if (output_threads <= 1) {
-            write_distances(0, static_cast<std::size_t>(n));
-        } else {
-            bioimage_cpp::detail::parallel_for_chunks(
-                output_threads,
-                static_cast<std::size_t>(n),
-                [&](const std::size_t, const std::size_t begin, const std::size_t end) {
-                    write_distances(begin, end);
+    } else if (squared_distance_double == nullptr) {
+        squared_distance_double = std::make_unique_for_overwrite<double[]>(
+            static_cast<std::size_t>(n)
+        );
+    }
+
+    const auto run_sweeps = [&]<class SquaredDistance>(
+        SquaredDistance *squared_distance
+    ) {
+        // Indices can hold feature coordinates during the sweeps. Vector-only
+        // calls use one uninitialized coordinate buffer with the same layout.
+        std::vector<std::int32_t *> feature_coord;
+        std::unique_ptr<std::int32_t[]> owned_feature_coord;
+        if (track_feature) {
+            feature_coord.resize(static_cast<std::size_t>(ndim));
+            if (want_indices) {
+                for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
+                    feature_coord[static_cast<std::size_t>(ax)] =
+                        outputs.indices.data + ax * n;
                 }
+            } else {
+                owned_feature_coord = std::make_unique_for_overwrite<std::int32_t[]>(
+                    static_cast<std::size_t>(ndim) * static_cast<std::size_t>(n)
+                );
+                for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
+                    feature_coord[static_cast<std::size_t>(ax)] =
+                        owned_feature_coord.get() + ax * n;
+                }
+            }
+        }
+
+        for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
+            BIOIMAGE_PROFILE_SCOPE(profiler, "sweep_axis")
+            const std::ptrdiff_t line_length = input.shape[static_cast<std::size_t>(ax)];
+            if (line_length <= 0) {
+                continue;
+            }
+            const std::ptrdiff_t stride = strides[static_cast<std::size_t>(ax)];
+            const std::ptrdiff_t inner_count = stride;
+            const std::ptrdiff_t axis_block = line_length * stride;
+            const std::ptrdiff_t outer_count = (axis_block == 0) ? 0 : n / axis_block;
+            const std::size_t n_lines =
+                static_cast<std::size_t>(outer_count) * static_cast<std::size_t>(inner_count);
+            if (n_lines == 0) {
+                continue;
+            }
+            const double sampling_ax = sampling[static_cast<std::size_t>(ax)];
+            const double squared_spacing = sampling_ax * sampling_ax;
+            const std::ptrdiff_t feature_axes_in = track_feature ? ax : 0;
+
+            const auto process_line = [&](std::size_t line_id, detail::Edt1DWorkspace &ws) {
+                const auto outer_idx = static_cast<std::ptrdiff_t>(line_id) / inner_count;
+                const auto inner_idx = static_cast<std::ptrdiff_t>(line_id) % inner_count;
+                const std::ptrdiff_t base = outer_idx * axis_block + inner_idx;
+                ws.ensure(line_length, feature_axes_in);
+                const bool use_binary_line = ax == 0 && use_binary_first_sweep;
+
+                // The first-axis gather initializes the uninitialized squared-
+                // distance buffer directly from the input. Later axes gather the
+                // preceding sweep, avoiding a redundant full-volume init pass.
+                if (!use_binary_line) {
+                    if (ax == 0 && !use_initialized_squared) {
+                        for (std::ptrdiff_t i = 0; i < line_length; ++i) {
+                            const auto index = static_cast<std::size_t>(base + i * stride);
+                            ws.f[static_cast<std::size_t>(i)] =
+                                input.data[index] == 0 ? 0.0 : detail::kInfinity;
+                        }
+                    } else {
+                        for (std::ptrdiff_t i = 0; i < line_length; ++i) {
+                            const auto index = static_cast<std::size_t>(base + i * stride);
+                            ws.f[static_cast<std::size_t>(i)] =
+                                static_cast<double>(squared_distance[index]);
+                        }
+                    }
+                }
+                // Gather already-tracked feature coords (axes < ax).
+                for (std::ptrdiff_t a = 0; a < feature_axes_in; ++a) {
+                    const auto *src = feature_coord[static_cast<std::size_t>(a)];
+                    auto *dst = ws.old_feature_coord.data() + a * line_length;
+                    for (std::ptrdiff_t i = 0; i < line_length; ++i) {
+                        dst[i] = src[base + i * stride];
+                    }
+                }
+
+                if (use_binary_line) {
+                    detail::binary_edt_1d_squared_iso(
+                        ws, input.data, base, stride, line_length
+                    );
+                } else if (is_isotropic) {
+                    detail::edt_1d_squared_iso(ws, line_length);
+                } else {
+                    detail::edt_1d_squared(ws, line_length, squared_spacing);
+                }
+
+                // Scatter squared distances back.
+                for (std::ptrdiff_t i = 0; i < line_length; ++i) {
+                    squared_distance[static_cast<std::size_t>(base + i * stride)] =
+                        ws.distance[static_cast<std::size_t>(i)];
+                }
+                if (!track_feature) {
+                    return;
+                }
+                // Scatter feature coords for axes < ax via source[i].
+                for (std::ptrdiff_t a = 0; a < ax; ++a) {
+                    auto *dst = feature_coord[static_cast<std::size_t>(a)];
+                    const auto *src = ws.old_feature_coord.data() + a * line_length;
+                    for (std::ptrdiff_t i = 0; i < line_length; ++i) {
+                        const auto s = ws.source[static_cast<std::size_t>(i)];
+                        if (s >= 0) {
+                            dst[base + i * stride] = src[s];
+                        }
+                    }
+                }
+                // Axis ax's feature coord is the parabola minimizer position itself.
+                {
+                    auto *dst = feature_coord[static_cast<std::size_t>(ax)];
+                    for (std::ptrdiff_t i = 0; i < line_length; ++i) {
+                        const auto s = ws.source[static_cast<std::size_t>(i)];
+                        if (s >= 0) {
+                            dst[base + i * stride] = s;
+                        }
+                    }
+                }
+            };
+
+            const auto resolved_threads =
+                bioimage_cpp::detail::normalize_thread_count(n_threads, n_lines);
+            if (resolved_threads <= 1) {
+                detail::Edt1DWorkspace ws;
+                for (std::size_t line_id = 0; line_id < n_lines; ++line_id) {
+                    process_line(line_id, ws);
+                }
+            } else {
+                std::vector<detail::Edt1DWorkspace> per_thread(resolved_threads);
+                bioimage_cpp::detail::parallel_for_chunks(
+                    resolved_threads,
+                    n_lines,
+                    [&](std::size_t thread_id, std::size_t begin, std::size_t end) {
+                        auto &ws = per_thread[thread_id];
+                        for (std::size_t line_id = begin; line_id < end; ++line_id) {
+                            process_line(line_id, ws);
+                        }
+                    }
+                );
+            }
+        }
+
+        // Indices already contain their final values. Distances and vectors
+        // stream over flat indices in C-order without per-pixel division.
+        if (want_distances) {
+            BIOIMAGE_PROFILE_SCOPE(profiler, "output_distances")
+            const auto output_threads = bioimage_cpp::detail::normalize_thread_count(
+                n_threads, static_cast<std::size_t>(n)
             );
-        }
-    }
-
-    if (want_indices) {
-        BIOIMAGE_PROFILE_SCOPE(profiler, "output_indices")
-        for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
-            const auto *src = feature_coord[static_cast<std::size_t>(ax)].data();
-            auto *dst = outputs.indices.data + ax * n;
-            for (std::ptrdiff_t i = 0; i < n; ++i) {
-                dst[i] = src[i];
-            }
-        }
-    }
-
-    if (want_vectors) {
-        BIOIMAGE_PROFILE_SCOPE(profiler, "output_vectors")
-        std::vector<std::int32_t> coord(static_cast<std::size_t>(ndim), 0);
-        std::vector<std::int32_t> shape_i32(static_cast<std::size_t>(ndim), 0);
-        for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
-            shape_i32[static_cast<std::size_t>(ax)] =
-                static_cast<std::int32_t>(input.shape[static_cast<std::size_t>(ax)]);
-        }
-        for (std::ptrdiff_t i = 0; i < n; ++i) {
-            auto *dst = outputs.vectors.data + i * ndim;
-            for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
-                const double diff =
-                    static_cast<double>(
-                        feature_coord[static_cast<std::size_t>(ax)][static_cast<std::size_t>(i)] -
-                        coord[static_cast<std::size_t>(ax)]
-                    ) *
-                    sampling[static_cast<std::size_t>(ax)];
-                dst[ax] = static_cast<float>(diff);
-            }
-            // Increment coord in C-order (innermost axis fastest).
-            for (std::ptrdiff_t ax = ndim - 1; ax >= 0; --ax) {
-                auto &c = coord[static_cast<std::size_t>(ax)];
-                if (++c < shape_i32[static_cast<std::size_t>(ax)]) {
-                    break;
+            const auto write_distances = [&](const std::size_t begin, const std::size_t end) {
+                for (std::size_t i = begin; i < end; ++i) {
+                    outputs.distances.data[i] =
+                        static_cast<float>(
+                            std::sqrt(static_cast<double>(squared_distance[i]))
+                        );
                 }
-                c = 0;
+            };
+            if (output_threads <= 1) {
+                write_distances(0, static_cast<std::size_t>(n));
+            } else {
+                bioimage_cpp::detail::parallel_for_chunks(
+                    output_threads,
+                    static_cast<std::size_t>(n),
+                    [&](const std::size_t, const std::size_t begin, const std::size_t end) {
+                        write_distances(begin, end);
+                    }
+                );
             }
         }
+
+        if (want_vectors) {
+            BIOIMAGE_PROFILE_SCOPE(profiler, "output_vectors")
+            std::vector<std::int32_t> coord(static_cast<std::size_t>(ndim), 0);
+            std::vector<std::int32_t> shape_i32(static_cast<std::size_t>(ndim), 0);
+            for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
+                shape_i32[static_cast<std::size_t>(ax)] =
+                    static_cast<std::int32_t>(input.shape[static_cast<std::size_t>(ax)]);
+            }
+            for (std::ptrdiff_t i = 0; i < n; ++i) {
+                auto *dst = outputs.vectors.data + i * ndim;
+                for (std::ptrdiff_t ax = 0; ax < ndim; ++ax) {
+                    const double diff =
+                        static_cast<double>(
+                            feature_coord[static_cast<std::size_t>(ax)][static_cast<std::size_t>(i)] -
+                            coord[static_cast<std::size_t>(ax)]
+                        ) *
+                        sampling[static_cast<std::size_t>(ax)];
+                    dst[ax] = static_cast<float>(diff);
+                }
+                // Increment coord in C-order (innermost axis fastest).
+                for (std::ptrdiff_t ax = ndim - 1; ax >= 0; --ax) {
+                    auto &c = coord[static_cast<std::size_t>(ax)];
+                    if (++c < shape_i32[static_cast<std::size_t>(ax)]) {
+                        break;
+                    }
+                    c = 0;
+                }
+            }
+        }
+    };
+
+    if (use_float_squared) {
+        run_sweeps(squared_distance_float.get());
+    } else {
+        run_sweeps(squared_distance_double.get());
     }
+
     if (squared_distance_consumer != nullptr) {
         BIOIMAGE_PROFILE_SCOPE(profiler, "squared_distance_consumer")
         squared_distance_consumer(
-            squared_distance.get(), static_cast<std::size_t>(n),
+            squared_distance_double.get(), static_cast<std::size_t>(n),
             squared_distance_consumer_context
         );
     }
