@@ -9,7 +9,8 @@ Each library is fed a pre-built mask in its preferred dtype, allocated once
 outside the timing loop so per-call dtype conversion does not show up in the
 measurement of a particular library:
 
-* bioimage_cpp.distance.distance_transform        — uint8 mask
+* bioimage_cpp.distance.distance_transform          — uint8 mask
+* bioimage_cpp.distance.distance_transform + indices — uint8 mask
 * bioimage_cpp.distance.vector_difference_transform — uint8 mask
 * vigra.filters.distanceTransform / vectorDistanceTransform — float32 mask
 * scipy.ndimage.distance_transform_edt            — float32 mask
@@ -43,7 +44,11 @@ import numpy as np
 
 
 LIBRARIES = ("bioimage_cpp", "vigra", "scipy")
-OPERATIONS = ("distance_transform", "vector_difference_transform")
+OPERATIONS = (
+    "distance_transform",
+    "distance_transform_indices",
+    "vector_difference_transform",
+)
 
 
 @dataclass(frozen=True)
@@ -246,6 +251,21 @@ def _bic_vector(sampling: tuple[float, ...], n_threads: int):
     return fn
 
 
+def _bic_distance_indices(sampling: tuple[float, ...], n_threads: int):
+    from bioimage_cpp import distance
+
+    def fn(mask: np.ndarray) -> np.ndarray:
+        distances, _ = distance.distance_transform(
+            mask,
+            sampling=sampling,
+            return_indices=True,
+            number_of_threads=n_threads,
+        )
+        return distances
+
+    return fn
+
+
 def _vigra_distance(sampling: tuple[float, ...]):
     _quiet_vigra_matplotlib_cache()
     import vigra.filters as vf
@@ -300,6 +320,18 @@ def _scipy_vector(sampling: tuple[float, ...]):
     return fn
 
 
+def _scipy_distance_indices(sampling: tuple[float, ...]):
+    from scipy import ndimage
+
+    def fn(mask: np.ndarray) -> np.ndarray:
+        distances, _ = ndimage.distance_transform_edt(
+            mask, sampling=sampling, return_indices=True
+        )
+        return distances
+
+    return fn
+
+
 def _prepare_mask(library: str, base_mask: np.ndarray) -> np.ndarray:
     if library == "bioimage_cpp":
         # The Python wrapper fast-paths uint8 C-contiguous input.
@@ -323,6 +355,10 @@ def build_adapters(
             "bioimage_cpp": lambda: _bic_distance(sampling, n_threads),
             "vigra": lambda: _vigra_distance(sampling),
             "scipy": lambda: _scipy_distance(sampling),
+        },
+        "distance_transform_indices": {
+            "bioimage_cpp": lambda: _bic_distance_indices(sampling, n_threads),
+            "scipy": lambda: _scipy_distance_indices(sampling),
         },
         "vector_difference_transform": {
             "bioimage_cpp": lambda: _bic_vector(sampling, n_threads),
@@ -394,7 +430,7 @@ def check_results(
     errors = {}
     for library, adapter in adapters.items():
         result = np.asarray(adapter.fn(adapter.mask))
-        if operation == "distance_transform":
+        if operation in ("distance_transform", "distance_transform_indices"):
             errors[library] = float(
                 np.max(np.abs(result.astype(np.float32) - reference_distance))
             )
