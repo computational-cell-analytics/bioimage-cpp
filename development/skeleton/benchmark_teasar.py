@@ -52,6 +52,20 @@ class Workload:
     components: int
 
 
+@dataclass(frozen=True)
+class Setting:
+    invalidation: str
+    fix_branching: bool
+
+
+SETTINGS = {
+    "cube-fix": Setting("cube", True),
+    "cube-parental": Setting("cube", False),
+    "ball-fix": Setting("ball", True),
+    "ball-parental": Setting("ball", False),
+}
+
+
 def draw_ball(mask: np.ndarray, center: np.ndarray, radius: int) -> None:
     center = np.rint(center).astype(int)
     lo = np.maximum(center - radius, 0)
@@ -245,7 +259,10 @@ def kimimaro_parameters(parameters):
     }
 
 
-def kimimaro_call(volume, scenario, spacing, parameters, number_of_threads=1):
+def kimimaro_call(
+    volume, scenario, spacing, parameters, fix_branching,
+    number_of_threads=1,
+):
     import kimimaro
 
     kwargs = {}
@@ -257,7 +274,7 @@ def kimimaro_call(volume, scenario, spacing, parameters, number_of_threads=1):
         anisotropy=spacing,
         dust_threshold=0,
         progress=False,
-        fix_branching=True,
+        fix_branching=fix_branching,
         fix_borders=False,
         fill_holes=False,
         parallel=number_of_threads,
@@ -265,7 +282,9 @@ def kimimaro_call(volume, scenario, spacing, parameters, number_of_threads=1):
     )
 
 
-def python_label_loop(volume, spacing, parameters, number_of_threads):
+def python_label_loop(
+    volume, spacing, parameters, setting, number_of_threads
+):
     output = {}
     for label in np.unique(volume):
         if label == 0:
@@ -274,12 +293,16 @@ def python_label_loop(volume, spacing, parameters, number_of_threads):
             volume == label,
             spacing=spacing,
             number_of_threads=number_of_threads,
+            invalidation=setting.invalidation,
+            fix_branching=setting.fix_branching,
             **parameters,
         )
     return output
 
 
-def bic_backend_call(mask, spacing, parameters, backend, number_of_threads=1):
+def bic_backend_call(
+    mask, spacing, parameters, setting, backend, number_of_threads=1
+):
     """Call a development-only C++ backend without changing the public API."""
     return _core._teasar_uint8_backend(
         mask,
@@ -288,6 +311,8 @@ def bic_backend_call(mask, spacing, parameters, backend, number_of_threads=1):
         parameters["constant"],
         parameters["pdrf_scale"],
         parameters["pdrf_exponent"],
+        setting.invalidation == "ball",
+        setting.fix_branching,
         backend,
         number_of_threads,
     )
@@ -336,11 +361,12 @@ def validate_result(workload, backend, result, counts):
 
 def make_backends(workload, args, spacing, parameters):
     if args.sequential_backends:
+        setting = SETTINGS[args.settings[0]]
         return [
             (
                 backend,
                 lambda mask, backend=backend: bic_backend_call(
-                    mask, spacing, parameters, backend
+                    mask, spacing, parameters, setting, backend
                 ),
                 count_bic,
             )
@@ -349,40 +375,59 @@ def make_backends(workload, args, spacing, parameters):
             )
         ]
     output = []
-    for threads in args.threads:
-        if workload.scenario == "binary":
-            function = lambda volume, threads=threads: bic.skeleton.teasar(
-                volume, spacing=spacing, number_of_threads=threads, **parameters
+    for setting_name in args.settings:
+        setting = SETTINGS[setting_name]
+        for threads in args.threads:
+            if workload.scenario == "binary":
+                function = lambda volume, threads=threads, setting=setting: (
+                    bic.skeleton.teasar(
+                        volume, spacing=spacing, number_of_threads=threads,
+                        invalidation=setting.invalidation,
+                        fix_branching=setting.fix_branching,
+                        **parameters,
+                    )
+                )
+                counter = count_bic
+            else:
+                function = lambda volume, threads=threads, setting=setting: (
+                    bic.skeleton.teasar_labels(
+                        volume, spacing=spacing, number_of_threads=threads,
+                        invalidation=setting.invalidation,
+                        fix_branching=setting.fix_branching,
+                        **parameters,
+                    )
+                )
+                counter = count_label_dict
+            output.append((
+                f"bioimage-cpp/{setting_name}/t{threads}", function, counter
+            ))
+        if workload.scenario == "labels" and args.python_loop:
+            output.extend(
+                (
+                    f"python-label-loop/{setting_name}/t{threads}",
+                    lambda volume, threads=threads, setting=setting: python_label_loop(
+                        volume, spacing, parameters, setting, threads
+                    ),
+                    count_label_dict,
+                )
+                for threads in args.threads
             )
-            counter = count_bic
-        else:
-            function = lambda volume, threads=threads: bic.skeleton.teasar_labels(
-                volume, spacing=spacing, number_of_threads=threads, **parameters
-            )
-            counter = count_label_dict
-        output.append((f"bioimage-cpp/t{threads}", function, counter))
-    if workload.scenario == "labels" and args.python_loop:
-        output.extend(
-            (
-                f"python-label-loop/t{threads}",
-                lambda volume, threads=threads: python_label_loop(
-                    volume, spacing, parameters, threads
-                ),
-                count_label_dict,
-            )
-            for threads in args.threads
-        )
     if args.kimimaro:
-        output.extend(
-            (
-                f"kimimaro/t{threads}",
-                lambda volume, threads=threads: kimimaro_call(
-                    volume, workload.scenario, spacing, parameters, threads
-                ),
-                count_kimimaro_dict,
+        branching_modes = {
+            SETTINGS[name].fix_branching for name in args.settings
+        }
+        for fix_branching in sorted(branching_modes, reverse=True):
+            mode = "fix" if fix_branching else "parental"
+            output.extend(
+                (
+                    f"kimimaro/ball-{mode}/t{threads}",
+                    lambda volume, threads=threads, fix=fix_branching: kimimaro_call(
+                        volume, workload.scenario, spacing, parameters, fix, threads
+                    ),
+                    count_kimimaro_dict,
+                )
+                for threads in args.threads
             )
-            for threads in args.threads
-        )
     return output
 
 
@@ -454,6 +499,7 @@ def memory_worker(args):
         "scale": 1.5, "constant": 1.0,
         "pdrf_scale": 100000.0, "pdrf_exponent": 4.0,
     }
+    setting = SETTINGS[args.memory_setting]
     if args.memory_backend == "kimimaro":
         importlib.import_module("kimimaro")  # import before the baseline sample
     gc.collect()
@@ -465,19 +511,25 @@ def memory_worker(args):
         if selected.scenario == "binary":
             result = bic.skeleton.teasar(
                 selected.volume, spacing=spacing,
-                number_of_threads=args.memory_thread, **parameters
+                number_of_threads=args.memory_thread,
+                invalidation=setting.invalidation,
+                fix_branching=setting.fix_branching,
+                **parameters,
             )
             counts = count_bic(result)
         else:
             result = bic.skeleton.teasar_labels(
                 selected.volume, spacing=spacing,
-                number_of_threads=args.memory_thread, **parameters
+                number_of_threads=args.memory_thread,
+                invalidation=setting.invalidation,
+                fix_branching=setting.fix_branching,
+                **parameters,
             )
             counts = count_label_dict(result)
     else:
         result = kimimaro_call(
             selected.volume, selected.scenario, spacing, parameters,
-            args.memory_thread
+            setting.fix_branching, args.memory_thread
         )
         counts = count_kimimaro_dict(result)
     payload = {
@@ -485,6 +537,7 @@ def memory_worker(args):
         "scenario": selected.scenario,
         "case": selected.name,
         "threads": args.memory_thread,
+        "setting": args.memory_setting,
         "elapsed_s": perf_counter() - start,
         "input_nbytes": selected.volume.nbytes,
         "vertices": counts[0],
@@ -496,7 +549,9 @@ def memory_worker(args):
     return 0
 
 
-def run_memory_probe(script, workload, backend, threads, tier):
+def run_memory_probe(
+    script, workload, backend, setting, threads, tier, repeat
+):
     command = [
         sys.executable, script,
         "--memory-worker",
@@ -504,6 +559,7 @@ def run_memory_probe(script, workload, backend, threads, tier):
         "--memory-case", workload.name,
         "--memory-scenario", workload.scenario,
         "--memory-thread", str(threads),
+        "--memory-setting", setting,
         "--tier", tier,
     ]
     process = subprocess.Popen(
@@ -531,6 +587,7 @@ def run_memory_probe(script, workload, backend, threads, tier):
     )
     peak = max(peak, baseline + self_incremental)
     payload.update({
+        "repeat": repeat,
         "baseline_process_tree_rss_kib": baseline,
         "peak_process_tree_rss_kib": peak,
         "incremental_peak_kib": max(0, peak - baseline),
@@ -552,10 +609,13 @@ def run_memory_probes(args, selected_workloads):
     rows = []
     for workload in selected:
         for backend in (("bioimage-cpp", "kimimaro") if args.kimimaro else ("bioimage-cpp",)):
-            for threads in args.memory_threads:
-                rows.append(run_memory_probe(
-                    script, workload, backend, threads, args.tier
-                ))
+            for setting in args.settings:
+                for threads in args.memory_threads:
+                    for repeat in range(args.memory_repeats):
+                        rows.append(run_memory_probe(
+                            script, workload, backend, setting, threads,
+                            args.tier, repeat
+                        ))
     return rows
 
 
@@ -576,18 +636,26 @@ def parse_args():
     parser.add_argument("--kimimaro", action="store_true")
     parser.add_argument("--python-loop", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--sequential-backends", action="store_true")
+    parser.add_argument(
+        "--settings", nargs="+", choices=tuple(SETTINGS), default=["cube-fix"]
+    )
     parser.add_argument("--json", default="", help="optional JSON result path")
     parser.add_argument("--threads", type=int, nargs="+", default=[1])
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--memory-threads", type=int, nargs="+", default=[1, 4])
+    parser.add_argument("--memory-repeats", type=int, default=3)
     parser.add_argument("--memory-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--memory-backend", choices=("bioimage-cpp", "kimimaro"), help=argparse.SUPPRESS)
     parser.add_argument("--memory-case", help=argparse.SUPPRESS)
     parser.add_argument("--memory-scenario", choices=("binary", "labels"), help=argparse.SUPPRESS)
     parser.add_argument("--memory-thread", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--memory-setting", choices=tuple(SETTINGS), help=argparse.SUPPRESS
+    )
     args = parser.parse_args()
     if args.tier is None:
         args.tier = "small" if args.small else "large" if args.large else "default"
+    args.settings = list(dict.fromkeys(args.settings))
     return args
 
 
@@ -601,6 +669,10 @@ def main() -> int:
         raise SystemExit("--threads must contain positive worker counts")
     if args.sequential_backends and args.suite != "binary":
         raise SystemExit("--sequential-backends requires --suite binary")
+    if args.sequential_backends and len(args.settings) != 1:
+        raise SystemExit("--sequential-backends requires exactly one setting")
+    if args.memory_repeats < 1:
+        raise SystemExit("--memory-repeats must be positive")
     if args.kimimaro and importlib.util.find_spec("kimimaro") is None:
         raise SystemExit("--kimimaro requested, but kimimaro is not installed")
 
@@ -652,13 +724,21 @@ def main() -> int:
         foreground = int(np.count_nonzero(workload.volume))
         runs = number_of_runs(workload.volume, workload.scenario)
         if not args.sequential_backends:
-            reference = results[f"bioimage-cpp/t{args.threads[0]}"]
-            for threads in args.threads[1:]:
-                candidate = results[f"bioimage-cpp/t{threads}"]
-                if not exact_bic_result(reference, candidate, workload.scenario):
-                    raise RuntimeError(
-                        f"{workload.name}: worker count {threads} changed output"
-                    )
+            for setting_name in args.settings:
+                reference = results[
+                    f"bioimage-cpp/{setting_name}/t{args.threads[0]}"
+                ]
+                for threads in args.threads[1:]:
+                    candidate = results[
+                        f"bioimage-cpp/{setting_name}/t{threads}"
+                    ]
+                    if not exact_bic_result(
+                        reference, candidate, workload.scenario
+                    ):
+                        raise RuntimeError(
+                            f"{workload.name}/{setting_name}: worker count "
+                            f"{threads} changed output"
+                        )
         for name, _, count_result in backends:
             result = results[name]
             counts = count_result(result)
@@ -668,6 +748,13 @@ def main() -> int:
                 "scenario": workload.scenario,
                 "case": workload.name,
                 "backend": name,
+                "setting": next(
+                    (
+                        setting_name for setting_name in args.settings
+                        if f"/{setting_name}/" in name
+                    ),
+                    None,
+                ),
                 "number_of_threads": int(name.rsplit("/t", 1)[1]) if "/t" in name else 1,
                 "shape": list(workload.volume.shape),
                 "full_voxels": int(workload.volume.size),
@@ -693,31 +780,46 @@ def main() -> int:
 
         if args.kimimaro and not args.sequential_backends:
             by_name = {row["backend"]: row for row in rows if row["case"] == workload.name}
-            for threads in args.threads:
-                bio = by_name[f"bioimage-cpp/t{threads}"]["median_s"]
-                kimi = by_name[f"kimimaro/t{threads}"]["median_s"]
-                print(f"  bioimage-cpp/t{threads} / kimimaro/t{threads}: {bio / kimi:.2f}x")
+            for setting_name in args.settings:
+                mode = "fix" if SETTINGS[setting_name].fix_branching else "parental"
+                for threads in args.threads:
+                    bio = by_name[
+                        f"bioimage-cpp/{setting_name}/t{threads}"
+                    ]["median_s"]
+                    kimi = by_name[
+                        f"kimimaro/ball-{mode}/t{threads}"
+                    ]["median_s"]
+                    print(
+                        f"  bioimage-cpp/{setting_name}/t{threads} / "
+                        f"kimimaro/ball-{mode}/t{threads}: {bio / kimi:.2f}x"
+                    )
 
     if args.suite == "all" and not args.sequential_backends:
-        for threads in args.threads:
-            binary = stored_results[("packed-binary", f"bioimage-cpp/t{threads}")]
-            labeled = stored_results[("packed-distinct", f"bioimage-cpp/t{threads}")]
-            flattened_vertices = []
-            flattened_radii = []
-            flattened_edges = []
-            offset = 0
-            for skeleton in labeled.values():
-                flattened_vertices.append(skeleton[0])
-                flattened_radii.append(skeleton[2])
-                flattened_edges.append(skeleton[1] + offset)
-                offset += len(skeleton[0])
-            flattened = (
-                np.concatenate(flattened_vertices),
-                np.concatenate(flattened_edges),
-                np.concatenate(flattened_radii),
-            )
-            if not all(np.array_equal(a, b) for a, b in zip(binary, flattened)):
-                raise RuntimeError("paired binary and labeled dispatch lost exact parity")
+        for setting_name in args.settings:
+            for threads in args.threads:
+                backend = f"bioimage-cpp/{setting_name}/t{threads}"
+                binary = stored_results[("packed-binary", backend)]
+                labeled = stored_results[("packed-distinct", backend)]
+                flattened_vertices = []
+                flattened_radii = []
+                flattened_edges = []
+                offset = 0
+                for skeleton in labeled.values():
+                    flattened_vertices.append(skeleton[0])
+                    flattened_radii.append(skeleton[2])
+                    flattened_edges.append(skeleton[1] + offset)
+                    offset += len(skeleton[0])
+                flattened = (
+                    np.concatenate(flattened_vertices),
+                    np.concatenate(flattened_edges),
+                    np.concatenate(flattened_radii),
+                )
+                if not all(
+                    np.array_equal(a, b) for a, b in zip(binary, flattened)
+                ):
+                    raise RuntimeError(
+                        "paired binary and labeled dispatch lost exact parity"
+                    )
         print("paired packed binary/multi-label exact parity: True")
 
     payload = {
@@ -729,6 +831,7 @@ def main() -> int:
         "warmup": args.warmup,
         "spacing": spacing,
         "parameters": parameters,
+        "settings": args.settings,
         "results": rows,
         "memory": memory_rows,
     }
@@ -737,7 +840,8 @@ def main() -> int:
         for row in memory_rows:
             print(
                 f"  {row['scenario']:>6} {row['case']:>22} "
-                f"{row['backend']:>12}/t{row['threads']}: "
+                f"{row['backend']:>12}/{row['setting']}/t{row['threads']} "
+                f"run {row['repeat'] + 1}: "
                 f"{row['incremental_peak_kib'] / 1024:.1f} MiB incremental"
             )
     if args.json:

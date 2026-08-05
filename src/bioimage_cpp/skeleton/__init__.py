@@ -22,6 +22,11 @@ _TEASAR_LABELS_BY_DTYPE = {
     np.dtype("int64"): _core._teasar_labels_int64,
 }
 
+_TEASAR_INVALIDATIONS = {
+    "cube": False,
+    "ball": True,
+}
+
 
 def _finite_parameter(value, name: str, *, positive: bool) -> float:
     try:
@@ -42,8 +47,10 @@ def _normalize_teasar_options(
     constant: float,
     pdrf_scale: float,
     pdrf_exponent: float,
+    invalidation: str,
+    fix_branching: bool,
     number_of_threads: int,
-) -> tuple[list[float], float, float, float, float, int]:
+) -> tuple[list[float], float, float, float, float, bool, bool, int]:
     spacing_values = _normalize_sampling(spacing, 3, function, name="spacing")
     scale_value = _finite_parameter(scale, "scale", positive=False)
     constant_value = _finite_parameter(constant, "constant", positive=False)
@@ -51,6 +58,14 @@ def _normalize_teasar_options(
     pdrf_exponent_value = _finite_parameter(
         pdrf_exponent, "pdrf_exponent", positive=True
     )
+    try:
+        ball_invalidation = _TEASAR_INVALIDATIONS[invalidation]
+    except (KeyError, TypeError) as error:
+        supported = ", ".join(repr(value) for value in _TEASAR_INVALIDATIONS)
+        raise ValueError(
+            f"{function}: invalidation must be one of ({supported}), "
+            f"got {invalidation!r}"
+        ) from error
     n_threads = _normalize_threads(number_of_threads, function)
     return (
         spacing_values,
@@ -58,6 +73,8 @@ def _normalize_teasar_options(
         constant_value,
         pdrf_scale_value,
         pdrf_exponent_value,
+        ball_invalidation,
+        bool(fix_branching),
         n_threads,
     )
 
@@ -70,13 +87,15 @@ def teasar(
     constant: float = 0.0,
     pdrf_scale: float = 100000.0,
     pdrf_exponent: float = 4.0,
+    invalidation: str = "cube",
+    fix_branching: bool = True,
     number_of_threads: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Skeletonize a binary volume with 3D TEASAR.
 
     This is a correctness-first implementation of the core TEASAR procedure:
     distance-to-boundary and distance-from-root fields guide repeated penalized
-    Dijkstra paths, and a rolling physical invalidation cube determines when
+    Dijkstra paths, and rolling physical invalidation regions determine when
     the object has been covered. Production kimimaro heuristics such as soma
     handling, border stitching, hole filling, and manual targets are not part
     of this function.
@@ -95,6 +114,13 @@ def teasar(
     pdrf_scale, pdrf_exponent:
         Scale and exponent of the boundary-avoidance term in the penalized
         distance-from-root field.
+    invalidation:
+        ``"cube"`` uses the default physical axis-aligned invalidation box.
+        ``"ball"`` invalidates the active, foreground-connected part of each
+        strict physical-radius ball.
+    fix_branching:
+        If true, each path is routed to the existing zero-cost skeleton. If
+        false, all paths follow one parental field computed from the root.
     number_of_threads:
         Thread budget for the exact distance transform. Compact Dijkstra root
         and rail solves remain sequential because their wavefronts benchmarked
@@ -125,7 +151,7 @@ def teasar(
         raise ValueError(f"{function}: mask must have ndim 3, got ndim={binary.ndim}")
     options = _normalize_teasar_options(
         function, spacing, scale, constant, pdrf_scale, pdrf_exponent,
-        number_of_threads
+        invalidation, fix_branching, number_of_threads
     )
     return _core._teasar_uint8(
         binary,
@@ -142,6 +168,8 @@ def teasar_labels(
     constant: float = 0.0,
     pdrf_scale: float = 100000.0,
     pdrf_exponent: float = 4.0,
+    invalidation: str = "cube",
+    fix_branching: bool = True,
     number_of_threads: int = 1,
 ) -> dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Skeletonize every semantic label in a 3D integer volume.
@@ -160,7 +188,8 @@ def teasar_labels(
     background:
         Integer value excluded from skeletonization. It must fit the input
         dtype. Defaults to ``0``.
-    spacing, scale, constant, pdrf_scale, pdrf_exponent, number_of_threads:
+    spacing, scale, constant, pdrf_scale, pdrf_exponent, invalidation,
+    fix_branching, number_of_threads:
         The same TEASAR parameters and shared thread budget as :func:`teasar`.
 
     Returns
@@ -198,7 +227,7 @@ def teasar_labels(
     labels_c = np.ascontiguousarray(labels_array)
     options = _normalize_teasar_options(
         function, spacing, scale, constant, pdrf_scale, pdrf_exponent,
-        number_of_threads
+        invalidation, fix_branching, number_of_threads
     )
     return run(labels_c, labels_array.dtype.type(background_value), *options)
 

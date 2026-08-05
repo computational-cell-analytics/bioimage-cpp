@@ -26,6 +26,7 @@ enum class CompactAdjacency {
 struct CompactNeighbor {
     std::ptrdiff_t delta = 0;
     double physical_length = 0.0;
+    std::array<std::int8_t, 3> coordinate_delta{};
 };
 
 // A deterministic foreground-only view of a zero-padded 3D mask. Compact IDs
@@ -94,6 +95,11 @@ inline void build_compact_neighbors(
                     static_cast<std::ptrdiff_t>(dz) * domain.strides[0] +
                         static_cast<std::ptrdiff_t>(dy) * domain.strides[1] + dx,
                     std::sqrt(pz * pz + py * py + px * px),
+                    {
+                        static_cast<std::int8_t>(dz),
+                        static_cast<std::int8_t>(dy),
+                        static_cast<std::int8_t>(dx),
+                    },
                 };
             }
         }
@@ -200,14 +206,32 @@ struct CompactHeapGreater {
 };
 
 struct CompactDijkstraStats {
+    std::size_t calls = 0;
+    std::size_t initialized_nodes = 0;
+    std::size_t settled_nodes = 0;
+    std::size_t neighbor_probes = 0;
+    std::size_t successful_relaxations = 0;
+    std::size_t target_marks = 0;
     std::size_t pushes = 0;
     std::size_t pops = 0;
+    std::size_t stale_pops = 0;
     std::size_t peak_heap = 0;
 
     void reset() noexcept {
-        pushes = 0;
-        pops = 0;
-        peak_heap = 0;
+        *this = {};
+    }
+
+    void merge(const CompactDijkstraStats &other) noexcept {
+        calls += other.calls;
+        initialized_nodes += other.initialized_nodes;
+        settled_nodes += other.settled_nodes;
+        neighbor_probes += other.neighbor_probes;
+        successful_relaxations += other.successful_relaxations;
+        target_marks += other.target_marks;
+        pushes += other.pushes;
+        pops += other.pops;
+        stale_pops += other.stale_pops;
+        peak_heap = std::max(peak_heap, other.peak_heap);
     }
 };
 
@@ -281,6 +305,31 @@ inline void for_each_compact_neighbor(
     }
 }
 
+template <CompactAdjacency Adjacency, class Body>
+inline void for_each_compact_neighbor_with_metadata(
+    const CompactGridDomain &domain,
+    const std::uint32_t node,
+    const Body &body
+) {
+    if constexpr (Adjacency == CompactAdjacency::Csr) {
+        for (auto edge = domain.offsets[node]; edge < domain.offsets[node + 1]; ++edge) {
+            body(
+                domain.targets[edge],
+                domain.neighbors[domain.neighbor_codes[edge]]
+            );
+        }
+    } else {
+        const auto full = static_cast<std::ptrdiff_t>(domain.compact_to_full[node]);
+        for (const auto &neighbor : domain.neighbors) {
+            const auto target_full = static_cast<std::size_t>(full + neighbor.delta);
+            const auto target = domain.full_to_compact[target_full];
+            if (target != kNoCompactNode) {
+                body(target, neighbor);
+            }
+        }
+    }
+}
+
 template <CompactAdjacency Adjacency, class Distance>
 inline void compact_physical_distance_field(
     const CompactGridDomain &domain,
@@ -305,7 +354,8 @@ inline void compact_physical_distance_field(
     workspace.state.assign(n, 0);
     workspace.heap.clear();
     if (stats != nullptr) {
-        stats->reset();
+        ++stats->calls;
+        stats->initialized_nodes += n;
     }
     distances[source] = Distance{0};
     workspace.state[source] = kCompactDiscovered;
@@ -315,12 +365,21 @@ inline void compact_physical_distance_field(
         const auto entry = compact_heap_pop(workspace, stats);
         const auto node = entry.node;
         if ((workspace.state[node] & kCompactSettled) != 0) {
+            if (stats != nullptr) {
+                ++stats->stale_pops;
+            }
             continue;
         }
         workspace.state[node] |= kCompactSettled;
+        if (stats != nullptr) {
+            ++stats->settled_nodes;
+        }
         for_each_compact_neighbor<Adjacency>(
             domain, node,
             [&](const std::uint32_t target, const double physical_length) {
+                if (stats != nullptr) {
+                    ++stats->neighbor_probes;
+                }
                 if ((workspace.state[target] & kCompactSettled) != 0) {
                     return;
                 }
@@ -334,7 +393,80 @@ inline void compact_physical_distance_field(
                 }
                 workspace.state[target] |= kCompactDiscovered;
                 distances[target] = candidate;
+                if (stats != nullptr) {
+                    ++stats->successful_relaxations;
+                }
                 compact_heap_push(workspace, {candidate, target}, stats);
+            }
+        );
+    }
+}
+
+template <CompactAdjacency Adjacency, class Distance>
+inline void compact_node_cost_parental_field(
+    const CompactGridDomain &domain,
+    const std::uint32_t source,
+    const std::vector<Distance> &costs,
+    CompactDijkstraWorkspace<Distance> &workspace,
+    std::vector<std::uint32_t> &predecessors,
+    CompactDijkstraStats *stats = nullptr
+) {
+    const auto n = domain.size();
+    if (source >= n || costs.size() != n) {
+        throw std::invalid_argument("invalid compact node-cost parental-field inputs");
+    }
+    if constexpr (Adjacency == CompactAdjacency::Csr) {
+        if (!domain.has_csr()) {
+            throw std::invalid_argument("compact CSR adjacency is not available");
+        }
+    } else if (!domain.has_full_lookup()) {
+        throw std::invalid_argument("compact full-index lookup is not available");
+    }
+
+    predecessors.resize(n);
+    workspace.state.assign(n, 0);
+    workspace.heap.clear();
+    if (stats != nullptr) {
+        ++stats->calls;
+        stats->initialized_nodes += n;
+    }
+    workspace.state[source] = kCompactDiscovered;
+    predecessors[source] = source;
+    compact_heap_push(workspace, {Distance{0}, source}, stats);
+
+    while (!workspace.heap.empty()) {
+        const auto entry = compact_heap_pop(workspace, stats);
+        const auto node = entry.node;
+        if ((workspace.state[node] & kCompactSettled) != 0) {
+            if (stats != nullptr) {
+                ++stats->stale_pops;
+            }
+            continue;
+        }
+        workspace.state[node] |= kCompactSettled;
+        if (stats != nullptr) {
+            ++stats->settled_nodes;
+        }
+        for_each_compact_neighbor<Adjacency>(
+            domain, node,
+            [&](const std::uint32_t target, const double) {
+                if (stats != nullptr) {
+                    ++stats->neighbor_probes;
+                }
+                if ((workspace.state[target] &
+                     (kCompactDiscovered | kCompactSettled)) != 0) {
+                    return;
+                }
+                workspace.state[target] |= kCompactDiscovered;
+                predecessors[target] = node;
+                if (stats != nullptr) {
+                    ++stats->successful_relaxations;
+                }
+                compact_heap_push(
+                    workspace,
+                    {static_cast<Distance>(entry.distance + costs[target]), target},
+                    stats
+                );
             }
         );
     }
@@ -371,7 +503,9 @@ inline void compact_node_cost_path(
     workspace.predecessors.resize(n);
     workspace.heap.clear();
     if (stats != nullptr) {
-        stats->reset();
+        ++stats->calls;
+        stats->initialized_nodes += n;
+        stats->target_marks += targets.size();
     }
     for (const auto target : targets) {
         workspace.state[target] |= kCompactTarget;
@@ -385,9 +519,15 @@ inline void compact_node_cost_path(
         const auto entry = compact_heap_pop(workspace, stats);
         const auto node = entry.node;
         if ((workspace.state[node] & kCompactSettled) != 0) {
+            if (stats != nullptr) {
+                ++stats->stale_pops;
+            }
             continue;
         }
         workspace.state[node] |= kCompactSettled;
+        if (stats != nullptr) {
+            ++stats->settled_nodes;
+        }
         if ((workspace.state[node] & kCompactTarget) != 0) {
             reached = node;
             break;
@@ -395,6 +535,9 @@ inline void compact_node_cost_path(
         for_each_compact_neighbor<Adjacency>(
             domain, node,
             [&](const std::uint32_t target, const double) {
+                if (stats != nullptr) {
+                    ++stats->neighbor_probes;
+                }
                 if ((workspace.state[target] &
                      (kCompactDiscovered | kCompactSettled)) != 0) {
                     return;
@@ -404,6 +547,9 @@ inline void compact_node_cost_path(
                 );
                 workspace.state[target] |= kCompactDiscovered;
                 workspace.predecessors[target] = node;
+                if (stats != nullptr) {
+                    ++stats->successful_relaxations;
+                }
                 compact_heap_push(workspace, {candidate, target}, stats);
             }
         );

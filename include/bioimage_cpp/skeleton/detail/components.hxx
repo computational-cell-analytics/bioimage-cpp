@@ -93,6 +93,9 @@ struct PreparedTeasarComponent {
     // extends foreground across artificial processing-block cuts so those
     // cuts do not become false object boundaries.
     std::vector<std::uint8_t> distance_mask;
+    // Optional foreground-only EDT values in ascending padded C-order.
+    // Binary dispatch can compute these once for several components.
+    std::vector<float> compact_dbf;
     std::array<std::ptrdiff_t, 3> input_origin{};
     std::size_t foreground_count = 0;
     std::vector<std::size_t> required_target_voxels;
