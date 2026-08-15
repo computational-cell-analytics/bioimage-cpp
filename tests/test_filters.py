@@ -7,10 +7,12 @@ trigonometric closed-form rounding.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from itertools import combinations_with_replacement
 
 import numpy as np
 import pytest
 from scipy import ndimage
+from skimage.feature import structure_tensor as skimage_structure_tensor
 
 from bioimage_cpp import _core
 import bioimage_cpp.filters as bf
@@ -179,12 +181,20 @@ def test_hessian_eigenvalues_descending_order_3d():
 # Structure tensor eigenvalues
 # ---------------------------------------------------------------------------
 
+def _structure_tensor_reference_2d(img, inner, outer, *, truncate=None):
+    kwargs = {"mode": "mirror"}
+    if truncate is not None:
+        kwargs["truncate"] = truncate
+    gy = ndimage.gaussian_filter(img, inner, order=[1, 0], **kwargs)
+    gx = ndimage.gaussian_filter(img, inner, order=[0, 1], **kwargs)
+    syy = ndimage.gaussian_filter(gy * gy, outer, **kwargs)
+    syx = ndimage.gaussian_filter(gy * gx, outer, **kwargs)
+    sxx = ndimage.gaussian_filter(gx * gx, outer, **kwargs)
+    return np.stack([syy, syx, sxx])
+
+
 def _structure_tensor_eigenvalues_reference_2d(img, inner, outer):
-    gy = ndimage.gaussian_filter(img, inner, order=[1, 0], mode="mirror")
-    gx = ndimage.gaussian_filter(img, inner, order=[0, 1], mode="mirror")
-    syy = ndimage.gaussian_filter(gy * gy, outer, mode="mirror")
-    syx = ndimage.gaussian_filter(gy * gx, outer, mode="mirror")
-    sxx = ndimage.gaussian_filter(gx * gx, outer, mode="mirror")
+    syy, syx, sxx = _structure_tensor_reference_2d(img, inner, outer)
     mat = np.stack(
         [np.stack([syy, syx], axis=-1), np.stack([syx, sxx], axis=-1)],
         axis=-2,
@@ -200,16 +210,26 @@ def test_structure_tensor_eigenvalues_2d_matches_reference():
     np.testing.assert_allclose(got, ref, atol=2e-3)
 
 
+def _structure_tensor_reference_3d(vol, inner, outer, *, truncate=None):
+    kwargs = {"mode": "mirror"}
+    if truncate is not None:
+        kwargs["truncate"] = truncate
+    gz = ndimage.gaussian_filter(vol, inner, order=[1, 0, 0], **kwargs)
+    gy = ndimage.gaussian_filter(vol, inner, order=[0, 1, 0], **kwargs)
+    gx = ndimage.gaussian_filter(vol, inner, order=[0, 0, 1], **kwargs)
+    szz = ndimage.gaussian_filter(gz * gz, outer, **kwargs)
+    szy = ndimage.gaussian_filter(gz * gy, outer, **kwargs)
+    szx = ndimage.gaussian_filter(gz * gx, outer, **kwargs)
+    syy = ndimage.gaussian_filter(gy * gy, outer, **kwargs)
+    syx = ndimage.gaussian_filter(gy * gx, outer, **kwargs)
+    sxx = ndimage.gaussian_filter(gx * gx, outer, **kwargs)
+    return np.stack([szz, szy, szx, syy, syx, sxx])
+
+
 def _structure_tensor_eigenvalues_reference_3d(vol, inner, outer):
-    gz = ndimage.gaussian_filter(vol, inner, order=[1, 0, 0], mode="mirror")
-    gy = ndimage.gaussian_filter(vol, inner, order=[0, 1, 0], mode="mirror")
-    gx = ndimage.gaussian_filter(vol, inner, order=[0, 0, 1], mode="mirror")
-    szz = ndimage.gaussian_filter(gz * gz, outer, mode="mirror")
-    szy = ndimage.gaussian_filter(gz * gy, outer, mode="mirror")
-    szx = ndimage.gaussian_filter(gz * gx, outer, mode="mirror")
-    syy = ndimage.gaussian_filter(gy * gy, outer, mode="mirror")
-    syx = ndimage.gaussian_filter(gy * gx, outer, mode="mirror")
-    sxx = ndimage.gaussian_filter(gx * gx, outer, mode="mirror")
+    szz, szy, szx, syy, syx, sxx = _structure_tensor_reference_3d(
+        vol, inner, outer
+    )
     mat = np.stack([
         np.stack([szz, szy, szx], axis=-1),
         np.stack([szy, syy, syx], axis=-1),
@@ -370,6 +390,191 @@ def test_structure_tensor_eigenvalues_3d_matches_reference():
     assert np.all(got >= -1e-6)
 
 
+@pytest.mark.parametrize(
+    ("shape", "inner", "outer", "reference"),
+    [
+        ((23, 31), (0.8, 1.2), (1.3, 1.8), _structure_tensor_reference_2d),
+        ((7, 11, 13), (0.8, 1.0, 1.2), (1.3, 1.5, 1.7), _structure_tensor_reference_3d),
+    ],
+)
+def test_structure_tensor_components_match_scipy(shape, inner, outer, reference):
+    image = _random_image(shape)
+    got = bf.structure_tensor(image, inner, outer, window_size=3.0)
+    expected = reference(image, inner, outer, truncate=3.0)
+    component_count = image.ndim * (image.ndim + 1) // 2
+    assert got.shape == (component_count,) + image.shape
+    assert got.dtype == np.float32
+    np.testing.assert_allclose(got, expected, atol=2e-3)
+
+
+def _matrices_from_components(components):
+    matrix_dimension = 2 if components.shape[0] == 3 else 3
+    matrices = np.zeros(
+        components.shape[1:] + (matrix_dimension, matrix_dimension),
+        dtype=components.dtype,
+    )
+    for component, (row, column) in zip(
+        components,
+        combinations_with_replacement(range(matrix_dimension), 2),
+        strict=True,
+    ):
+        matrices[..., row, column] = component
+        matrices[..., column, row] = component
+    return matrices
+
+
+def _components_from_matrices(matrices):
+    matrix_dimension = matrices.shape[-1]
+    return np.ascontiguousarray(
+        np.stack(
+            [
+                matrices[..., row, column]
+                for row, column in combinations_with_replacement(
+                    range(matrix_dimension), 2
+                )
+            ]
+        )
+    )
+
+
+def _assert_selected_eigenvector(matrices, got, index, *, rtol):
+    matrix_dimension = matrices.shape[-1]
+    eigenvalues, eigenvectors = np.linalg.eigh(matrices)
+    ascending_index = matrix_dimension - 1 - index
+    selected_value = eigenvalues[..., ascending_index]
+    expected = eigenvectors[..., :, ascending_index]
+    matrices64 = matrices.astype(np.float64)
+    got64 = got.astype(np.float64)
+    dots = np.abs(np.sum(got64 * expected.astype(np.float64), axis=-1))
+    scale = np.maximum(
+        np.linalg.norm(matrices64, axis=(-2, -1)),
+        np.finfo(matrices.dtype).tiny,
+    )
+    residual = np.linalg.norm(
+        np.einsum("...ij,...j->...i", matrices64, got64)
+        - selected_value.astype(np.float64)[..., None] * got64,
+        axis=-1,
+    ) / scale
+    np.testing.assert_allclose(np.linalg.norm(got64, axis=-1), 1.0, rtol=rtol)
+    assert np.max(residual, initial=0.0) < rtol
+    assert np.min(dots, initial=1.0) > 1.0 - 10.0 * rtol
+
+
+@pytest.mark.parametrize("matrix_dimension", [2, 3])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_symmetric_eigenvector_matches_numpy(matrix_dimension, dtype):
+    rng = np.random.default_rng(314 + matrix_dimension)
+    matrices = rng.normal(size=(5, 7, matrix_dimension, matrix_dimension)).astype(dtype)
+    matrices += matrices.swapaxes(-1, -2)
+    components = _components_from_matrices(matrices)
+    tolerance = 2e-5 if dtype == np.float32 else 1e-12
+    for index in range(matrix_dimension):
+        got = bf.symmetric_eigenvector(components, index)
+        assert got.shape == matrices.shape[:-1]
+        assert got.dtype == dtype
+        _assert_selected_eigenvector(matrices, got, index, rtol=tolerance)
+
+
+@pytest.mark.parametrize("shape", [(19, 23), (5, 7, 9)])
+def test_symmetric_eigenvector_accepts_skimage_components(shape):
+    image = _random_image(shape)
+    components = np.ascontiguousarray(
+        skimage_structure_tensor(image, sigma=1.2, mode="mirror", order="rc")
+    )
+    matrices = _matrices_from_components(components)
+    for index in range(image.ndim):
+        got = bf.symmetric_eigenvector(components, index)
+        _assert_selected_eigenvector(matrices, got, index, rtol=2e-5)
+
+
+def test_symmetric_eigenvector_mask_and_general_batch_shape():
+    rng = np.random.default_rng(41)
+    matrices = rng.normal(size=(4, 5, 3, 3)).astype(np.float32)
+    matrices += matrices.swapaxes(-1, -2)
+    components = _components_from_matrices(matrices)
+    full = bf.symmetric_eigenvector(components, 2)
+    storage = rng.random((8, 10)) > 0.5
+    mask = storage[::2, ::2]
+    assert not mask.flags.c_contiguous
+    got = bf.symmetric_eigenvector(components, 2, mask=mask)
+    np.testing.assert_array_equal(got[mask], full[mask])
+    np.testing.assert_array_equal(got[~mask], 0.0)
+
+    single = bf.symmetric_eigenvector(components[:, 0, 0], 1)
+    assert single.shape == (3,)
+    np.testing.assert_allclose(np.linalg.norm(single), 1.0, atol=2e-6)
+
+
+@pytest.mark.parametrize("matrix_dimension", [2, 3])
+def test_symmetric_eigenvector_repeated_eigenspaces_are_valid(matrix_dimension):
+    rng = np.random.default_rng(73 + matrix_dimension)
+    matrices = [
+        np.zeros((matrix_dimension, matrix_dimension)),
+        np.eye(matrix_dimension) * 4.0,
+    ]
+    q, _ = np.linalg.qr(rng.normal(size=(matrix_dimension, matrix_dimension)))
+    spectrum = np.ones(matrix_dimension)
+    spectrum[0] = 3.0
+    matrices.append(q @ np.diag(spectrum) @ q.T)
+    matrices = np.asarray(matrices, dtype=np.float64)
+    components = _components_from_matrices(matrices)
+
+    for index in range(matrix_dimension):
+        first = bf.symmetric_eigenvector(components, index)
+        second = bf.symmetric_eigenvector(components, index)
+        np.testing.assert_array_equal(first, second)
+        np.testing.assert_allclose(np.linalg.norm(first, axis=-1), 1.0, atol=1e-12)
+        eigenvalues = np.linalg.eigvalsh(matrices)[..., ::-1]
+        residual = np.linalg.norm(
+            np.einsum("...ij,...j->...i", matrices, first)
+            - eigenvalues[..., index, None] * first,
+            axis=-1,
+        )
+        assert np.max(residual) < 1e-12
+        pivot = np.argmax(np.abs(first), axis=-1)
+        assert np.all(np.take_along_axis(first, pivot[:, None], axis=-1) >= 0.0)
+
+
+def test_symmetric_eigenvector_handles_float32_scales_and_near_repeated_roots():
+    rng = np.random.default_rng(97)
+    matrices = []
+    for scale in (np.finfo(np.float32).tiny, 1e-20, 1e-8, 1.0, 1e8, 1e20):
+        q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        spectrum = np.asarray(
+            [3.0 * scale, scale * (1.0 + 2e-5), scale], dtype=np.float32
+        )
+        matrices.append((q @ np.diag(spectrum) @ q.T).astype(np.float32))
+    matrices = np.stack(matrices)
+    components = _components_from_matrices(matrices)
+    for index in range(3):
+        got = bf.symmetric_eigenvector(components, index)
+        _assert_selected_eigenvector(matrices, got, index, rtol=3e-4)
+
+
+def test_symmetric_eigenvector_validates_arguments():
+    components = np.zeros((6, 4, 5), dtype=np.float32)
+    with pytest.raises(ValueError, match=r"shape\[0\]"):
+        bf.symmetric_eigenvector(np.zeros((5, 4), dtype=np.float32), 0)
+    with pytest.raises(ValueError, match="index"):
+        bf.symmetric_eigenvector(components, 3)
+    with pytest.raises(TypeError, match="integer"):
+        bf.symmetric_eigenvector(components, True)
+    with pytest.raises(TypeError, match="float32 or float64"):
+        bf.symmetric_eigenvector(components.astype(np.int32), 0)
+    with pytest.raises(ValueError, match="finite"):
+        invalid = components.copy()
+        invalid[0, 0, 0] = np.nan
+        bf.symmetric_eigenvector(invalid, 0)
+    with pytest.raises(ValueError, match="mask shape"):
+        bf.symmetric_eigenvector(
+            components, 0, mask=np.ones((4, 4), dtype=bool)
+        )
+    with pytest.raises(TypeError, match="dtype bool"):
+        bf.symmetric_eigenvector(
+            components, 0, mask=np.ones((4, 5), dtype=np.uint8)
+        )
+
+
 @pytest.mark.parametrize("shape", [(1, 5, 7), (2, 3, 4)])
 def test_eigenvalue_filters_support_short_axes(shape):
     vol = _random_image(shape)
@@ -402,6 +607,7 @@ def test_forced_scalar_matches_automatic_backend(monkeypatch):
         lambda: bf.gaussian_gradient_magnitude(vol, 1.5),
         lambda: bf.laplacian_of_gaussian(vol, 1.5),
         lambda: bf.hessian_of_gaussian_eigenvalues(vol, 1.5),
+        lambda: bf.structure_tensor(vol, 1.0, 2.0),
         lambda: bf.structure_tensor_eigenvalues(vol, 1.0, 2.0),
     ]
     automatic = [function() for function in functions]
@@ -454,11 +660,29 @@ def test_concurrent_filter_calls_are_deterministic():
         np.testing.assert_array_equal(result, expected)
 
 
+def test_concurrent_symmetric_eigenvector_calls_are_deterministic():
+    components = bf.structure_tensor(_random_image((7, 9, 11)), 1.0, 1.5)
+    expected = bf.symmetric_eigenvector(components, 2)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(
+                lambda _: bf.symmetric_eigenvector(components, 2),
+                range(8),
+            )
+        )
+    for result in results:
+        np.testing.assert_array_equal(result, expected)
+
+
 @pytest.mark.parametrize("shape", [(0, 4), (2, 0, 3)])
 def test_filters_support_empty_inputs(shape):
     image = np.empty(shape, dtype=np.float32)
     assert bf.gaussian_smoothing(image, 1.0).shape == shape
     assert bf.hessian_of_gaussian_eigenvalues(image, 1.0).shape == shape + (len(shape),)
+    component_count = len(shape) * (len(shape) + 1) // 2
+    components = bf.structure_tensor(image, 1.0, 2.0)
+    assert components.shape == (component_count,) + shape
+    assert bf.symmetric_eigenvector(components, 0).shape == shape + (len(shape),)
     assert (
         bf.structure_tensor_eigenvalues(image, 1.0, 2.0).shape
         == shape + (len(shape),)
@@ -475,6 +699,10 @@ def test_float64_input_returns_float64():
     assert got.dtype == np.float64
     ref = ndimage.gaussian_filter(img.astype(np.float32), 1.0, mode="mirror")
     np.testing.assert_allclose(got, ref.astype(np.float64), atol=1e-3)
+
+    tensor = bf.structure_tensor(img, 1.0, 2.0)
+    assert tensor.dtype == np.float64
+    assert bf.symmetric_eigenvector(tensor, 1).dtype == np.float64
 
 
 def test_uint8_input_returns_float32():
@@ -502,6 +730,9 @@ def test_non_contiguous_input_is_handled():
     got = bf.gaussian_smoothing(sliced, 1.0)
     ref = ndimage.gaussian_filter(sliced, 1.0, mode="mirror")
     np.testing.assert_allclose(got, ref, atol=1e-3)
+    tensor = bf.structure_tensor(sliced, 1.0, 2.0)
+    tensor_ref = _structure_tensor_reference_2d(sliced, 1.0, 2.0)
+    np.testing.assert_allclose(tensor, tensor_ref, atol=2e-3)
 
 
 # ---------------------------------------------------------------------------

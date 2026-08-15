@@ -11,6 +11,7 @@ python development/filters/check_parity.py --force-scalar
 python development/filters/validate_eigenvalue_approximation.py
 python development/filters/benchmark_eigenvalues.py
 python development/filters/benchmark.py --repeats 5
+python development/filters/benchmark_structure_tensor.py --repeats 5
 ```
 
 The benchmark reports the median wall time across five interleaved calls after
