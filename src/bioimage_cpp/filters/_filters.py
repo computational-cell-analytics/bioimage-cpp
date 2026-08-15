@@ -12,8 +12,9 @@ Conventions
   ``fastfilters`` / ``vigra`` parameter. ``0`` selects the default
   ``3 + 0.5 * order``.
 * Axis order is NumPy native: ``(ny, nx)`` for 2D, ``(nz, ny, nx)`` for 3D.
-* Eigenvalue functions return an array with a trailing axis of size
-  ``image.ndim``, sorted descending.
+* Eigenvalue functions return a trailing axis of size ``image.ndim`` in
+  descending order.
+* ``structure_tensor`` stores upper-triangle components on a leading axis.
 """
 
 from __future__ import annotations
@@ -229,6 +230,41 @@ def hessian_of_gaussian_eigenvalues(
     return _finalise(result, out_dtype)
 
 
+def structure_tensor(
+    image: np.ndarray,
+    inner_sigma: float | Sequence[float],
+    outer_sigma: float | Sequence[float],
+    *,
+    window_size: float = 0.0,
+) -> np.ndarray:
+    """Compute the upper-triangle components of the structure tensor.
+
+    The result has a leading component axis. The 2D order is
+    ``(Jyy, Jyx, Jxx)``. The 3D order is
+    ``(Jzz, Jzy, Jzx, Jyy, Jyx, Jxx)``.
+    """
+    function = "structure_tensor"
+    prepared, out_dtype = _prepare_input(image, function)
+    inner = _broadcast_per_axis(inner_sigma, prepared.ndim, "inner_sigma", function)
+    outer = _broadcast_per_axis(outer_sigma, prepared.ndim, "outer_sigma", function)
+    window = _normalize_window(window_size, function)
+    if prepared.ndim == 2:
+        result = _core._structure_tensor_2d_float32(
+            prepared,
+            inner[0], inner[1],
+            outer[0], outer[1],
+            window,
+        )
+    else:
+        result = _core._structure_tensor_3d_float32(
+            prepared,
+            inner[0], inner[1], inner[2],
+            outer[0], outer[1], outer[2],
+            window,
+        )
+    return _finalise(result, out_dtype)
+
+
 def structure_tensor_eigenvalues(
     image: np.ndarray,
     inner_sigma: float | Sequence[float],
@@ -261,3 +297,63 @@ def structure_tensor_eigenvalues(
             window,
         )
     return _finalise(result, out_dtype)
+
+
+def symmetric_eigenvector(
+    components: np.ndarray,
+    index: int,
+    *,
+    mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return one eigenvector from packed symmetric matrices.
+
+    ``components`` must have shape ``(3, *batch_shape)`` for 2D matrices or
+    ``(6, *batch_shape)`` for 3D matrices. The component orders are
+    ``(A00, A01, A11)`` and ``(A00, A01, A02, A11, A12, A22)``. Eigenvector
+    indices use descending eigenvalue order.
+
+    The result has shape ``batch_shape + (matrix_dimension,)``. Entries
+    outside ``mask`` are zero. A repeated eigenspace has no unique direction;
+    the function returns a deterministic unit vector in that eigenspace.
+    """
+    function = "symmetric_eigenvector"
+    array = np.asarray(components)
+    if array.ndim < 1:
+        raise ValueError(f"{function}: components must have ndim >= 1")
+    if array.shape[0] == 3:
+        matrix_dimension = 2
+    elif array.shape[0] == 6:
+        matrix_dimension = 3
+    else:
+        raise ValueError(
+            f"{function}: components.shape[0] must be 3 or 6, "
+            f"got {array.shape[0]}"
+        )
+    selected = strict_index(
+        index, "index", minimum=0, maximum=matrix_dimension - 1
+    )
+    if array.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        raise TypeError(
+            f"{function}: components dtype must be float32 or float64, "
+            f"got dtype={array.dtype}"
+        )
+    prepared = np.ascontiguousarray(array)
+
+    mask_arg = None
+    if mask is not None:
+        mask_array = np.asarray(mask)
+        if mask_array.shape != prepared.shape[1:]:
+            raise ValueError(
+                f"{function}: mask shape must match components batch shape, "
+                f"got mask shape={mask_array.shape}, "
+                f"batch shape={prepared.shape[1:]}"
+            )
+        if mask_array.dtype != np.dtype(bool):
+            raise TypeError(
+                f"{function}: mask must have dtype bool, got dtype={mask_array.dtype}"
+            )
+        mask_arg = np.ascontiguousarray(mask_array.view(np.uint8))
+
+    if prepared.dtype == np.dtype(np.float32):
+        return _core._symmetric_eigenvector_float32(prepared, selected, mask_arg)
+    return _core._symmetric_eigenvector_float64(prepared, selected, mask_arg)

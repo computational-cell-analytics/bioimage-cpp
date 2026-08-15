@@ -2259,6 +2259,10 @@ import bioimage_cpp as bic
 
 out = bic.filters.gaussian_smoothing(img, sigma=1.5)
 ev = bic.filters.hessian_of_gaussian_eigenvalues(img, sigma=1.5)
+
+tensor = bic.filters.structure_tensor(img, inner_sigma=1.0, outer_sigma=2.0)
+# 3D component order: Jzz, Jzy, Jzx, Jyy, Jyx, Jxx
+orientation = bic.filters.symmetric_eigenvector(tensor, index=2)
 ```
 
 Name mapping:
@@ -2270,6 +2274,7 @@ Name mapping:
 | `gaussianGradientMagnitude` | `gaussian_gradient_magnitude` |
 | `laplacianOfGaussian` | `laplacian_of_gaussian` |
 | `hessianOfGaussianEigenvalues` | `hessian_of_gaussian_eigenvalues` |
+| `structureTensor` | `structure_tensor` |
 | `structureTensorEigenvalues` | `structure_tensor_eigenvalues` |
 
 Common parameters:
@@ -2280,6 +2285,12 @@ Common parameters:
   per-axis sequence of ints in `{0, 1, 2}`.
 - `structure_tensor_eigenvalues` takes positional `inner_sigma` and
   `outer_sigma` (vigra calls them `innerScale` / `outerScale`).
+- `structure_tensor` uses the same scales and returns a component-first array.
+  The 2D order is `(Jyy, Jyx, Jxx)`. The 3D order is
+  `(Jzz, Jzy, Jzx, Jyy, Jyx, Jxx)`.
+- `symmetric_eigenvector(components, index, mask=None)` selects one
+  eigenvector. Indices use descending eigenvalue order. The optional boolean
+  mask sets unselected output vectors to zero.
 - `window_size` controls the kernel radius:
   `radius = ceil(window_size * sigma)`. `0.0` (the default) selects the
   vigra-style default `3 + 0.5 * order`. Matches the same-named parameter
@@ -2300,6 +2311,10 @@ Important differences from vigra and fastfilters:
 - Eigenvalue outputs have a trailing axis of size `image.ndim`, sorted
   largest → smallest. This matches `fastfilters`. To get vigra's
   ascending order, reverse with `result[..., ::-1]`.
+- `skimage.feature.structure_tensor` uses Sobel derivatives and one Gaussian
+  integration scale. `bioimage_cpp.filters.structure_tensor` instead uses
+  Gaussian derivatives at `inner_sigma` and smooths their products at
+  `outer_sigma`.
 - No IIR / recursive Gaussian, no `convolve` / `recursiveFilter2D`, no
   morphology, no nonlinear diffusion, and no
   non-local means in v1. Use `scipy.ndimage`, `skimage`, or the original

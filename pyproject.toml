@@ -34,7 +34,7 @@ Repository = "https://github.com/computational-cell-analytics/bioimage-cpp"
 Issues = "https://github.com/computational-cell-analytics/bioimage-cpp/issues"
 
 [project.optional-dependencies]
-test = ["pytest", "pooch", "scipy"]
+test = ["pytest", "pooch", "scipy", "scikit-image"]
 data = ["pooch"]
 
 [tool.scikit-build]

@@ -590,26 +590,26 @@ inline void hessian_of_gaussian_eigenvalues_3d(
 }
 
 // ---------------------------------------------------------------------------
-// Structure-tensor eigenvalues. Two-scale: first take first-order Gaussian
-// derivatives at sigma_inner, form the outer products, smooth them with
-// sigma_outer, then compute eigenvalues of the resulting symmetric tensor.
-// Output layout matches the Hessian variants (trailing axis size N).
+// Structure tensor. The leading output axis stores the upper triangle in
+// NumPy axis order: (yy, yx, xx) or (zz, zy, zx, yy, yx, xx).
 // ---------------------------------------------------------------------------
 
-inline void structure_tensor_eigenvalues_2d(
-    const float *in,
-    float *out,
-    std::ptrdiff_t ny,
-    std::ptrdiff_t nx,
-    double sigma_inner_y,
-    double sigma_inner_x,
-    double sigma_outer_y,
-    double sigma_outer_x,
-    double window_ratio
-) {
-    BIOIMAGE_PROFILE_INIT(profile);
-    const std::ptrdiff_t n = ny * nx;
+namespace detail {
 
+template <class Profiler>
+inline void structure_tensor_components_2d_profiled(
+    const float *in,
+    const std::array<float *, 3> &components,
+    const std::array<float *, 3> &workspace,
+    const std::ptrdiff_t ny,
+    const std::ptrdiff_t nx,
+    const double sigma_inner_y,
+    const double sigma_inner_x,
+    const double sigma_outer_y,
+    const double sigma_outer_x,
+    const double window_ratio,
+    Profiler &profile
+) {
     const auto kiy0 = gaussian_kernel(sigma_inner_y, 0, window_ratio);
     const auto kix0 = gaussian_kernel(sigma_inner_x, 0, window_ratio);
     const auto kiy1 = gaussian_kernel(sigma_inner_y, 1, window_ratio);
@@ -617,70 +617,45 @@ inline void structure_tensor_eigenvalues_2d(
     const auto koy0 = gaussian_kernel(sigma_outer_y, 0, window_ratio);
     const auto kox0 = gaussian_kernel(sigma_outer_x, 0, window_ratio);
 
-    std::unique_ptr<float[]> scratch;
-    {
-        BIOIMAGE_PROFILE_SCOPE(profile, "scratch_alloc");
-        scratch = detail::allocate_scratch(n, 6);
-    }
-    float *work = detail::scratch_slot(scratch, n, 0);
-    float *gy = detail::scratch_slot(scratch, n, 1);
-    float *gx = detail::scratch_slot(scratch, n, 2);
-    float *syy_y = detail::scratch_slot(scratch, n, 3);
-    float *syx_y = detail::scratch_slot(scratch, n, 4);
-    float *sxx_y = detail::scratch_slot(scratch, n, 5);
-
-    detail::gaussian_separable_2d_profiled(in, gy, work, ny, nx, kiy1, kix0, profile);
-    detail::gaussian_separable_2d_profiled(in, gx, work, ny, nx, kiy0, kix1, profile);
+    float *gy = components[0];
+    float *gx = components[1];
+    float *work = components[2];
+    gaussian_separable_2d_profiled(in, gy, work, ny, nx, kiy1, kix0, profile);
+    gaussian_separable_2d_profiled(in, gx, work, ny, nx, kiy0, kix1, profile);
 
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "outer_products");
         const std::array<const float *, 2> gradients{gy, gx};
-        const std::array<float *, 3> components{syy_y, syx_y, sxx_y};
         convolve_axis_strided_outer_products<2>(
-            gradients, components, 1, ny, nx, koy0
+            gradients, workspace, 1, ny, nx, koy0
         );
     }
 
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "axis_x");
-        convolve_axis_x(syy_y, gy, ny, nx, kox0);
-        convolve_axis_x(syx_y, gx, ny, nx, kox0);
-        convolve_axis_x(sxx_y, work, ny, nx, kox0);
+        convolve_axis_x(workspace[0], components[0], ny, nx, kox0);
+        convolve_axis_x(workspace[1], components[1], ny, nx, kox0);
+        convolve_axis_x(workspace[2], components[2], ny, nx, kox0);
     }
-
-    {
-        BIOIMAGE_PROFILE_SCOPE(profile, "eigenvalues");
-        for (std::ptrdiff_t i = 0; i < n; ++i) {
-            const float a = gy[i];
-            const float b = gx[i];
-            const float c = work[i];
-            const float half_tr = 0.5f * (a + c);
-            const float half_diff = 0.5f * (a - c);
-            const float disc = std::sqrt(half_diff * half_diff + b * b);
-            out[2 * i + 0] = half_tr + disc;
-            out[2 * i + 1] = half_tr - disc;
-        }
-    }
-    BIOIMAGE_PROFILE_REPORT(profile);
 }
 
-inline void structure_tensor_eigenvalues_3d(
+template <class Profiler>
+inline void structure_tensor_components_3d_profiled(
     const float *in,
-    float *out,
-    std::ptrdiff_t nz,
-    std::ptrdiff_t ny,
-    std::ptrdiff_t nx,
-    double sigma_inner_z,
-    double sigma_inner_y,
-    double sigma_inner_x,
-    double sigma_outer_z,
-    double sigma_outer_y,
-    double sigma_outer_x,
-    double window_ratio
+    const std::array<float *, 6> &components,
+    const std::array<float *, 4> &workspace,
+    const std::ptrdiff_t nz,
+    const std::ptrdiff_t ny,
+    const std::ptrdiff_t nx,
+    const double sigma_inner_z,
+    const double sigma_inner_y,
+    const double sigma_inner_x,
+    const double sigma_outer_z,
+    const double sigma_outer_y,
+    const double sigma_outer_x,
+    const double window_ratio,
+    Profiler &profile
 ) {
-    BIOIMAGE_PROFILE_INIT(profile);
-    const std::ptrdiff_t n = nz * ny * nx;
-
     const auto kiz0 = gaussian_kernel(sigma_inner_z, 0, window_ratio);
     const auto kiy0 = gaussian_kernel(sigma_inner_y, 0, window_ratio);
     const auto kix0 = gaussian_kernel(sigma_inner_x, 0, window_ratio);
@@ -691,66 +666,208 @@ inline void structure_tensor_eigenvalues_3d(
     const auto koy0 = gaussian_kernel(sigma_outer_y, 0, window_ratio);
     const auto kox0 = gaussian_kernel(sigma_outer_x, 0, window_ratio);
 
-    std::unique_ptr<float[]> scratch;
-    {
-        BIOIMAGE_PROFILE_SCOPE(profile, "scratch_alloc");
-        scratch = detail::allocate_scratch(n, 10);
-    }
-    float *work = detail::scratch_slot(scratch, n, 0);
-    float *gz = detail::scratch_slot(scratch, n, 1);
-    float *gy = detail::scratch_slot(scratch, n, 2);
-    float *gx = detail::scratch_slot(scratch, n, 3);
-    float *szz = detail::scratch_slot(scratch, n, 4);
-    float *szy = detail::scratch_slot(scratch, n, 5);
-    float *szx = detail::scratch_slot(scratch, n, 6);
-    float *syy = detail::scratch_slot(scratch, n, 7);
-    float *syx = detail::scratch_slot(scratch, n, 8);
-    float *sxx = detail::scratch_slot(scratch, n, 9);
+    float *work = workspace[0];
+    float *gz = workspace[1];
+    float *gy = workspace[2];
+    float *gx = workspace[3];
 
-    detail::gaussian_first_axis_3d_profiled(in, gx, nz, ny, nx, kiz0, profile);
-    detail::gaussian_remaining_axes_3d_profiled(
+    gaussian_first_axis_3d_profiled(in, gx, nz, ny, nx, kiz0, profile);
+    gaussian_remaining_axes_3d_profiled(
         gx, gy, work, nz, ny, nx, kiy1, kix0, profile
     );
-    detail::gaussian_remaining_axes_3d_profiled(
+    gaussian_remaining_axes_3d_profiled(
         gx, gx, work, nz, ny, nx, kiy0, kix1, profile
     );
-    detail::gaussian_first_axis_3d_profiled(in, gz, nz, ny, nx, kiz1, profile);
-    detail::gaussian_remaining_axes_3d_profiled(
+    gaussian_first_axis_3d_profiled(in, gz, nz, ny, nx, kiz1, profile);
+    gaussian_remaining_axes_3d_profiled(
         gz, gz, work, nz, ny, nx, kiy0, kix0, profile
     );
 
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "outer_products");
         const std::array<const float *, 3> gradients{gz, gy, gx};
-        const std::array<float *, 6> components{szz, szy, szx, syy, syx, sxx};
         convolve_axis_strided_outer_products<3>(
             gradients, components, 1, nz, ny * nx, koz0
         );
     }
 
-    detail::gaussian_remaining_axes_3d_profiled(
-        szz, szz, work, nz, ny, nx, koy0, kox0, profile
+    for (float *component : components) {
+        gaussian_remaining_axes_3d_profiled(
+            component, component, work, nz, ny, nx, koy0, kox0, profile
+        );
+    }
+}
+
+} // namespace detail
+
+inline void structure_tensor_2d(
+    const float *in,
+    float *out,
+    const std::ptrdiff_t ny,
+    const std::ptrdiff_t nx,
+    const double sigma_inner_y,
+    const double sigma_inner_x,
+    const double sigma_outer_y,
+    const double sigma_outer_x,
+    const double window_ratio
+) {
+    BIOIMAGE_PROFILE_INIT(profile);
+    const std::ptrdiff_t n = ny * nx;
+    const std::array<float *, 3> components{out, out + n, out + 2 * n};
+    std::unique_ptr<float[]> scratch;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "scratch_alloc");
+        scratch = detail::allocate_scratch(n, 3);
+    }
+    const std::array<float *, 3> workspace{
+        detail::scratch_slot(scratch, n, 0),
+        detail::scratch_slot(scratch, n, 1),
+        detail::scratch_slot(scratch, n, 2),
+    };
+    detail::structure_tensor_components_2d_profiled(
+        in, components, workspace, ny, nx,
+        sigma_inner_y, sigma_inner_x, sigma_outer_y, sigma_outer_x,
+        window_ratio, profile
     );
-    detail::gaussian_remaining_axes_3d_profiled(
-        szy, szy, work, nz, ny, nx, koy0, kox0, profile
+    BIOIMAGE_PROFILE_REPORT(profile);
+}
+
+inline void structure_tensor_3d(
+    const float *in,
+    float *out,
+    const std::ptrdiff_t nz,
+    const std::ptrdiff_t ny,
+    const std::ptrdiff_t nx,
+    const double sigma_inner_z,
+    const double sigma_inner_y,
+    const double sigma_inner_x,
+    const double sigma_outer_z,
+    const double sigma_outer_y,
+    const double sigma_outer_x,
+    const double window_ratio
+) {
+    BIOIMAGE_PROFILE_INIT(profile);
+    const std::ptrdiff_t n = nz * ny * nx;
+    const std::array<float *, 6> components{
+        out, out + n, out + 2 * n, out + 3 * n, out + 4 * n, out + 5 * n,
+    };
+    std::unique_ptr<float[]> scratch;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "scratch_alloc");
+        scratch = detail::allocate_scratch(n, 4);
+    }
+    const std::array<float *, 4> workspace{
+        detail::scratch_slot(scratch, n, 0),
+        detail::scratch_slot(scratch, n, 1),
+        detail::scratch_slot(scratch, n, 2),
+        detail::scratch_slot(scratch, n, 3),
+    };
+    detail::structure_tensor_components_3d_profiled(
+        in, components, workspace, nz, ny, nx,
+        sigma_inner_z, sigma_inner_y, sigma_inner_x,
+        sigma_outer_z, sigma_outer_y, sigma_outer_x,
+        window_ratio, profile
     );
-    detail::gaussian_remaining_axes_3d_profiled(
-        szx, szx, work, nz, ny, nx, koy0, kox0, profile
+    BIOIMAGE_PROFILE_REPORT(profile);
+}
+
+inline void structure_tensor_eigenvalues_2d(
+    const float *in,
+    float *out,
+    const std::ptrdiff_t ny,
+    const std::ptrdiff_t nx,
+    const double sigma_inner_y,
+    const double sigma_inner_x,
+    const double sigma_outer_y,
+    const double sigma_outer_x,
+    const double window_ratio
+) {
+    BIOIMAGE_PROFILE_INIT(profile);
+    const std::ptrdiff_t n = ny * nx;
+    std::unique_ptr<float[]> scratch;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "scratch_alloc");
+        scratch = detail::allocate_scratch(n, 6);
+    }
+    const std::array<float *, 3> components{
+        detail::scratch_slot(scratch, n, 0),
+        detail::scratch_slot(scratch, n, 1),
+        detail::scratch_slot(scratch, n, 2),
+    };
+    const std::array<float *, 3> workspace{
+        detail::scratch_slot(scratch, n, 3),
+        detail::scratch_slot(scratch, n, 4),
+        detail::scratch_slot(scratch, n, 5),
+    };
+    detail::structure_tensor_components_2d_profiled(
+        in, components, workspace, ny, nx,
+        sigma_inner_y, sigma_inner_x, sigma_outer_y, sigma_outer_x,
+        window_ratio, profile
     );
-    detail::gaussian_remaining_axes_3d_profiled(
-        syy, syy, work, nz, ny, nx, koy0, kox0, profile
-    );
-    detail::gaussian_remaining_axes_3d_profiled(
-        syx, syx, work, nz, ny, nx, koy0, kox0, profile
-    );
-    detail::gaussian_remaining_axes_3d_profiled(
-        sxx, sxx, work, nz, ny, nx, koy0, kox0, profile
+
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "eigenvalues");
+        for (std::ptrdiff_t i = 0; i < n; ++i) {
+            const float half_trace = 0.5f * (components[0][i] + components[2][i]);
+            const float half_difference =
+                0.5f * (components[0][i] - components[2][i]);
+            const float discriminant = std::sqrt(
+                half_difference * half_difference + components[1][i] * components[1][i]
+            );
+            out[2 * i] = half_trace + discriminant;
+            out[2 * i + 1] = half_trace - discriminant;
+        }
+    }
+    BIOIMAGE_PROFILE_REPORT(profile);
+}
+
+inline void structure_tensor_eigenvalues_3d(
+    const float *in,
+    float *out,
+    const std::ptrdiff_t nz,
+    const std::ptrdiff_t ny,
+    const std::ptrdiff_t nx,
+    const double sigma_inner_z,
+    const double sigma_inner_y,
+    const double sigma_inner_x,
+    const double sigma_outer_z,
+    const double sigma_outer_y,
+    const double sigma_outer_x,
+    const double window_ratio
+) {
+    BIOIMAGE_PROFILE_INIT(profile);
+    const std::ptrdiff_t n = nz * ny * nx;
+    std::unique_ptr<float[]> scratch;
+    {
+        BIOIMAGE_PROFILE_SCOPE(profile, "scratch_alloc");
+        scratch = detail::allocate_scratch(n, 10);
+    }
+    const std::array<float *, 4> workspace{
+        detail::scratch_slot(scratch, n, 0),
+        detail::scratch_slot(scratch, n, 1),
+        detail::scratch_slot(scratch, n, 2),
+        detail::scratch_slot(scratch, n, 3),
+    };
+    const std::array<float *, 6> components{
+        detail::scratch_slot(scratch, n, 4),
+        detail::scratch_slot(scratch, n, 5),
+        detail::scratch_slot(scratch, n, 6),
+        detail::scratch_slot(scratch, n, 7),
+        detail::scratch_slot(scratch, n, 8),
+        detail::scratch_slot(scratch, n, 9),
+    };
+    detail::structure_tensor_components_3d_profiled(
+        in, components, workspace, nz, ny, nx,
+        sigma_inner_z, sigma_inner_y, sigma_inner_x,
+        sigma_outer_z, sigma_outer_y, sigma_outer_x,
+        window_ratio, profile
     );
 
     {
         BIOIMAGE_PROFILE_SCOPE(profile, "eigenvalues");
         ev3_symmetric_descending_interleaved(
-            szz, szy, szx, syy, syx, sxx, out, n
+            components[0], components[1], components[2], components[3],
+            components[4], components[5], out, n
         );
     }
     BIOIMAGE_PROFILE_REPORT(profile);
