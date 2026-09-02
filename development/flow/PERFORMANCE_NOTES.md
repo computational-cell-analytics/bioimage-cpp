@@ -12,7 +12,7 @@ Hardware on which these numbers were taken: **11th Gen Intel Core i7-1185G7
 @ 3.00 GHz** (Tiger Lake, 4 physical cores / 8 SMT threads, 12 MB L3, AVX2 +
 AVX-512 capable). The 2026-07-12 pass below was cross-checked against
 GPT 5.6-Sol's independent investigation, which measured the same changes on an
-AMD EPYC 7513 (Zen 3); see `FLOW_OPTIM.md` in the repo root. Absolute timings
+AMD EPYC 7513 (Zen 3); see `development/flow/FLOW_OPTIM.md`. Absolute timings
 differ between the hosts; the relative gains agree closely across both.
 
 ## Headline numbers
@@ -40,7 +40,14 @@ The rewrite produces a **byte-for-byte identical** density on both fixtures:
 pre-rewrite build. It was also verified bitwise identical across 1056 randomized
 small/edge-case inputs (see "Correctness" below).
 
-Two eras of work are recorded here:
+**2026-09-02 update (Zen 3, see "Packed-channel FMA tracer" below):** the
+default path on AVX+FMA x86-64 CPUs now uses a packed-channel vectorized
+tracer. On the same machine and flags, the registered fixtures run
+**1.052 s -> 0.637 s (3D, 1T)** and **0.110 s -> 0.069 s (2D, 1T)**,
+-39 % and -37 %, with identical densities; 2T and 4T gain 30-42 %, adversarial
+inputs 17-44 %.
+
+Three eras of work are recorded here:
 
 1. **Threading + early-exit era** (earlier). Threading was the big lever; the
    algorithmic changes capped work so the threaded path had something to scale.
@@ -48,6 +55,11 @@ Two eras of work are recorded here:
    multi-threaded runtime by cutting per-step instruction count and removing the
    per-iteration synchronization, on the existing channel-first layout with no
    SIMD, no relayout, and no precision change.
+3. **Packed-channel FMA tracer** (2026-09-02). Another -37..-44 % by repacking
+   the flow field channel-last once and tracing with 4-lane packed arithmetic
+   inside the runtime-dispatched FMA translation unit, after a per-step counter
+   budget showed the scalar kernel retired ~330 instructions per step and spent
+   a third of its cycles with the FP register file full.
 
 ## Changes that landed
 
@@ -266,7 +278,8 @@ to `trace_particle`); the RK2 selectors use K=3, with a plain `trace_particle`
 remainder loop.
 
 Measured with tightly paired `.so`-swap ABA runs (K1 = per-particle loop,
-`paired_bench.py`, min-of-3 per invocation, Tiger Lake). Two flag regimes,
+a local predecessor of today's `development/flow/paired_bench.py`, min-of-3 per
+invocation, Tiger Lake). Two flag regimes,
 because the conda toolchain exports default `CXXFLAGS`
 (`-march=nocona -mtune=haswell -ftree-vectorize ...`) while wheel builds get
 plain flags — see the pitfall below:
@@ -308,6 +321,190 @@ mixed flag regimes before this was caught. Wheel builds (cibuildwheel, no
 conda) get the plain flags, so plain-flag numbers are the shipping-relevant
 ones. When A/B-benchmarking local builds: `echo $CXXFLAGS` first, and keep
 the regime identical on both sides.
+
+## Packed-channel FMA tracer (2026-09-02)
+
+Third optimization round, on an **AMD EPYC 7513 (Zen 3)** node under a SLURM
+allocation of 2 physical cores / 4 logical CPUs (CPUs 36,37 + SMT siblings
+100,101; NUMA node 1), governor `performance`, THP `always`, `nmi_watchdog=1`
+(five programmable counters per `perf` group). GCC 14.3 (conda-forge), Python
+3.14.5, NumPy 2.4.6, **plain flags** (`CXXFLAGS= CFLAGS=`; the conda toolchain's
+`-march=nocona ... -O2` defaults were cleared), commit `492ff9b` as baseline.
+All A/B numbers come from `development/flow/paired_bench.py` (fresh pinned
+subprocess per measurement, A B B A per repeat, prebuilt `.so` files swapped
+through `sys.modules`, never rebuilt between sides) and from the kernel-only
+counter harness `development/flow/perf_kernel.py`. This machine cannot measure
+beyond two physical cores; 8T-class numbers remain to be taken elsewhere.
+
+### What changed
+
+The default path (RK2, `tol > 0`, `restrict_to_mask`) on CPUs with AVX+FMA now
+runs a **packed-channel kernel** in `src/cpp/flow/flow_density_fma.cxx`:
+
+- The flow field is repacked once (parallel over planes/rows) into channel-last
+  storage, D floats per voxel, on a grid padded by one replicated voxel per
+  axis (+2.5 % voxels on the 3D fixture). Every trilinear corner is then a
+  single 16-byte load carrying all channels, and the padding makes the upper
+  corner index always valid, so the scalar kernel's nearest-boundary rule
+  needs no clamp. Cost: a transient buffer the size of the flow input
+  (151 MB on the 3D fixture) and a pack pass of ~16 ms at 1T / ~10 ms at 2T.
+- The particle position is one 4-lane register `[z, y, x, 0]`. Truncation,
+  fraction, midpoint, clip, convergence test (one compare + `movemask`),
+  bounds test and the rounding for the mask lookup are packed; the flat
+  offsets are formed in general-purpose registers from three extracted lanes.
+- 3D interpolation keeps the nested-lerp association order of the scalar
+  kernel (fused `lo + f*(hi-lo)`, fused midpoint, unfused position update),
+  so the traced positions match the scalar-FMA kernel bit for bit on the
+  fixtures. 2D uses a four-weight sum (`mul -> fma -> add`), which shortens
+  the post-load chain from 16 to 11 cycles; its association order differs,
+  and densities were still bitwise identical on both fixtures and all 400
+  randomized cases.
+- Lockstep interleave of **K = 4** trajectories per group (K = 3 for the
+  scalar kernel), lanes addressed with compile-time indices so the state
+  stays in registers.
+- The scalar-FMA instantiation of the header kernel remains as fallback when
+  the packed buffer cannot be allocated or its offsets exceed int32, and the
+  portable SSE2 kernel is untouched for selectors 0-6 and non-AVX CPUs.
+- New runtime opt-out `BIOIMAGE_CPP_FLOW_FORCE_SCALAR=1` (mirrors the filters
+  module) and `_core._flow_trace_backend()` returning `"fma"` or `"scalar"`,
+  with a parity test in `tests/test_flow.py`.
+- The binding's finiteness scan over the flow buffer (previously a serial
+  `std::isfinite` loop holding the GIL, ~30 ms of the 3D fixture) now runs
+  inside the GIL release through `detail/finite.hxx::all_finite` (branch-free
+  per-block exponent test, parallel with the caller's thread count).
+- Hot helpers (header `sample_flow`, `round_to_flat_index`,
+  `position_is_in_mask`, `trace_particle`, `trace_particle_block`; the TU's
+  samplers and step) carry `BIOIMAGE_FORCE_INLINE`
+  (`include/bioimage_cpp/detail/force_inline.hxx`). See the codegen trap below.
+
+### Why: per-step diagnosis of the previous kernel
+
+The 2026-07-13 gate had closed prefetching on the grounds that misses were rare;
+it had not converted the counters into a per-step budget. A profile-build step
+counter (`TraceStats`, printed as `[bioimage flow trace]`) now gives:
+
+```
+3D fixture: 33,959,237 executed steps for 729,236 particles (46.6 per particle)
+            exits: converged 4.4 %, left mask 5.6 %, hit n_iter 90.0 %
+2D fixture:  7,230,607 executed steps for 151,019 particles (47.9 per particle)
+            exits: converged 6.1 %, left mask 0.3 %, hit n_iter 93.6 %
+```
+
+Baseline kernel, 3D fixture, 1T, per executed step (perf_kernel, 8 warm calls):
+
+```
+cycles 114   instructions 326   loads 95 (49 essential)   IPC 2.87
+L1d misses 1.4/step (1.5 %)   L2 misses 0.03/step   DRAM fills 0.007/step
+dTLB misses ~0.0007/step (THP effective)
+FP-register-file dispatch stalls: 40 cycles/step (35 % of cycles)
+```
+
+So the kernel was neither memory- nor branch-bound; it retired ~330
+instructions per step, half of them address/weight bookkeeping in the FP
+register domain, and spent a third of its cycles with the FP register file full.
+Static disassembly of the FMA TU confirmed ~330-360 instructions and 42-47
+stack operands per lane-step. That is what the packed kernel attacks: fewer
+instructions, fewer FP-domain micro-ops, shorter chain.
+
+### Results
+
+Paired A/B (`paired_bench.py`, ABBA, best-of-subprocess minima, `.so` swap),
+previous kernel (`492ff9b`) vs packed kernel, plain flags, Zen 3:
+
+```
+case        threads  cpus            previous    packed    change   noise  parity
+fixture3d   1        36              1.0515 s    0.6372 s  -39.4 %  0.6 %  identical
+fixture2d   1        36              0.1099 s    0.0689 s  -37.3 %  1.8 %  identical
+fixture3d   2 phys   36,37           0.5520 s    0.3388 s  -38.6 %  0.4 %  identical
+fixture2d   2 phys   36,37           0.0561 s    0.0360 s  -35.9 %  1.3 %  identical
+fixture3d   2 SMT    36,100          0.8489 s    0.4914 s  -42.1 %  0.5 %  identical
+fixture3d   4        36,37,100,101   0.4576 s    0.2675 s  -41.6 %  1.9 %  identical
+fixture2d   4        36,37,100,101   0.0441 s    0.0309 s  -29.9 %  1.0 %  identical
+stripes 1/4 1        36              0.5817 s    0.4821 s  -17.1 %  1.3 %  identical
+stripes 3/4 1        36              1.2842 s    0.7707 s  -40.0 %  2.8 %  identical
+random s=1  1        36              1.5414 s    0.8931 s  -42.1 %  3.0 %  identical
+random s=10 1        36              1.6568 s    0.9259 s  -44.1 %  0.9 %  identical
+random s=5  1        36              1.1499 s    0.6816 s  -40.7 %  0.3 %  identical
+random s=20 1        36              1.5028 s    0.8957 s  -40.4 %  2.7 %  identical
+random s=40 1        36              0.8152 s    0.5425 s  -33.5 %  3.2 %  identical
+2D random 10 1       36              0.1727 s    0.1103 s  -36.1 %  0.4 %  differs (2D tree)
+```
+
+The base-vs-base calibration of the same harness reads `noise` on both fixtures
+(|dMin| <= 0.12 %). The stripes 1/4 case (three of four lanes converge on the
+first step) gains least, as expected for a lockstep group; K = 4 still beat
+K = 3 there by 3.6 %.
+
+Accuracy gate (`check_flow_density.py --dim both --repeats 3`): unchanged,
+3D `rel_diff = 0.0470`, `pearson = 0.9690`; 2D `rel_diff = 0.0201`,
+`pearson = 0.9975`; particle sums 729,236 / 151,019; densities bitwise equal to
+the previous kernel on both fixtures. `differential_check.py` (400 randomized
+cases: length-1 axes, tiny grids, Euler/RK2, `tol`/`dt`/`n_iter` variants, mask
+on/off, 1/4 threads) is 400/400 bitwise identical previous-vs-packed, and
+399/400 packed-vs-forced-scalar (one scale-50 random flow: 0.63 % of voxels
+differ by <= 2 counts, sums equal; contraction noise on a chaotic field). Full
+suite: 1457 passed, 7 skipped.
+
+Per executed step, 3D fixture, 1T (2D in parentheses):
+
+```
+                          previous            packed
+cycles/step               114    (56)         67     (35)
+instructions/step         326    (145)        133    (81)
+loads/step                95     (39)         38     (16)
+IPC                       2.87   (2.60)       1.98   (2.33)
+L1d misses/step           1.4                 0.34
+FP-RF dispatch stall      40 cyc (35 %)       36 cyc (54 %)   (2D: 20 cyc, 57 %)
+flops/step (FMA = 2)      n/a                 196    (84)
+```
+
+Static K = 4 lane body (final build): 3D 122 instructions per lane-step
+(110 GPR, 107 FP ALU, 74 loads incl. 8 constant operands, 59 FMA, 24 shuffles,
+24 vector-int, 20 cvt per group of four; 2 stack operands per lane-step);
+2D 78 per lane-step. The remaining cost is the dependent chain per step
+(~90 cycles in 3D: two samples of cvt -> extract -> imul/add -> load -> three
+lerp levels, plus midpoint and update) against the reorder window and the FP
+register file; four lanes recover ~1.35 lane-steps of overlap.
+
+Thread balance (profile build, `[bioimage flow trace]` per-thread lines):
+2T physical on the 3D fixture 0.9 % time / 1.1 % steps imbalance; stripes 1/4
+0.1 %. Static contiguous chunks remain adequate. Phase split at 1T on the 3D
+fixture: pack 16.6 ms (2.6 %), tracing 96.5 %, init 1.7 %, scatter 0.8 %,
+mask zero 1.0 %.
+
+Non-kernel: the parallel, GIL-free finiteness check cuts the `n_iter=0` call
+from ~40 ms to a few ms on the 3D fixture (was 3.8 % at 1T, 7 % at 2T of the
+previous kernel's runtime, growing with thread count).
+
+### Codegen trap: translation-unit growth disables inlining
+
+While the FMA TU held many template instantiations (K and layout variants for
+the sweep), GCC 14 stopped inlining `step_packed`, `sample_packed` and even the
+header's `sample_flow<3>`: the scalar-FMA fallback slowed from 1.05 s to 1.59 s
+and the packed kernel from 0.65 s to 1.24 s, with out-of-line calls in the hot
+loop. An out-of-line `sample_flow<3>` compiled with AVX is also exactly the
+COMDAT/ODR hazard the dispatch design guards against. `BIOIMAGE_FORCE_INLINE`
+on the per-step helpers removes the dependence on the unit-growth budget in both
+translation units.
+
+### Rejected in this round
+
+- **Vector-integer address math** (`pmulld` + horizontal sums for the flat
+  offset, `pminsd`-clamped upper indices): 0.720 s vs 0.645 s for the
+  integer-register version at K=3 in 3D, and a 2D regression (0.113 s vs the
+  scalar 0.110 s). Vector-integer ops occupy the FP register file, which was
+  the bottleneck.
+- **16-byte voxels (zero fourth lane, aligned loads, no lane clean-up)**:
+  −2 % in 3D for +33 % transient memory; split-line loads (3.3 per step, ~20 %
+  of corner loads) are not a measurable cost. Not worth the memory.
+- **Weight-tree interpolation in 3D**: within noise (−1 %); the 3D loop is
+  bound by the reorder window (~150 micro-ops per lane-step against a
+  ~90-cycle chain), so the extra weight micro-ops offset the shorter chain.
+  Kept for 2D only, where it measured −12 %.
+- **K = 6 lanes**: parity with K = 4 in both dimensions; K = 2 and K = 1 lose
+  (3D: 0.652 s / 1.19 s vs 0.645 s).
+- **Padding away the boundary clamps**: only ~1 % (integer clamps were not on
+  the critical path), kept because it simplifies the sampler.
 
 ## Correctness
 
@@ -440,11 +637,15 @@ Kept so these avenues are not blindly re-attempted.
 
 ## Optimization status and future validation
 
-The 2026-07-13 Zen 3 counter run completed the final `perf` gate and did not
-support another kernel implementation experiment. Flow-density optimization is
-concluded for now at `e426920`; reopen it only for a demonstrated regression, a
-new representative workload, or hardware-counter evidence of a substantial
-bottleneck not covered above.
+The 2026-07-13 Zen 3 counter run had closed the round at `e426920`. The
+2026-09-02 round reopened it on new evidence (a per-step budget and FP
+register-file stall counters, see "Packed-channel FMA tracer") and landed the
+packed tracer. What remains is bounded by the per-step dependent chain against
+the out-of-order window: further gains would need fewer FP-domain micro-ops per
+step (e.g. cheaper lane extraction for the integer address path) or a shorter
+chain, both of which are now measurable with `perf_kernel.py --steps`.
+Reopen on a demonstrated regression, a new representative workload, or
+counter evidence of a bottleneck not covered above.
 
 Cross-architecture validation remains useful but is not an active optimization
 target: confirm the FMA dispatch on macOS x86-64 and Windows x86-64, and confirm
@@ -478,3 +679,29 @@ python development/flow/check_flow_density.py --dim both --repeats 3
 `--restrict-to-mask` / `--no-restrict-to-mask`, and `--threads` to override
 defaults. The PASS gate is `rel_diff = mean(|ours-ref|)/mean(ref) ≤ 0.15`
 (`--rel-tol` to override).
+
+Kernel-level tooling added in the 2026-09-02 round (all in `development/flow/`,
+none required by the test suite):
+
+```bash
+# Kernel-only timing + hardware counters (perf stat attached around the timed
+# calls only; five-event groups). --steps converts totals into per-step budgets
+# using the executed-step count printed by a BIOIMAGE_PROFILE=ON build.
+taskset -c 36 python development/flow/perf_kernel.py --case fixture3d --cpu 36 \
+    --perf-group core,stall,fp --steps 33959237
+
+# Paired A/B of two prebuilt _core .so files (fresh pinned subprocess per run,
+# ABBA, noise estimate, density parity). Calibrate with --a X --b X first.
+python development/flow/paired_bench.py --a base.so --b cand.so --cases all \
+    --threads 1 --cpu 36 --repeats 4 --inner 3
+
+# Randomized differential check (400 cases) between two builds or between the
+# FMA path and BIOIMAGE_CPP_FLOW_FORCE_SCALAR=1.
+python development/flow/differential_check.py --a base.so --b cand.so
+python development/flow/differential_check.py --a cand.so --b cand.so \
+    --env-b BIOIMAGE_CPP_FLOW_FORCE_SCALAR=1
+```
+
+A `BIOIMAGE_PROFILE=ON` build prints, per call, a `[bioimage flow trace]` block
+(executed steps, exit reasons, steps-per-particle histogram, per-thread time and
+imbalance) in addition to the phase profile.

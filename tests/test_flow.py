@@ -235,6 +235,72 @@ def test_flow_rejects_non_finite_values():
         bic.flow.compute_flow_density(flow, np.ones((3, 3), bool))
 
 
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("shape", [(3, 3), (2, 3, 4), (1, 1), (1, 1, 1)])
+@pytest.mark.parametrize("threads", [1, 4])
+def test_flow_rejects_non_finite_values_anywhere(value, shape, threads):
+    ndim = len(shape)
+    flow = np.zeros((ndim,) + shape, dtype=np.float32)
+    # last element of the last channel: the position a chunked scan is most
+    # likely to miss
+    flow[(ndim - 1,) + tuple(s - 1 for s in shape)] = value
+    with pytest.raises(ValueError, match="finite"):
+        bic.flow.compute_flow_density(
+            flow, np.ones(shape, bool), number_of_threads=threads
+        )
+    flow[...] = 0.0
+    flow[(0,) + (0,) * ndim] = value
+    with pytest.raises(ValueError, match="finite"):
+        bic.flow.compute_flow_density(
+            flow, np.ones(shape, bool), number_of_threads=threads
+        )
+
+
+def test_large_finite_flow_is_accepted_multithreaded():
+    # Large enough that the parallel finiteness scan actually fans out.
+    shape = (8, 384, 384)
+    flow = np.full((3,) + shape, 0.25, dtype=np.float32)
+    density = bic.flow.compute_flow_density(
+        flow, np.ones(shape, bool), n_iter=1, number_of_threads=4
+    )
+    assert density.sum() == np.prod(shape)
+
+
+def test_forced_scalar_matches_fma_backend(monkeypatch):
+    monkeypatch.delenv("BIOIMAGE_CPP_FLOW_FORCE_SCALAR", raising=False)
+    if bic._core._flow_trace_backend() != "fma":
+        pytest.skip("FMA flow backend is not available on this CPU/build")
+
+    rng = np.random.default_rng(2026)
+    cases = []
+    for shape in [(48, 64), (6, 24, 32)]:
+        ndim = len(shape)
+        flow = rng.normal(scale=0.7, size=(ndim,) + shape).astype(np.float32)
+        mask = rng.random(shape) > 0.3
+        cases.append((flow, mask))
+
+    def run_all():
+        return [
+            bic.flow.compute_flow_density(flow, mask, number_of_threads=threads)
+            for flow, mask in cases
+            for threads in (1, 4)
+        ]
+
+    automatic = run_all()
+    monkeypatch.setenv("BIOIMAGE_CPP_FLOW_FORCE_SCALAR", "1")
+    assert bic._core._flow_trace_backend() == "scalar"
+    scalar = run_all()
+    monkeypatch.setenv("BIOIMAGE_CPP_FLOW_FORCE_SCALAR", "0")
+    assert bic._core._flow_trace_backend() == "fma"
+
+    # The two backends may differ in floating-point contraction, so the bar is
+    # particle conservation plus near-identical densities, not bitwise equality.
+    for got, expected in zip(automatic, scalar, strict=True):
+        assert got.sum() == expected.sum()
+        differing = np.count_nonzero(got != expected)
+        assert differing <= max(1, got.size // 1000)
+
+
 def test_rk2_runs():
     rng = np.random.default_rng(0)
     flow = rng.normal(scale=0.3, size=(2, 12, 12)).astype(np.float32)

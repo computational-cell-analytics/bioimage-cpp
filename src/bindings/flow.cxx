@@ -2,6 +2,7 @@
 #include "ndarray.hxx"
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/finite.hxx"
 #include "bioimage_cpp/detail/grid.hxx"
 #include "bioimage_cpp/flow/flow_density.hxx"
 
@@ -91,15 +92,11 @@ DensityArray compute_flow_density_t(
         throw std::invalid_argument("number_of_threads must be >= 1");
     }
     // Single authoritative finiteness check over the (contiguous) flow buffer;
-    // the Python wrapper deliberately does not repeat this scan.
+    // the Python wrapper deliberately does not repeat this scan. It runs below,
+    // inside the GIL release, in parallel with the caller's thread count.
     std::size_t flow_size = D;
     for (std::size_t axis = 0; axis < D; ++axis) {
         flow_size *= flow.shape(axis + 1);
-    }
-    for (std::size_t index = 0; index < flow_size; ++index) {
-        if (!std::isfinite(flow.data()[index])) {
-            throw std::invalid_argument("flow must contain only finite values");
-        }
     }
 
     std::vector<std::size_t> out_shape(D);
@@ -119,6 +116,13 @@ DensityArray compute_flow_density_t(
 
     {
         nb::gil_scoped_release release;
+        // `flow` (the ndarray argument) keeps the buffer alive for the whole
+        // call, so reading it without the GIL is safe.
+        if (!bioimage_cpp::detail::all_finite(
+                flow.data(), flow_size, static_cast<std::size_t>(number_of_threads)
+            )) {
+            throw std::invalid_argument("flow must contain only finite values");
+        }
         if constexpr (D == 2) {
             flow::compute_flow_density_2d(
                 flow_view,
@@ -151,6 +155,12 @@ DensityArray compute_flow_density_t(
 } // namespace
 
 void bind_flow(nb::module_ &m) {
+    m.def(
+        "_flow_trace_backend",
+        &flow::trace_backend,
+        "Return the internal flow tracing backend selected for the default path "
+        "('fma' or 'scalar')."
+    );
     m.def(
         "_compute_flow_density_2d_float32",
         &compute_flow_density_t<2>,
