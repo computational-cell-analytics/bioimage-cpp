@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bioimage_cpp/array_view.hxx"
+#include "bioimage_cpp/detail/force_inline.hxx"
 #include "bioimage_cpp/detail/profile.hxx"
 #include "bioimage_cpp/detail/threading.hxx"
 
@@ -8,7 +9,14 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
+
+#ifdef BIOIMAGE_PROFILE
+#include <chrono>
+#include <cstdio>
+#endif
 
 #if defined(BIOIMAGE_FLOW_FMA_DISPATCH) && defined(_MSC_VER)
 #include <immintrin.h>
@@ -39,6 +47,125 @@ GridLayout<D> make_grid_layout(
     return layout;
 }
 
+// Executed-step accounting for profile builds. `record(steps, exit)` is called
+// once per traced particle with the number of integration steps whose samples
+// were computed and why tracing stopped. Outside BIOIMAGE_PROFILE builds the
+// Null variant is used and every call site is guarded by `if constexpr`, so
+// the production kernels carry no counters.
+struct NullTraceStats {
+    static constexpr bool enabled = false;
+    enum Exit : int { Converged = 0, LeftMask = 1, MaxIter = 2 };
+    explicit NullTraceStats(std::size_t = 0) noexcept {}
+    void record(std::size_t, int) noexcept {}
+    void merge(const NullTraceStats &) noexcept {}
+    static void report(const std::vector<NullTraceStats> &, std::size_t, bool) noexcept {}
+};
+
+#ifdef BIOIMAGE_PROFILE
+struct TraceStats {
+    static constexpr bool enabled = true;
+    enum Exit : int { Converged = 0, LeftMask = 1, MaxIter = 2 };
+
+    std::uint64_t steps = 0;
+    std::uint64_t particles = 0;
+    std::array<std::uint64_t, 3> exits{};
+    std::vector<std::uint64_t> histogram;  // histogram[s] = particles that executed s steps
+    double seconds = 0.0;
+
+    explicit TraceStats(std::size_t n_iter = 0) : histogram(n_iter + 1, 0) {}
+
+    void record(std::size_t n_steps, int reason) noexcept {
+        steps += n_steps;
+        ++particles;
+        ++exits[static_cast<std::size_t>(reason)];
+        if (n_steps < histogram.size()) {
+            ++histogram[n_steps];
+        }
+    }
+
+    void merge(const TraceStats &other) {
+        steps += other.steps;
+        particles += other.particles;
+        for (std::size_t i = 0; i < exits.size(); ++i) {
+            exits[i] += other.exits[i];
+        }
+        if (histogram.size() < other.histogram.size()) {
+            histogram.resize(other.histogram.size(), 0);
+        }
+        for (std::size_t i = 0; i < other.histogram.size(); ++i) {
+            histogram[i] += other.histogram[i];
+        }
+        seconds += other.seconds;
+    }
+
+    // Print the merged totals plus one line per worker (load balance).
+    static void report(
+        const std::vector<TraceStats> &per_thread, const std::size_t n_iter, const bool rk2
+    ) {
+        TraceStats total(n_iter);
+        for (const auto &t : per_thread) {
+            total.merge(t);
+        }
+        const double particles = static_cast<double>(std::max<std::uint64_t>(total.particles, 1));
+        std::fprintf(stderr, "[bioimage flow trace]\n");
+        std::fprintf(
+            stderr, "  particles %llu  n_iter %zu  %s\n",
+            static_cast<unsigned long long>(total.particles), n_iter, rk2 ? "rk2" : "euler"
+        );
+        std::fprintf(
+            stderr, "  steps %llu  mean_steps_per_particle %.3f  samples_per_step %d\n",
+            static_cast<unsigned long long>(total.steps), total.steps / particles, rk2 ? 2 : 1
+        );
+        std::fprintf(
+            stderr, "  exits converged %llu (%.1f%%)  left_mask %llu (%.1f%%)  hit_n_iter %llu (%.1f%%)\n",
+            static_cast<unsigned long long>(total.exits[0]), 100.0 * total.exits[0] / particles,
+            static_cast<unsigned long long>(total.exits[1]), 100.0 * total.exits[1] / particles,
+            static_cast<unsigned long long>(total.exits[2]), 100.0 * total.exits[2] / particles
+        );
+        std::fprintf(stderr, "  histogram(steps:particles)");
+        std::size_t lo = 0;
+        for (std::size_t width = 1; lo < total.histogram.size(); width *= 2) {
+            const std::size_t hi = std::min(total.histogram.size(), lo + width);
+            std::uint64_t count = 0;
+            for (std::size_t s = lo; s < hi; ++s) {
+                count += total.histogram[s];
+            }
+            if (hi - lo == 1) {
+                std::fprintf(stderr, " %zu:%llu", lo, static_cast<unsigned long long>(count));
+            } else {
+                std::fprintf(stderr, " %zu-%zu:%llu", lo, hi - 1, static_cast<unsigned long long>(count));
+            }
+            lo = hi;
+        }
+        std::fprintf(stderr, "\n");
+        double max_seconds = 0.0, sum_seconds = 0.0;
+        std::uint64_t max_steps = 0;
+        for (std::size_t t = 0; t < per_thread.size(); ++t) {
+            std::fprintf(
+                stderr, "  thread %zu  %.4f s  steps %llu  particles %llu\n", t, per_thread[t].seconds,
+                static_cast<unsigned long long>(per_thread[t].steps),
+                static_cast<unsigned long long>(per_thread[t].particles)
+            );
+            max_seconds = std::max(max_seconds, per_thread[t].seconds);
+            sum_seconds += per_thread[t].seconds;
+            max_steps = std::max(max_steps, per_thread[t].steps);
+        }
+        if (per_thread.size() > 1) {
+            const double mean_seconds = sum_seconds / per_thread.size();
+            const double mean_steps = static_cast<double>(total.steps) / per_thread.size();
+            std::fprintf(
+                stderr, "  imbalance time max/mean-1 %.1f%%  steps max/mean-1 %.1f%%\n",
+                100.0 * (max_seconds / std::max(mean_seconds, 1e-12) - 1.0),
+                100.0 * (max_steps / std::max(mean_steps, 1e-12) - 1.0)
+            );
+        }
+    }
+};
+using ActiveTraceStats = TraceStats;
+#else
+using ActiveTraceStats = NullTraceStats;
+#endif
+
 // Linearly interpolate all D flow channels at `position` and write the result
 // to `out`. This is explicit bilinear (D==2) / trilinear (D==3) sampling rather
 // than a generic 2^D corner table: the lower/upper index and fractional weight
@@ -52,7 +179,7 @@ GridLayout<D> make_grid_layout(
 // software routine while the cast is a single instruction. At an upper boundary
 // the lower and upper index coincide, matching nearest-boundary behavior.
 template <std::size_t D>
-inline void sample_flow(
+BIOIMAGE_FORCE_INLINE void sample_flow(
     const std::array<const float *, D> &channels,
     const std::array<float, D> &position,
     const GridLayout<D> &grid,
@@ -115,7 +242,7 @@ inline void sample_flow(
 }
 
 template <std::size_t D>
-inline std::ptrdiff_t round_to_flat_index(
+BIOIMAGE_FORCE_INLINE std::ptrdiff_t round_to_flat_index(
     const std::array<float, D> &position,
     const GridLayout<D> &grid
 ) {
@@ -139,7 +266,7 @@ inline std::ptrdiff_t round_to_flat_index(
 }
 
 template <std::size_t D>
-inline bool position_is_in_mask(
+BIOIMAGE_FORCE_INLINE bool position_is_in_mask(
     const std::array<float, D> &position,
     const GridLayout<D> &grid,
     const std::uint8_t *mask
@@ -165,23 +292,25 @@ namespace detail {
 // are compile-time parameters so the per-step branches on them fold away and
 // the sampler/RK2/convergence/mask code inlines into one specialized loop.
 //
-// CodegenVariant must match the instantiating trace_all (see there): the
-// compiler is free to emit this function out-of-line (observed with GCC 14
-// under mild size pressure), and without the tag the FMA translation unit
-// would emit AVX code under the same weak symbol name as the portable
-// instantiation, letting COMDAT selection ship AVX code to the portable
-// fallback path (SIGILL on pre-AVX CPUs) or silently discard the FMA kernel.
+// CodegenVariant must match the instantiating trace_all (see there): without
+// the tag the FMA translation unit would emit AVX code under the same weak
+// symbol name as the portable instantiation, letting COMDAT selection ship
+// AVX code to the portable fallback path (SIGILL on pre-AVX CPUs) or silently
+// discard the FMA kernel. The per-step helpers are additionally force-inlined
+// because GCC 14 was observed to stop inlining them once the FMA translation
+// unit grew (which both slowed the loop ~1.5x and recreated the hazard).
 template <
     std::size_t D, bool UseRK2, bool CheckConvergence, bool RestrictToMask,
     bool CodegenVariant = false>
-inline void trace_particle(
+BIOIMAGE_FORCE_INLINE void trace_particle(
     std::array<float, D> &position,
     const std::array<const float *, D> &channels,
     const GridLayout<D> &grid,
     const std::uint8_t *mask,
     const std::size_t n_iter,
     const float dt,
-    const float tol
+    const float tol,
+    ActiveTraceStats &stats
 ) {
     const auto clip = [&grid](std::array<float, D> &p) {
         for (std::size_t axis = 0; axis < D; ++axis) {
@@ -192,6 +321,8 @@ inline void trace_particle(
             }
         }
     };
+    [[maybe_unused]] std::size_t executed_steps = 0;
+    [[maybe_unused]] int exit_reason = ActiveTraceStats::MaxIter;
 
     // When restricting to the mask, only in-mask (hence in-bounds) endpoints are
     // ever committed and the seed is an in-bounds integer voxel, so `position`
@@ -203,6 +334,9 @@ inline void trace_particle(
     }
 
     for (std::size_t iter = 0; iter < n_iter; ++iter) {
+        if constexpr (ActiveTraceStats::enabled) {
+            ++executed_steps;
+        }
         std::array<float, D> step{};
         sample_flow<D>(channels, position, grid, step);
 
@@ -224,6 +358,9 @@ inline void trace_particle(
                 }
             }
             if (max_step < tol) {
+                if constexpr (ActiveTraceStats::enabled) {
+                    exit_reason = ActiveTraceStats::Converged;
+                }
                 break;
             }
         }
@@ -238,12 +375,18 @@ inline void trace_particle(
             // at its last in-mask position (only the endpoint is mask-tested,
             // not the RK2 midpoint).
             if (!position_is_in_mask<D>(proposed, grid, mask)) {
+                if constexpr (ActiveTraceStats::enabled) {
+                    exit_reason = ActiveTraceStats::LeftMask;
+                }
                 break;
             }
         } else {
             clip(proposed);
         }
         position = proposed;
+    }
+    if constexpr (ActiveTraceStats::enabled) {
+        stats.record(executed_steps, exit_reason);
     }
 }
 
@@ -257,16 +400,22 @@ inline void trace_particle(
 template <
     std::size_t D, std::size_t K, bool UseRK2, bool CheckConvergence,
     bool RestrictToMask, bool CodegenVariant = false>
-inline void trace_particle_block(
+BIOIMAGE_FORCE_INLINE void trace_particle_block(
     std::array<float, D> *positions,
     const std::array<const float *, D> &channels,
     const GridLayout<D> &grid,
     const std::uint8_t *mask,
     const std::size_t n_iter,
     const float dt,
-    const float tol
+    const float tol,
+    ActiveTraceStats &stats
 ) {
     static_assert(K >= 2, "use trace_particle for single trajectories");
+    [[maybe_unused]] std::array<std::size_t, K> lane_steps{};
+    [[maybe_unused]] std::array<int, K> lane_exit{};
+    if constexpr (ActiveTraceStats::enabled) {
+        lane_exit.fill(ActiveTraceStats::MaxIter);
+    }
 
     const auto clip = [&grid](std::array<float, D> &p) {
         for (std::size_t axis = 0; axis < D; ++axis) {
@@ -296,6 +445,9 @@ inline void trace_particle_block(
             if (!alive[k]) {
                 continue;
             }
+            if constexpr (ActiveTraceStats::enabled) {
+                ++lane_steps[k];
+            }
             std::array<float, D> step{};
             sample_flow<D>(channels, pos[k], grid, step);
 
@@ -318,6 +470,9 @@ inline void trace_particle_block(
                 }
                 if (max_step < tol) {
                     alive[k] = false;
+                    if constexpr (ActiveTraceStats::enabled) {
+                        lane_exit[k] = ActiveTraceStats::Converged;
+                    }
                     continue;
                 }
             }
@@ -330,6 +485,9 @@ inline void trace_particle_block(
             if constexpr (RestrictToMask) {
                 if (!position_is_in_mask<D>(proposed, grid, mask)) {
                     alive[k] = false;
+                    if constexpr (ActiveTraceStats::enabled) {
+                        lane_exit[k] = ActiveTraceStats::LeftMask;
+                    }
                     continue;
                 }
             } else {
@@ -349,6 +507,11 @@ inline void trace_particle_block(
 
     for (std::size_t k = 0; k < K; ++k) {
         positions[k] = pos[k];
+    }
+    if constexpr (ActiveTraceStats::enabled) {
+        for (std::size_t k = 0; k < K; ++k) {
+            stats.record(lane_steps[k], lane_exit[k]);
+        }
     }
 }
 
@@ -372,10 +535,21 @@ void trace_all(
     // across all integration steps in one fan-out. Trajectories are independent
     // until the sequential scatter, so no global alive state, per-step barrier,
     // or per-step alive scan is needed.
+    ActiveTraceStats null_stats{};
+    std::vector<ActiveTraceStats> per_thread_stats;
+    if constexpr (ActiveTraceStats::enabled) {
+        per_thread_stats.assign(n_threads, ActiveTraceStats(n_iter));
+    }
     ::bioimage_cpp::detail::parallel_for_chunks(
         n_threads,
         positions.size(),
-        [&](const std::size_t, const std::size_t begin, const std::size_t end) {
+        [&](const std::size_t thread_id, const std::size_t begin, const std::size_t end) {
+            ActiveTraceStats *stats = &null_stats;
+            (void)thread_id;
+#ifdef BIOIMAGE_PROFILE
+            stats = &per_thread_stats[thread_id];
+            const auto chunk_start = std::chrono::steady_clock::now();
+#endif
             // Lockstep interleaving only pays for RK2: its two dependent
             // samples per step leave latency bubbles that other lanes fill.
             // The shorter Euler chain measured ~10% slower when interleaved
@@ -389,18 +563,34 @@ void trace_all(
                     trace_particle_block<
                         D, K, UseRK2, CheckConvergence, RestrictToMask,
                         CodegenVariant>(
-                        &positions[i], channels, grid, mask, n_iter, dt, tol
+                        &positions[i], channels, grid, mask, n_iter, dt, tol, *stats
                     );
                 }
             }
             for (; i < end; ++i) {
                 trace_particle<
                     D, UseRK2, CheckConvergence, RestrictToMask, CodegenVariant>(
-                    positions[i], channels, grid, mask, n_iter, dt, tol
+                    positions[i], channels, grid, mask, n_iter, dt, tol, *stats
                 );
             }
+#ifdef BIOIMAGE_PROFILE
+            stats->seconds += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - chunk_start
+            ).count();
+#endif
         }
     );
+    if constexpr (ActiveTraceStats::enabled) {
+        ActiveTraceStats::report(per_thread_stats, n_iter, UseRK2);
+    }
+}
+
+// Runtime opt-out of the FMA-specialized tracer (mirrors
+// BIOIMAGE_CPP_FILTERS_FORCE_SCALAR). Read on every call, not cached, so tests
+// can toggle it in-process.
+inline bool force_scalar_requested() noexcept {
+    const char *value = std::getenv("BIOIMAGE_CPP_FLOW_FORCE_SCALAR");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
 }
 
 #if defined(BIOIMAGE_FLOW_FMA_DISPATCH)
@@ -470,7 +660,7 @@ bool try_trace_all_fma(
     const float dt,
     const float tol
 ) {
-    if (!runtime_fma_supported()) {
+    if (force_scalar_requested() || !runtime_fma_supported()) {
         return false;
     }
     if constexpr (D == 2) {
@@ -488,6 +678,18 @@ bool try_trace_all_fma(
 #endif
 
 } // namespace detail
+
+// Name of the tracer the default RK2/convergence/mask path will use on this
+// machine: "fma" (runtime-dispatched FMA translation unit) or "scalar"
+// (portable kernel). Exposed to Python as `_core._flow_trace_backend`.
+inline const char *trace_backend() noexcept {
+#if defined(BIOIMAGE_FLOW_FMA_DISPATCH)
+    if (!detail::force_scalar_requested() && detail::runtime_fma_supported()) {
+        return "fma";
+    }
+#endif
+    return "scalar";
+}
 
 // Preconditions (validated in the binding layer):
 //   * flow.ndim() == D + 1, flow.shape[0] == D, flow.shape[1..] == fg_mask.shape
