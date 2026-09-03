@@ -334,7 +334,8 @@ All A/B numbers come from `development/flow/paired_bench.py` (fresh pinned
 subprocess per measurement, A B B A per repeat, prebuilt `.so` files swapped
 through `sys.modules`, never rebuilt between sides) and from the kernel-only
 counter harness `development/flow/perf_kernel.py`. This machine cannot measure
-beyond two physical cores; 8T-class numbers remain to be taken elsewhere.
+beyond two physical cores; the 4T/8T numbers come from the Tiger Lake
+reproduction below.
 
 ### What changed
 
@@ -475,6 +476,44 @@ mask zero 1.0 %.
 Non-kernel: the parallel, GIL-free finiteness check cuts the `n_iter=0` call
 from ~40 ms to a few ms on the 3D fixture (was 3.8 % at 1T, 7 % at 2T of the
 previous kernel's runtime, growing with thread count).
+
+### Reproduction on Tiger Lake (2026-09-02)
+
+Same harness, same flags, same pair of commits (`492ff9b` vs `54fd4a9`) on the
+i7-1185G7 laptop (governor `powersave`, 4 cores / 8 threads). Calibration
+(base vs base) read `noise` on both fixtures. Best-of-subprocess minima, all
+rows `significant` unless noted:
+
+```
+case        threads   previous    packed    change   Zen 3   parity
+fixture3d   1         1.5545 s    1.0342 s  -33.5 %  -39.4   identical
+fixture2d   1         0.1664 s    0.1140 s  -31.5 %  -37.3   identical
+fixture3d   4 phys    0.4728 s    0.3277 s  -30.7 %  -41.6   identical
+fixture3d   8         0.3588 s    0.2610 s  -27.2 %  n/a     identical
+stripes 1/4 1         0.7611 s    0.6532 s  -14.2 %  -17.1   identical
+stripes 3/4 1         1.9156 s    1.1343 s  -40.8 %  -40.0   identical
+random s=1  1         2.1683 s    1.3579 s  -37.4 %  -42.1   identical
+random s=10 1         2.2315 s    1.5259 s  -31.6 %  -44.1   identical
+random s=5  1         1.5852 s    1.0519 s  -33.6 %  -40.7   identical
+random s=20 1         2.0508 s    1.6521 s  -19.4 %  -40.4   identical
+random s=40 1         1.3517 s    1.1559 s  -14.5 %  -33.5   identical
+2D random 10 1        0.2586 s    0.1712 s  -33.8 %  -36.1   differs (2D tree)
+```
+
+The gain carries over but is about 5 points smaller than on Zen 3 for the
+fixtures and structured cases, and clearly smaller for the high-scale random
+flows (s=20: -19 % vs -40 %; s=40: -15 % vs -34 %), so those two rows should
+not be quoted as general numbers. The 2D fixture at 4T/8T finishes in under
+45 ms; the per-side spread there is 30-46 %, so the harness reports `noise`
+although the minima dropped 27-30 %.
+
+Correctness on this host: `differential_check.py` is 400/400 bitwise
+identical both previous-vs-packed and packed-vs-`FORCE_SCALAR` (Zen 3 saw
+399/400 for the latter); the `check_flow_density.py` gate is unchanged; the
+full suite is 1466 passed. Note that `BIOIMAGE_CPP_FLOW_FORCE_SCALAR=1`
+bypasses the whole FMA translation unit and runs the portable SSE2 kernel
+(1.93 s on the 3D fixture at 1T), which is slower than the previous kernel's
+scalar-FMA default (1.55 s); this is expected, not a regression.
 
 ### Codegen trap: translation-unit growth disables inlining
 
