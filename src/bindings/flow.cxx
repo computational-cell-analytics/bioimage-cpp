@@ -159,7 +159,7 @@ void bind_flow(nb::module_ &m) {
         "_flow_trace_backend",
         &flow::trace_backend,
         "Return the internal flow tracing backend selected for the default path "
-        "('fma' or 'scalar')."
+        "('fma', 'neon' or 'scalar')."
     );
     m.def(
         "_compute_flow_density_2d_float32",

@@ -545,6 +545,158 @@ translation units.
 - **Padding away the boundary clamps**: only ~1 % (integer clamps were not on
   the critical path), kept because it simplifies the sampler.
 
+### Reproduction on Apple Silicon (2026-11-03)
+
+Setup:
+
+- **Apple M2** (4 P-cores, 4 E-cores, 16 GB), macOS 26.5, Apple clang 21.0.0,
+  Python 3.11.
+- Plain flags (`CXXFLAGS` and the other flag variables unset), Release `-O3`.
+- The laptop ran on battery with Low Power Mode on. The absolute times are
+  therefore slow. Both sides of each pair ran in the same state.
+- macOS has no CPU affinity API. The harness runs without `--cpu`, and
+  `pin_cpus` does not pin on macOS.
+- The calibration (branch vs branch) is `noise` on both fixtures at 1T and 4T.
+  The spread per side is 0.1-0.7 % at 1T.
+
+Before this round, arm64 used the portable header kernel, and
+`_flow_trace_backend()` returned `"scalar"`. The branch (`126df39`) was parity
+with `492ff9b`. All rows were `noise`: fixture3d was -0.8 % at 1T and -4 % at
+4T, from the parallel finiteness scan.
+
+The NEON port is `src/cpp/flow/flow_density_neon.cxx`. It uses the same
+packed-channel design as the SSE translation unit.
+
+- CMake builds it under the `BIOIMAGE_FLOW_NEON` option when the target is
+  `arm64` or `aarch64`. If `CMAKE_OSX_ARCHITECTURES` is set, it decides
+  instead of the host processor.
+- It needs no runtime check, and `trace_backend()` returns `"neon"`.
+- `BIOIMAGE_CPP_FLOW_FORCE_SCALAR=1` still selects the portable kernel.
+- Intrinsics: `vld1q_f32`, `vfmaq_f32`, `vcvtq_s32_f32`, `vcvtq_f32_s32`,
+  `vgetq_lane_s32`, `vdupq_laneq_f32`, `vmulq_laneq_f32`, `vextq_f32` for
+  `movehl`, `vabsq_f32` and `vcgeq/vcltq/vcgtq`. The movemask test is
+  `vshrn_n_u32` with `vget_lane_u64`.
+
+Two semantic differences to SSE do not change the result:
+
+- `vcvtq_s32_f32` saturates and converts NaN to 0. `cvttps` returns
+  `INT_MIN`. The kernel converts only clipped or bounds-tested, finite values.
+- `vmaxq/vminq` propagate NaN. `maxps/minps` return the second operand. The
+  midpoint clip uses `vmaxnmq/vminnmq`, which give the same result as SSE for
+  every finite input.
+
+Paired A/B of `492ff9b` (portable kernel) vs the NEON kernel (K = 16) on all
+cases, with ABBA x4 and 3 inner calls. All rows are `significant`:
+
+```
+case        threads   previous    neon      change   parity
+fixture3d   1         1.5367 s    0.6515 s  -57.6 %  identical
+fixture2d   1         0.1425 s    0.0765 s  -46.3 %  identical
+stripes 1/4 1         1.0165 s    0.2754 s  -72.9 %  identical
+stripes 3/4 1         1.7839 s    0.7719 s  -56.7 %  identical
+random s=1  1         2.1132 s    0.9332 s  -55.8 %  identical
+random s=10 1         1.9793 s    0.8541 s  -56.9 %  identical
+random s=5  1         1.6117 s    0.7129 s  -55.8 %  identical
+random s=20 1         1.6298 s    0.7461 s  -54.2 %  identical
+random s=40 1         0.8707 s    0.4972 s  -42.9 %  identical
+2D random 10 1        0.2370 s    0.1209 s  -49.0 %  differs (2D tree)
+fixture3d   4 P       0.4271 s    0.1861 s  -56.4 %  identical
+fixture2d   4 P       0.0368 s    0.0203 s  -44.9 %  identical
+stripes 1/4 4 P       0.2635 s    0.0782 s  -70.3 %  identical
+stripes 3/4 4 P       0.4540 s    0.2016 s  -55.6 %  identical
+random s=1  4 P       0.5576 s    0.2437 s  -56.3 %  identical
+random s=10 4 P       0.6323 s    0.2554 s  -59.6 %  identical
+random s=5  4 P       0.4386 s    0.1931 s  -56.0 %  identical
+random s=20 4 P       0.5436 s    0.2322 s  -57.3 %  identical
+random s=40 4 P       0.2846 s    0.1517 s  -46.7 %  identical
+2D random 10 4 P      0.0613 s    0.0318 s  -48.1 %  differs (2D tree)
+```
+
+The gain is larger than on x86 (-30..-40 %). The lane count is the main
+reason.
+
+**Lane-count sweep.** Each value is the minimum at 1T from a paired run
+against the previous best K:
+
+```
+K      fixture3d   fixture2d   stripes 1/4
+2      1.416 s     0.226 s     0.897 s
+3      0.988 s     0.153 s     0.983 s
+4      0.770 s     0.118 s     0.894 s
+6      0.666 s     0.083 s     0.627 s
+8      0.658 s     0.078 s     0.483 s
+10     0.656 s     0.077 s     0.399 s
+12     0.657 s     0.077 s     0.344 s
+16     0.652 s     0.077 s     0.279 s
+24     0.657 s     0.076 s     0.278 s
+32     0.656 s     0.077 s     0.281 s
+```
+
+- The fixtures do not improve after K = 8.
+- K = 16 also wins on flows where few lanes of a group survive. Against
+  K = 8, it is -42 % on stripes 1/4, -4..-14 % on random s=10/5/20/40 and
+  -3 % on 2D random 10. The other rows are `noise`.
+- K = 24 and K = 32 are parity with K = 16. The only exception is random s=40,
+  at -5 %.
+- K = 16 is the default. `BIOIMAGE_FLOW_NEON_LANES` overrides it for sweeps.
+
+On Zen 3, a full FP register file limited the kernel, so K = 4 was best. The
+M2 core has 32 vector registers and a much larger reorder window. It overlaps
+more independent chains, so K = 4 is 14 % (3D) to 34 % (2D) slower here.
+
+**Codegen.** We emitted the assembly of the translation unit with the exact
+build command. The chunk lambdas of `trace_all_packed<2,16>` and `<3,16>` make
+no out-of-line call. The compiler inlines `sample_packed`, `step_packed` and
+`trace_block_packed`. The 3D function has 255 `fmla`, which is 16 lanes x 15
+plus 15 for the K = 1 tail. The linker strips local symbols from the `.so`
+(`-Wl,-x -Wl,-S`), so `otool -tV` on the `.so` cannot name them. Inspect the
+object file or the `-S` output instead.
+
+**Contraction differs from GCC.** The first port used the unfused position
+update of the SSE kernel, `pos + (dt * step)`. It matched the portable kernel
+bitwise on the fixtures and on all 400 differential cases. It differed on the
+chaotic random flows: on random s=10, 38 % of the voxels differed, with equal
+sums. The cause is the default `-ffp-contract=on` of clang. It fuses
+`proposed[axis] += dt * step[axis]` in the scalar kernel into one FMA. The GCC
+build does not, because the unfused SSE kernel matches it bitwise. The NEON
+kernel now fuses the update with `vfmaq_f32(pos, dt, step)`. Every 3D case is
+then bitwise identical to the arm64 portable kernel, and the speed is parity
+(-1 %, `noise`). The difference on 2D random 10 comes from the weight-tree
+sampler, as on x86.
+
+**Correctness.**
+
+- `differential_check.py`: 400/400 bitwise identical for `492ff9b` vs NEON,
+  and 400/400 for NEON vs `FORCE_SCALAR=1`.
+- `check_flow_density.py --dim both --repeats 3` is unchanged: 3D
+  `rel_diff = 0.0470`, `pearson = 0.9690`, 2D `0.0201` / `0.9975`.
+- Full suite: 1443 passed, 21 skipped. The skipped tests need optional
+  packages (nifty, skfmm, pygeodesic) or the x86-only AVX2 filter backends.
+- The parity test is now `test_forced_scalar_matches_simd_backend`. It
+  accepts `"fma"` and `"neon"`.
+
+**Unification (step 6): keep two translation units.** The two kernels have the
+same structure. But a `detail/simd4.hxx` wrapper does not remove three
+differences between the platforms:
+
+- the lane count (4 vs 16),
+- the contraction of the position update, which matches the scalar kernel of
+  each compiler,
+- the NaN semantics of the clip.
+
+A shared header can also expose the x86 translation unit to the inlining
+budget of GCC again (see the codegen trap). Decide again after a measurement
+of the x86 kernel with K > 4. Zen 3 measured K = 6 as parity, but nobody tried
+K >= 8.
+
+**Open items.**
+
+- Measure K = 16 for the x86 kernel. Without AVX-512 there are only 16 XMM
+  registers, so spills are likely.
+- Measure an E-core-aware thread count. We did not measure 8T, because 4 of
+  the 8 cores are efficiency cores.
+- Repeat the table on AC power with Low Power Mode off.
+
 ## Correctness
 
 - The current suite reports 1057 passed / 8 skipped. The 17
