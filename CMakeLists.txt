@@ -39,14 +39,41 @@ target_compile_options(_core PRIVATE
     $<$<NOT:$<CONFIG:Debug>>:-O3>
 )
 
+# Target architecture for the ISA-specific kernels. CMAKE_SYSTEM_PROCESSOR is
+# the host processor, so it is wrong for a cross build:
+# - macOS selects the target through CMAKE_OSX_ARCHITECTURES (cibuildwheel
+#   builds the x86_64 wheel on an arm64 runner),
+# - MSVC selects it through the generator platform (-A ARM64).
+# A multi-architecture build (universal2) gets no ISA-specific kernel.
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    list(LENGTH CMAKE_OSX_ARCHITECTURES _bioimage_n_archs)
+    if(_bioimage_n_archs EQUAL 1)
+        set(_bioimage_target_arch "${CMAKE_OSX_ARCHITECTURES}")
+    else()
+        set(_bioimage_target_arch "multiple")
+    endif()
+elseif(MSVC AND CMAKE_CXX_COMPILER_ARCHITECTURE_ID)
+    set(_bioimage_target_arch "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}")
+else()
+    set(_bioimage_target_arch "${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+string(TOLOWER "${_bioimage_target_arch}" _bioimage_target_arch)
+set(_bioimage_target_x86 OFF)
+set(_bioimage_target_arm64 OFF)
+if(_bioimage_target_arch MATCHES "^(x86_64|amd64|x64|i[3-6]86|x86)$")
+    set(_bioimage_target_x86 ON)
+elseif(_bioimage_target_arch MATCHES "^(arm64|aarch64)$")
+    set(_bioimage_target_arm64 ON)
+endif()
+message(STATUS "bioimage_cpp: ISA-specific kernels target '${_bioimage_target_arch}'")
+
 option(
     BIOIMAGE_FLOW_FMA_DISPATCH
     "Build an x86 FMA-specialized flow tracer with runtime CPU dispatch"
     ON
 )
 if(BIOIMAGE_FLOW_FMA_DISPATCH)
-    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _bioimage_system_processor)
-    if(_bioimage_system_processor MATCHES "^(x86_64|amd64|i[3-6]86)$")
+    if(_bioimage_target_x86)
         if(MSVC)
             target_sources(_core PRIVATE src/cpp/flow/flow_density_fma.cxx)
             set_property(
@@ -70,13 +97,22 @@ if(BIOIMAGE_FLOW_FMA_DISPATCH)
 endif()
 
 option(
+    BIOIMAGE_FLOW_NEON
+    "Build the arm64 NEON packed flow tracer (NEON+FMA are baseline on arm64)"
+    ON
+)
+if(BIOIMAGE_FLOW_NEON AND _bioimage_target_arm64 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_sources(_core PRIVATE src/cpp/flow/flow_density_neon.cxx)
+    target_compile_definitions(_core PRIVATE BIOIMAGE_FLOW_NEON=1)
+endif()
+
+option(
     BIOIMAGE_FILTERS_AVX2_DISPATCH
     "Build x86 AVX2/FMA filter kernels with runtime CPU dispatch"
     ON
 )
 if(BIOIMAGE_FILTERS_AVX2_DISPATCH)
-    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _bioimage_filters_processor)
-    if(_bioimage_filters_processor MATCHES "^(x86_64|amd64|i[3-6]86)$")
+    if(_bioimage_target_x86)
         if(MSVC)
             target_sources(
                 _core PRIVATE
