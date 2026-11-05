@@ -677,12 +677,67 @@ bool try_trace_all_fma(
 
 #endif
 
+#if defined(BIOIMAGE_FLOW_NEON)
+
+// NEON+FMA is baseline on arm64, so the packed tracer needs no runtime check.
+void trace_all_neon_2d(
+    std::vector<std::array<float, 2>> &positions,
+    const std::array<const float *, 2> &channels,
+    const GridLayout<2> &grid,
+    const std::uint8_t *mask,
+    std::size_t n_threads,
+    std::size_t n_iter,
+    float dt,
+    float tol
+);
+
+void trace_all_neon_3d(
+    std::vector<std::array<float, 3>> &positions,
+    const std::array<const float *, 3> &channels,
+    const GridLayout<3> &grid,
+    const std::uint8_t *mask,
+    std::size_t n_threads,
+    std::size_t n_iter,
+    float dt,
+    float tol
+);
+
+template <std::size_t D>
+bool try_trace_all_neon(
+    std::vector<std::array<float, D>> &positions,
+    const std::array<const float *, D> &channels,
+    const GridLayout<D> &grid,
+    const std::uint8_t *mask,
+    const std::size_t n_threads,
+    const std::size_t n_iter,
+    const float dt,
+    const float tol
+) {
+    if (force_scalar_requested()) {
+        return false;
+    }
+    if constexpr (D == 2) {
+        trace_all_neon_2d(positions, channels, grid, mask, n_threads, n_iter, dt, tol);
+    } else {
+        trace_all_neon_3d(positions, channels, grid, mask, n_threads, n_iter, dt, tol);
+    }
+    return true;
+}
+
+#endif
+
 } // namespace detail
 
 // Name of the tracer the default RK2/convergence/mask path will use on this
-// machine: "fma" (runtime-dispatched FMA translation unit) or "scalar"
-// (portable kernel). Exposed to Python as `_core._flow_trace_backend`.
+// machine: "fma" (runtime-dispatched x86 FMA translation unit), "neon" (arm64
+// translation unit) or "scalar" (portable kernel). Exposed to Python as
+// `_core._flow_trace_backend`.
 inline const char *trace_backend() noexcept {
+#if defined(BIOIMAGE_FLOW_NEON)
+    if (!detail::force_scalar_requested()) {
+        return "neon";
+    }
+#endif
 #if defined(BIOIMAGE_FLOW_FMA_DISPATCH)
     if (!detail::force_scalar_requested() && detail::runtime_fma_supported()) {
         return "fma";
@@ -785,6 +840,13 @@ void compute_flow_density(
                         n_iter,
                         dt,
                         tol
+                    )) {
+                    break;
+                }
+#endif
+#if defined(BIOIMAGE_FLOW_NEON)
+                if (detail::try_trace_all_neon<D>(
+                        positions, channels, grid, fg_mask.data, n_threads, n_iter, dt, tol
                     )) {
                     break;
                 }

@@ -58,6 +58,11 @@ def preload_core(so_path: str | os.PathLike | None) -> None:
 
 def pin_cpus(cpus: str | None) -> list[int]:
     """Pin the current process to ``cpus`` ('36,37') before allocating data."""
+    if not hasattr(os, "sched_setaffinity"):
+        # macOS has no affinity API, so the scheduler places the threads.
+        if cpus:
+            raise SystemExit("--cpu is not supported on this platform")
+        return list(range(os.cpu_count() or 1))
     if not cpus:
         return sorted(os.sched_getaffinity(0))
     selected = {int(c) for c in cpus.split(",") if c}

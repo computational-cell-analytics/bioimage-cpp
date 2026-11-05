@@ -70,6 +70,25 @@ if(BIOIMAGE_FLOW_FMA_DISPATCH)
 endif()
 
 option(
+    BIOIMAGE_FLOW_NEON
+    "Build the arm64 NEON packed flow tracer (NEON+FMA are baseline on arm64)"
+    ON
+)
+if(BIOIMAGE_FLOW_NEON AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _bioimage_neon_processor)
+    # CMAKE_OSX_ARCHITECTURES, if set, overrides the host processor.
+    if(CMAKE_OSX_ARCHITECTURES)
+        set(_bioimage_neon_target "${CMAKE_OSX_ARCHITECTURES}")
+    else()
+        set(_bioimage_neon_target "${_bioimage_neon_processor}")
+    endif()
+    if(_bioimage_neon_target MATCHES "^(arm64|aarch64)$")
+        target_sources(_core PRIVATE src/cpp/flow/flow_density_neon.cxx)
+        target_compile_definitions(_core PRIVATE BIOIMAGE_FLOW_NEON=1)
+    endif()
+endif()
+
+option(
     BIOIMAGE_FILTERS_AVX2_DISPATCH
     "Build x86 AVX2/FMA filter kernels with runtime CPU dispatch"
     ON

@@ -266,10 +266,11 @@ def test_large_finite_flow_is_accepted_multithreaded():
     assert density.sum() == np.prod(shape)
 
 
-def test_forced_scalar_matches_fma_backend(monkeypatch):
+def test_forced_scalar_matches_simd_backend(monkeypatch):
     monkeypatch.delenv("BIOIMAGE_CPP_FLOW_FORCE_SCALAR", raising=False)
-    if bic._core._flow_trace_backend() != "fma":
-        pytest.skip("FMA flow backend is not available on this CPU/build")
+    backend = bic._core._flow_trace_backend()
+    if backend not in ("fma", "neon"):
+        pytest.skip("no SIMD flow backend is available on this CPU/build")
 
     rng = np.random.default_rng(2026)
     cases = []
@@ -291,7 +292,7 @@ def test_forced_scalar_matches_fma_backend(monkeypatch):
     assert bic._core._flow_trace_backend() == "scalar"
     scalar = run_all()
     monkeypatch.setenv("BIOIMAGE_CPP_FLOW_FORCE_SCALAR", "0")
-    assert bic._core._flow_trace_backend() == "fma"
+    assert bic._core._flow_trace_backend() == backend
 
     # The two backends may differ in floating-point contraction, so the bar is
     # particle conservation plus near-identical densities, not bitwise equality.
