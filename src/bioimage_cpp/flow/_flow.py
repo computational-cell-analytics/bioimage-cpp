@@ -96,12 +96,13 @@ def compute_flow_density(
 
     Notes
     -----
-    On x86-64 CPUs with AVX and FMA, the default settings (``method="rk2"``,
-    ``tol > 0``, ``restrict_to_mask=True``) use a vectorized tracer that first
-    repacks the flow field into channel-last storage. This allocates a
-    temporary buffer of roughly the size of ``flow`` for the duration of the
-    call. Set the environment variable ``BIOIMAGE_CPP_FLOW_FORCE_SCALAR=1`` to
-    use the portable scalar tracer instead.
+    On x86-64 CPUs with AVX and FMA and on arm64, the default settings
+    (``method="rk2"``, ``tol > 0``, ``restrict_to_mask=True``) use a vectorized
+    tracer that first repacks the flow field into channel-last storage. This
+    allocates a temporary buffer of roughly the size of ``flow`` for the
+    duration of the call. Set the environment variable
+    ``BIOIMAGE_CPP_FLOW_FORCE_SCALAR=1`` to use the portable scalar tracer
+    instead.
 
     Returns
     -------
