@@ -586,7 +586,8 @@ Two semantic differences to SSE do not change the result:
   every finite input.
 
 Paired A/B of `492ff9b` (portable kernel) vs the NEON kernel (K = 16) on all
-cases, with ABBA x4 and 3 inner calls. All rows are `significant`:
+cases, with ABBA x4 and 3 inner calls. All rows are `significant`. The 4T
+rows are not pinned, so macOS can put threads on the efficiency cores:
 
 ```
 case        threads   previous    neon      change   parity
@@ -600,16 +601,16 @@ random s=5  1         1.6117 s    0.7129 s  -55.8 %  identical
 random s=20 1         1.6298 s    0.7461 s  -54.2 %  identical
 random s=40 1         0.8707 s    0.4972 s  -42.9 %  identical
 2D random 10 1        0.2370 s    0.1209 s  -49.0 %  differs (2D tree)
-fixture3d   4 P       0.4271 s    0.1861 s  -56.4 %  identical
-fixture2d   4 P       0.0368 s    0.0203 s  -44.9 %  identical
-stripes 1/4 4 P       0.2635 s    0.0782 s  -70.3 %  identical
-stripes 3/4 4 P       0.4540 s    0.2016 s  -55.6 %  identical
-random s=1  4 P       0.5576 s    0.2437 s  -56.3 %  identical
-random s=10 4 P       0.6323 s    0.2554 s  -59.6 %  identical
-random s=5  4 P       0.4386 s    0.1931 s  -56.0 %  identical
-random s=20 4 P       0.5436 s    0.2322 s  -57.3 %  identical
-random s=40 4 P       0.2846 s    0.1517 s  -46.7 %  identical
-2D random 10 4 P      0.0613 s    0.0318 s  -48.1 %  differs (2D tree)
+fixture3d   4         0.4271 s    0.1861 s  -56.4 %  identical
+fixture2d   4         0.0368 s    0.0203 s  -44.9 %  identical
+stripes 1/4 4         0.2635 s    0.0782 s  -70.3 %  identical
+stripes 3/4 4         0.4540 s    0.2016 s  -55.6 %  identical
+random s=1  4         0.5576 s    0.2437 s  -56.3 %  identical
+random s=10 4         0.6323 s    0.2554 s  -59.6 %  identical
+random s=5  4         0.4386 s    0.1931 s  -56.0 %  identical
+random s=20 4         0.5436 s    0.2322 s  -57.3 %  identical
+random s=40 4         0.2846 s    0.1517 s  -46.7 %  identical
+2D random 10 4        0.0613 s    0.0318 s  -48.1 %  differs (2D tree)
 ```
 
 The gain is larger than on x86 (-30..-40 %). The lane count is the main
@@ -642,14 +643,17 @@ K      fixture3d   fixture2d   stripes 1/4
 
 On Zen 3, a full FP register file limited the kernel, so K = 4 was best. The
 M2 core has 32 vector registers and a much larger reorder window. It overlaps
-more independent chains, so K = 4 is 14 % (3D) to 34 % (2D) slower here.
+more independent chains, so K = 4 is 18 % (3D) to 53 % (2D) slower than
+K = 16 here.
 
 **Codegen.** We emitted the assembly of the translation unit with the exact
 build command. The chunk lambdas of `trace_all_packed<2,16>` and `<3,16>` make
 no out-of-line call. The compiler inlines `sample_packed`, `step_packed` and
-`trace_block_packed`. The 3D function has 255 `fmla`, which is 16 lanes x 15
-plus 15 for the K = 1 tail. The linker strips local symbols from the `.so`
-(`-Wl,-x -Wl,-S`), so `otool -tV` on the `.so` cannot name them. Inspect the
+`trace_block_packed`. The 3D function has 272 `fmla`, which is 16 lanes x 16
+plus 16 for the K = 1 tail. Each lane-step has 7 lerps per sample, one
+midpoint FMA and the fused position update. The 2D function has 68 `fmla`
+(16 x 4 + 4). The unfused first port had 255 (16 x 15 + 15) in 3D. The
+linker strips local symbols from the `.so` (`-Wl,-x -Wl,-S`), so `otool -tV` on the `.so` cannot name them. Inspect the
 object file or the `-S` output instead.
 
 **Contraction differs from GCC.** The first port used the unfused position
@@ -693,6 +697,10 @@ K >= 8.
 
 - Measure K = 16 for the x86 kernel. Without AVX-512 there are only 16 XMM
   registers, so spills are likely.
+- Measure parity with GCC on Linux aarch64 before those wheels ship. GCC
+  probably does not fuse the scalar position update, as on x86. NEON vs
+  `FORCE_SCALAR=1` is then not bitwise identical there. The parity test
+  accepts this, but the bitwise claims above apply to clang only.
 - Measure an E-core-aware thread count. We did not measure 8T, because 4 of
   the 8 cores are efficiency cores.
 - Repeat the table on AC power with Low Power Mode off.
